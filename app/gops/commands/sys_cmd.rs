@@ -12,11 +12,11 @@ use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::ModelSTD;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
+use galaxy_ops::project::load_value_file;
 use galaxy_ops::system::operator::SysOperator;
 use galaxy_ops::system::setting::SysSetting;
 use galaxy_ops::system::{SysKind, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
-use orion_conf::YamlIO;
 use orion_infra::path::ensure_path;
 use orion_variate::archive::compress;
 use orion_variate::update::DownloadOptions;
@@ -355,19 +355,8 @@ impl SysCommandHandler {
             .update_local(accessor, &current_dir, &options)
             .await
             .err_conv()?;
-        operator.init_setting_value_in(val_path.clone())?;
-
-        // 值文件不落盘：未创建时打印一份可用变量参考，便于按需覆盖
-        if !val_path.sys_value_file().exists() {
-            let reference = operator.value_reference()?;
-            if !reference.is_empty() {
-                println!("\n{reference}");
-                println!(
-                    "提示：如需覆盖，只把要改的项写入 {}",
-                    val_path.sys_value_file().display()
-                );
-            }
-        }
+        // 初始化辅助值文件；同时生成 values/sys_value.yml 注释模板（可用变量已注释）
+        operator.init_setting_value_in(val_path)?;
         Ok(())
     }
 
@@ -416,7 +405,7 @@ impl SysCommandHandler {
                 .await
                 .err_conv()?;
         }
-        // 确保本地化辅助值文件存在（不生成 sys_value.yml）；变量未解析时会报错
+        // 确保本地化值文件存在（生成 sys_value.yml 注释模板）；变量未解析时会报错
         spec.init_setting_value_in(val_path.clone())?;
 
         // 基线：系统解析出的默认值（sys/merged_vars.yml 的 system 段），
@@ -424,11 +413,10 @@ impl SysCommandHandler {
         let mut dict = OriginDict::from(spec.system_default_values().err_conv()?);
         dict.set_source("sys-defaults");
 
-        // 叠加值文件（可选，可为部分覆盖）
+        // 叠加值文件（可选，可为部分覆盖；全注释模板等价于空覆盖）
         let value_file = val_path.sys_value_file();
         if value_file.exists() {
-            let mut sys_dict =
-                OriginDict::from(ValueDict::load_yaml(&value_file).source_resource()?);
+            let mut sys_dict = OriginDict::from(load_value_file(&value_file)?);
             sys_dict.set_source("sys-setting");
             dict.merge(&sys_dict);
         }
@@ -436,8 +424,7 @@ impl SysCommandHandler {
         // 叠加客户覆盖值 values/value.yml（若存在），优先于系统默认与值文件
         let user_value_file = val_path.root().join(USER_VALUE_FILE);
         if user_value_file.exists() {
-            let mut user_dict =
-                OriginDict::from(ValueDict::load_yaml(&user_value_file).source_resource()?);
+            let mut user_dict = OriginDict::from(load_value_file(&user_value_file)?);
             user_dict.set_source("customer");
             dict.merge(&user_dict);
         }
@@ -1018,12 +1005,18 @@ mod tests {
             "unexpected .env: {env}"
         );
         assert!(env.contains("REPLICAS=1"), "unexpected .env: {env}");
-        // 值文件不再自动生成：默认值取自 sys/merged_vars.yml，值文件只写要覆盖的项
+
+        // 值文件是注释模板：存在但默认不生效（不钉住系统默认值）
+        let value_file = temp_dir.path().join("compose_demo/values/sys_value.yml");
+        let text = std::fs::read_to_string(&value_file).unwrap();
         assert!(
-            !temp_dir
-                .path()
-                .join("compose_demo/values/sys_value.yml")
-                .exists()
+            text.lines()
+                .all(|l| l.trim().is_empty() || l.trim().starts_with('#')),
+            "template should be fully commented: {text}"
+        );
+        assert!(
+            text.contains("# REPLICAS: 1"),
+            "template missing vars: {text}"
         );
     }
 

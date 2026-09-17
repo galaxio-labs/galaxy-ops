@@ -70,6 +70,22 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
     Ok(sys_dict)
 }
 
+/// 读取值文件（YAML 映射）。
+///
+/// 允许“全注释/空”文件：值文件模板把可用变量以注释形式列出，未取消注释时内容全为注释，
+/// 此时视为**空覆盖**（不钉住任何默认值），而不是报解析错误。
+pub fn load_value_file(path: &Path) -> MainResult<ValueDict> {
+    let text = std::fs::read_to_string(path).source_resource()?;
+    let has_content = text.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    });
+    if !has_content {
+        return Ok(ValueDict::default());
+    }
+    Ok(ValueDict::load_yaml(path).source_resource()?)
+}
+
 pub fn mix_used_value(
     options: LocalizeOptions,
     vars: &VarCollection,
@@ -83,8 +99,7 @@ pub fn mix_used_value(
     // 加载用户值文件（如果存在）
     let user_value_path = mod_value.parent().unwrap().join(USER_VALUE_FILE);
     if user_value_path.exists() {
-        let mut user_dict =
-            OriginDict::from(ValueDict::load_yaml(&user_value_path).source_resource()?);
+        let mut user_dict = OriginDict::from(load_value_file(&user_value_path)?);
         user_dict.set_source("mod-cust");
         used.merge(&user_dict);
     }
@@ -464,5 +479,28 @@ mod tests {
 
         let result = load_sys_opr_value(temp_dir.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_value_file_allows_comment_only() {
+        test_init();
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("sys_value.yml");
+
+        // 全注释（值文件模板未取消注释）-> 空覆盖，不报错
+        std::fs::write(&path, "# HTTP_PORT: 8080\n# REPLICAS: 3\n").unwrap();
+        assert_eq!(load_value_file(&path).assert().len(), 0);
+
+        // 空文件同样视为空覆盖
+        std::fs::write(&path, "\n").unwrap();
+        assert_eq!(load_value_file(&path).assert().len(), 0);
+
+        // 有内容时正常解析
+        std::fs::write(&path, "HTTP_PORT: 9090\n").unwrap();
+        let dict = load_value_file(&path).assert();
+        assert_eq!(
+            dict.get("HTTP_PORT").map(|v| v.to_string()).as_deref(),
+            Some("9090")
+        );
     }
 }

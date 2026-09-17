@@ -189,7 +189,7 @@ gops sys uninstall  # = docker compose down
 
 2. **`gops sys new` 需要交互选择系统型号**（`dialoguer::Select`）。脚本化时可通过环境变量 `TEST_MODE=1` 自动选择第一个支持型号。
 
-3. **`gops mod update` / `sys update`**：负责下载依赖、解析变量（生成 `sys/merged_vars.yml`）并初始化本地化辅助值文件（`values/setting/mod_value.yml` 等）。该步骤**需要网络**（下载 `mod_list.yml` 指向的仓库、`artifact.yml` 指向的构件）。未创建 `values/sys_value.yml` 时会打印一份可用变量参考（不落盘）。
+3. **`gops mod update` / `sys update`**：负责下载依赖、解析变量（生成 `sys/merged_vars.yml`）并初始化值文件。生成的 `values/sys_value.yml` 是**注释模板**（可用变量已注释，默认不生效）——取消注释需要覆盖的项即可，其余取系统默认值。该步骤**需要网络**（下载 `mod_list.yml` 指向的仓库、`artifact.yml` 指向的构件）。
 
 4. **`gops mod localize` / `sys localize`**：`sys localize` 在系统变量未解析时会**自动先 `update`**，再渲染 `.env`（= `sys/merged_vars.yml` 默认值 ⊕ `values/sys_value.yml` ⊕ `values/value.yml`，后两者可选、可只写要覆盖的项）；`--only` 跳过 update。`mod localize` 仍依赖先 `mod update`。
 

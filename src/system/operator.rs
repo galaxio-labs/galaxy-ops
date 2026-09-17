@@ -186,22 +186,31 @@ impl SysOperator {
         self.paths.resolve_merged_vars_file().exists()
     }
 
-    /// 可用系统变量参考（名称 + 默认值），供写入值文件时按需覆盖；不落盘。
+    /// 值文件模板：把可用系统变量以**注释**形式列出（默认值来自 `sys/merged_vars.yml`）。
     ///
-    /// 系统默认值以 `sys/merged_vars.yml` 为准，值文件只需写要覆盖的项。
-    /// 无默认值时返回空字符串。
+    /// 取消注释并改写需要的项即可覆盖；全部保持注释时等价于空覆盖，不会钉住默认值。
     pub fn value_reference(&self) -> MainResult<String> {
+        let mut out = format!(
+            "# 系统变量参考（默认值来自 {}）。\n\
+             # 只取消注释需要覆盖的项并修改数值，其余取默认值。\n",
+            self.paths.resolve_merged_vars_file().display()
+        );
         let defaults = self.system_default_values()?;
         if defaults.is_empty() {
-            return Ok(String::new());
+            return Ok(out);
         }
         let body = serde_yaml::to_string(&defaults).map_err(|e| {
             crate::error::MainReason::logic_detail(format!("序列化变量参考失败: {e}"))
         })?;
-        Ok(format!(
-            "# 可用系统变量（默认值来自 {}）；值文件只需写要覆盖的项：\n{body}",
-            self.paths.resolve_merged_vars_file().display()
-        ))
+        for line in body.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            out.push_str("# ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        Ok(out)
     }
 }
 
@@ -241,8 +250,8 @@ impl SysOperator {
     /// 运维项目会为每个系统单独维护 `values/<sys_name>`（客户值）；在项目内执行 `gops sys`
     /// 时应把值落到那里，而不是系统自带的 `<sys>/values`（后者在旧版本导入时可能只是包内的副本）。
     ///
-    /// 注意：**不会**生成 `values/sys_value.yml`（系统默认值以 `sys/merged_vars.yml` 为准，
-    /// 值文件只写需要覆盖的项）；仅初始化本地化所需的辅助值文件（`mod_value.yml`）。
+    /// 注意：生成的 `values/sys_value.yml` 是**注释模板**（可用变量全部注释），默认不生效；
+    /// 用户取消注释需要覆盖的项即可。
     pub fn init_setting_value_in(&self, value_root: SysValuePaths) -> MainResult<SysValuePaths> {
         let value_root = value_root.ensure_root().source_resource()?;
         // 系统变量必须先解析：本地化基线来自 sys/merged_vars.yml
@@ -276,6 +285,12 @@ impl SysOperator {
             setting_vars
                 .save_yaml(&setting_val_path.mod_value_file())
                 .source_resource()?;
+        }
+        // 值文件模板：可用变量以注释形式列出，默认不生效（不钉住系统默认值），
+        // 用户取消注释并改写需要的项即可覆盖。
+        let sys_value_file = value_root.sys_value_file();
+        if !sys_value_file.exists() {
+            std::fs::write(&sys_value_file, self.value_reference()?).source_resource()?;
         }
         Ok(value_root)
     }
@@ -452,15 +467,20 @@ pub mod tests {
             Some("legacy-image")
         );
 
-        // 参考可直接用于值文件
+        // 参考以注释形式给出，可直接取消注释使用
         assert!(
             proj.value_reference()?
-                .contains("SERVICE_IMAGE: legacy-image")
+                .contains("# SERVICE_IMAGE: legacy-image")
         );
 
-        // 值文件不再落盘
+        // 生成的值文件是注释模板：存在但默认不生效
         let value_path = proj.init_setting_value()?;
-        assert!(!value_path.sys_value_file().exists());
+        let text = std::fs::read_to_string(value_path.sys_value_file()).unwrap();
+        assert!(text.contains("# SERVICE_IMAGE: legacy-image"));
+        assert!(
+            text.lines()
+                .all(|l| l.trim().is_empty() || l.trim().starts_with('#'))
+        );
         Ok(())
     }
 

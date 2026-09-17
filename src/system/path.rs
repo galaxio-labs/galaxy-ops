@@ -156,6 +156,12 @@ impl SysValuePaths {
             root: ensure_path(self.root.join(path.as_ref()))?,
         })
     }
+    /// 确保值目录本身存在（不改动已存在的目录或符号链接）。
+    pub fn ensure_root(self) -> PathResult<Self> {
+        Ok(Self {
+            root: ensure_path(self.root)?,
+        })
+    }
 }
 
 #[cfg(test)]

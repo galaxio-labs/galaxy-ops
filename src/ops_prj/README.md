@@ -34,6 +34,8 @@ src/ops_prj/
 
 > 历史：原 `ops-systems.yml` 已合并进 `ops-prj.yml`；加载时若存在旧的 `ops-systems.yml` 会自动合并并迁移到单文件。
 
+`owner_project_value_dir(sys_dir)`：给定项目内的系统目录，返回项目为它维护的值目录 `values/<sys_name>`（依据上层 `ops-prj.yml` 与系统名匹配）。`gops sys localize` / `sys update` 用它定位客户值，因此不依赖 `<sys>/values` 符号链接是否完整。
+
 ### `import.rs`
 
 系统导入与重新导入逻辑，对应 `gops prj import` / `gops prj reimport`。

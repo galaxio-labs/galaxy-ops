@@ -195,6 +195,15 @@ impl SysOperator {
         let value_root = SysValuePaths::from(PathBuf::from(self.root_local()))
             .ensure_join(VALUE_DIR)
             .source_resource()?;
+        self.init_setting_value_in(value_root)
+    }
+
+    /// 与 [`Self::init_setting_value`] 相同，但把值文件写入指定的值目录。
+    ///
+    /// 运维项目会为每个系统单独维护 `values/<sys_name>`（客户值）；在项目内执行 `gops sys`
+    /// 时应把值落到那里，而不是系统自带的 `<sys>/values`（后者在旧版本导入时可能只是包内的副本）。
+    pub fn init_setting_value_in(&self, value_root: SysValuePaths) -> MainResult<SysValuePaths> {
+        let value_root = value_root.ensure_root().source_resource()?;
         //let mut all_vars = VarCollection::default();
         for x in self.sys_spec().mod_list().iter() {
             if let Some(mmo) = x.get_target_spec()? {

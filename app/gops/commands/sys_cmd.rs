@@ -24,6 +24,15 @@ use orion_vars::vars::{OriginDict, ValueDict};
 
 use crate::commands::common::DebugLogArgs;
 
+/// 解析当前系统的值目录：若系统属于某个运维项目（父目录有 `ops-prj.yml` 且列出该系统），
+/// 使用项目为该系统维护的 `values/<sys_name>`（客户值）；否则使用 `<sys>/values`。
+fn resolve_sys_value_path(sys_dir: &Path) -> SysValuePaths {
+    match galaxy_ops::ops_prj::project::owner_project_value_dir(sys_dir) {
+        Some(dir) => SysValuePaths::from(dir),
+        None => SysValuePaths::from(sys_dir.to_path_buf()).join(VALUE_DIR),
+    }
+}
+
 // === 参数定义 ===
 
 #[derive(Debug, Args, Getters)]
@@ -345,7 +354,7 @@ impl SysCommandHandler {
             .update_local(accessor, &current_dir, &options)
             .await
             .err_conv()?;
-        operator.init_setting_value()?;
+        operator.init_setting_value_in(resolve_sys_value_path(&current_dir))?;
         Ok(())
     }
 
@@ -384,7 +393,7 @@ impl SysCommandHandler {
         galaxy_ops::infra::configure_dfx_logging(&args);
 
         let spec = SysOperator::load(&current_dir).err_conv()?;
-        let val_path = SysValuePaths::from(current_dir.clone()).join(VALUE_DIR);
+        let val_path = resolve_sys_value_path(&current_dir);
 
         // 默认：值文件缺失时先 update（解析变量 + 初始化值），一条 localize 即可。
         // --only 跳过 update，直接用现有值（值缺失会报错）。
@@ -394,7 +403,7 @@ impl SysCommandHandler {
             spec.update_local(accessor, &current_dir, &options)
                 .await
                 .err_conv()?;
-            spec.init_setting_value()?;
+            spec.init_setting_value_in(val_path.clone())?;
         }
 
         let mut dict =
@@ -975,10 +984,66 @@ mod tests {
                 module: None,
                 only: false,
             };
-            SysCommandHandler::handle_localize(localize_args).await.unwrap();
+            SysCommandHandler::handle_localize(localize_args)
+                .await
+                .unwrap();
         }
 
         assert!(temp_dir.path().join("compose_demo/.env").exists());
-        assert!(temp_dir.path().join("compose_demo/values/sys_value.yml").exists());
+        assert!(
+            temp_dir
+                .path()
+                .join("compose_demo/values/sys_value.yml")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sys_localize_prefers_ops_project_values() {
+        once_init_log();
+        let temp_dir = tempdir().unwrap();
+        let prj = temp_dir.path().join("proj");
+        std::fs::create_dir_all(&prj).unwrap();
+
+        // 1. 在项目下创建 docker-compose 系统
+        {
+            let _wd = WorkDirWithLock::change(&prj).unwrap();
+            SysCommandHandler::handle_new(SysNewArgs {
+                name: "my-sys".to_string(),
+                kind: Some("docker-compose".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+
+        // 2. 项目声明该系统并为它维护客户值（系统目录内的 values 并非符号链接）
+        std::fs::write(
+            prj.join("ops-prj.yml"),
+            "name: proj\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: my-sys\n    kind: docker-compose\n    vender: ''\n  addr:\n    url: http://example.com/my-sys.tar.gz\n",
+        )
+        .unwrap();
+        let prj_values = prj.join("values/my-sys");
+        std::fs::create_dir_all(&prj_values).unwrap();
+        std::fs::write(prj_values.join("sys_value.yml"), "HTTP_PORT: 9090\n").unwrap();
+
+        // 3. 在系统目录内 localize：应使用项目值（客户值）
+        {
+            let _wd = WorkDirWithLock::change(prj.join("my-sys")).unwrap();
+            SysCommandHandler::handle_localize(SysLocalizeArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                module: None,
+                only: false,
+            })
+            .await
+            .unwrap();
+        }
+
+        let env = std::fs::read_to_string(prj.join("my-sys/.env")).unwrap();
+        assert!(env.contains("HTTP_PORT=9090"), "unexpected .env: {env}");
+        // 项目值已存在，不应在系统目录另生成一份派生值文件
+        assert!(!prj.join("my-sys/values/sys_value.yml").exists());
     }
 }

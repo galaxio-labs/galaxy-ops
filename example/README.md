@@ -125,8 +125,9 @@ System/Module Spec（共享定义）
 ```
 
 - `gops prj import` 把同一个系统导入多个项目
-- 每个项目在 `values/<system>/` 下维护自己的 `value.yml`
+- 每个项目在 `values/<system>/` 下维护自己的值（`sys_value.yml` 为客户生效值，`value.yml` 为覆盖值）
 - `gops sys localize` / `gops mod localize` 渲染出本地化产物
+- 在项目内的系统目录执行 `gops sys localize` 时，会按上层 `ops-prj.yml` 直接使用 `values/<system>/`，不依赖 `<sys>/values` 符号链接是否完整
 
 ## docker-compose.yml 的处理方式
 

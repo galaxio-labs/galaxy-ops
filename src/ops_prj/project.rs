@@ -108,6 +108,26 @@ impl OpsProject {
         self.paths.root()
     }
 }
+
+/// 若 `sys_dir` 是某个运维项目下已导入的系统（其父目录存在 `ops-prj.yml` 且列出该系统名），
+/// 返回该项目为该系统维护的值目录 `values/<sys_name>`。
+///
+/// 用于让 `gops sys localize` / `sys update` 在运维项目内直接使用项目值（客户值），
+/// 不必依赖 `<sys>/values` 符号链接是否完整。
+pub fn owner_project_value_dir(sys_dir: &Path) -> Option<PathBuf> {
+    let sys_name = sys_dir.file_name()?.to_str()?;
+    let prj_root = sys_dir.parent()?;
+    if !prj_root.join(OPS_PRJ_CONF_FILE).exists() {
+        return None;
+    }
+    let conf = OpsProjectConf::load(prj_root).ok()?;
+    if conf.sys_models().iter().any(|s| s.sys().name() == sys_name) {
+        Some(prj_root.join("values").join(sys_name))
+    } else {
+        None
+    }
+}
+
 impl OpsProject {
     pub fn make_new(prj_path: &Path, name: &str) -> MainResult<Self> {
         let conf = OpsProjectConf::new(name, DependencySet::default());
@@ -408,5 +428,36 @@ system:
         project.save().assert();
         assert!(!root.join("ops-systems.yml").exists());
         assert!(root.join("ops-prj.yml").exists());
+    }
+
+    #[test]
+    fn test_owner_project_value_dir() {
+        test_init();
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("cust");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("ops-prj.yml"),
+            "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    url: http://example.com/web-stack.tar.gz\n",
+        )
+        .unwrap();
+        let sys_dir = root.join("web-stack");
+        std::fs::create_dir_all(&sys_dir).unwrap();
+
+        // 项目声明的系统 -> 返回项目为它维护的值目录
+        assert_eq!(
+            owner_project_value_dir(&sys_dir),
+            Some(root.join("values").join("web-stack"))
+        );
+
+        // 同层存在但项目未声明的系统 -> None
+        let other = root.join("other-sys");
+        std::fs::create_dir_all(&other).unwrap();
+        assert_eq!(owner_project_value_dir(&other), None);
+
+        // 不在任何运维项目内 -> None
+        let plain = temp_dir.path().join("plain-sys");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(owner_project_value_dir(&plain), None);
     }
 }

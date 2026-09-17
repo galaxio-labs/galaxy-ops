@@ -24,6 +24,7 @@
 ### Bug 修复
 - 修复 `values` 符号链接冲突、`convert_addr`/`build_pkg` 裸目录 panic、`mod new` 硬编码构件地址
 - 修复 `load_sys_opr_value`/`load_mod_opr_value` 值文件序列化不一致
+- 修复运维项目内 `cd <sys>; gops sys localize` 未使用项目值的问题：现在按 `ops-prj.yml` 直接解析 `values/<sys_name>/`，不再依赖 `<sys>/values` 符号链接是否完整
 
 ## [1.2.0] - 2026-05-04
 

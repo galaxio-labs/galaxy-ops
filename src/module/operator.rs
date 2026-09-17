@@ -103,19 +103,19 @@ impl ModOperator {
 
     pub fn init_setting_value(&self) -> MainResult<ModValuePaths> {
         let value_root = ModValuePaths::from(self.root_local().clone());
-        let value_root = value_root.ensure_join(VALUE_DIR).owe_logic()?;
+        let value_root = value_root.ensure_join(VALUE_DIR).source_logic()?;
         for (name, model) in self.mod_spec.targets() {
             let model_value_path = value_root
                 .clone()
                 .ensure_join(name.to_string())
-                .owe_logic()?;
+                .source_logic()?;
             let model_sys_value = model_value_path.sys_value_file();
             let model_mod_value = model_value_path.mod_value_file();
             if !model_sys_value.exists() {
                 let sys_vars = model.vars().system_vars().to_val();
-                orion_conf::ConfigIO::save_conf(&sys_vars, &model_sys_value).owe_res()?;
+                orion_conf::ConfigIO::save_conf(&sys_vars, &model_sys_value).source_resource()?;
                 let mod_vars = model.vars().module_vars().to_val();
-                orion_conf::ConfigIO::save_conf(&mod_vars, &model_mod_value).owe_res()?;
+                orion_conf::ConfigIO::save_conf(&mod_vars, &model_mod_value).source_resource()?;
             }
         }
         Ok(value_root)
@@ -135,9 +135,9 @@ impl ModOperator {
         let conf_file_v1 = root_local.join(MOD_PRJ_CONF_FILE_V1);
         let conf_file_v2 = root_local.join(MOD_PRJ_CONF_FILE_V2);
         if conf_file_v1.exists() {
-            std::fs::rename(&conf_file_v1, &conf_file_v2).owe_res()?;
+            std::fs::rename(&conf_file_v1, &conf_file_v2).source_resource()?;
         };
-        let conf = ModConf::load_conf(&conf_file_v2).owe_logic()?;
+        let conf = ModConf::load_conf(&conf_file_v2).source_logic()?;
         let root_local = root_local.to_path_buf();
         let mod_spec = ModuleSpec::load_from(&root_local).owe(ModReason::Load.into())?;
         let project = GxlProject::load_from(&root_local).owe(ModReason::Load.into())?;
@@ -161,7 +161,7 @@ impl ModOperator {
             )
         );
         let conf_file = self.root_local().join("mod-prj.yml");
-        orion_conf::ConfigIO::save_conf(&self.conf, &conf_file).owe_res()?;
+        orion_conf::ConfigIO::save_conf(&self.conf, &conf_file).source_resource()?;
         self.mod_spec
             .save_to(self.root_local(), Some("./".into()))
             .owe(ModReason::Save.into())?;
@@ -241,7 +241,7 @@ impl ModOperator {
     }
     pub fn make_test_prj(name: &str) -> MainResult<Self> {
         let prj_path = PathBuf::from(MOD_OPERATORS_ROOT).join(name);
-        make_clean_path(&prj_path).owe_logic()?;
+        make_clean_path(&prj_path).source_logic()?;
         let proj = ModOperator::make_new(&prj_path, name)?;
         proj.save()?;
         Ok(proj)
@@ -274,7 +274,7 @@ pub mod tests {
     };
     use std::path::PathBuf;
 
-    use orion_error::TestAssertWithMsg;
+    use orion_error::dev::testing::TestAssertWithMsg;
     use orion_infra::path::make_clean_path;
     use orion_variate::{
         addr::{Address, LocalPath, types::PathTemplate},
@@ -288,7 +288,7 @@ pub mod tests {
     async fn test_mod_prj_new() -> MainResult<()> {
         test_init();
         let prj_path = PathBuf::from(MOD_OPERATORS_ROOT).join("mod-new");
-        make_clean_path(&prj_path).owe_logic()?;
+        make_clean_path(&prj_path).source_logic()?;
         let proj = ModOperator::make_new(&prj_path, "mod_new")?;
         proj.save()?;
         Ok(())

@@ -5,6 +5,22 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-05-04
+
+### 重大变更
+- **Orion 错误体系升级**: 升级到 `orion-error 0.8`，同步切换到新版模块化 API 路径与 `StructError` 访问方式
+- **Orion 生态依赖统一**: 升级 `orion-infra`、`orion_conf`、`orion-accessor`、`orion-variate` 等依赖，消除 `orion-error 0.7` 与 `0.8` 同时存在导致的类型不一致问题
+
+### 改进优化
+- **错误兼容层更新**: 在 `compat` / `prelude` 中恢复 `owe_res`、`owe_conf`、`err_conv`、`with`、`want` 等旧调用入口，降低下游迁移成本
+- **错误上下文适配**: 将旧版 `get_reason`、`target`、`context`、`error_code` 调用迁移到 0.8 原生 `reason()`、`target_path()`、`contexts()` 等接口
+- **路径上下文记录修正**: 对 `Path` / `PathBuf` 上下文记录显式使用 `.display()`，适配新版 `OperationContext::record` 的 `Display` 约束
+- **测试工具入口迁移**: 将测试断言 helper 调整到 `orion_error::dev::testing` 新路径
+
+### 测试
+- `cargo check` 通过
+- `cargo test` 通过：库测试、二进制测试、集成测试与 doc tests 均已验证
+
 ## [1.1.1] - 2026-04-06
 
 ### 改进优化

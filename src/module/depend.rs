@@ -140,7 +140,7 @@ impl Dependency {
 pub mod tests {
     use std::path::PathBuf;
 
-    use orion_error::TestAssertWithMsg;
+    use orion_error::dev::testing::TestAssertWithMsg;
     use orion_variate::{
         addr::{Address, LocalPath},
         update::DownloadOptions,

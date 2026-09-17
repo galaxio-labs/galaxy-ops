@@ -1,6 +1,12 @@
-use crate::internal_prelude::*;
-
+use derive_more::From;
+use orion_error::StructError;
+use orion_error::UnifiedReason as UvsReason;
+use orion_error::conversion::ToStructError;
+use orion_error::reason::{DomainReason, ErrorCode};
+use orion_variate::addr::AddrReason;
+use serde_derive::Serialize;
 use thiserror::Error;
+
 #[derive(Clone, Debug, Serialize, PartialEq, Error, From)]
 pub enum MainReason {
     #[error("unknow")]
@@ -19,6 +25,17 @@ pub enum MainReason {
     Accessor(AddrReason),
     #[error("{0}")]
     Uvs(UvsReason),
+}
+
+impl DomainReason for MainReason {}
+
+impl From<orion_conf::error::ConfIOReason> for MainReason {
+    fn from(reason: orion_conf::error::ConfIOReason) -> Self {
+        match reason {
+            orion_conf::error::ConfIOReason::General(reason) => Self::Uvs(reason),
+            _ => Self::Uvs(UvsReason::core_conf()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Error)]
@@ -158,9 +175,9 @@ impl MainReason {
 
     pub fn from_addr_error(error: StructError<AddrReason>) -> MainError {
         StructError::new(
-            Self::Accessor(error.get_reason().clone()),
-            error.imp().detail().clone(),
-            error.imp().position().clone(),
+            Self::Accessor(error.reason().clone()),
+            error.detail().clone(),
+            error.position().clone(),
             error.contexts().to_vec(),
         )
     }
@@ -171,18 +188,18 @@ pub type MainError = StructError<MainReason>;
 pub const PATH_NOT_EXIST: &str = "path not exists";
 
 pub fn report_error(e: StructError<MainReason>) {
-    println!("Run Error (Code: {})", e.error_code());
+    println!("Run Error (Code: {})", e.reason().error_code());
     println!("--------------------------");
-    if let Some(target) = e.target() {
+    if let Some(target) = e.target_path() {
         println!("[TARGET]:\n{target}\n",);
     }
     println!("[REASON]:");
-    match e.get_reason() {
+    match e.reason() {
         MainReason::Accessor(addr_reason) => match addr_reason {
             AddrReason::Brief(msg) => {
                 println!("ACCESSOR ERROR: {msg}\n");
             }
-            AddrReason::Uvs(uvs_reason) => {
+            AddrReason::Unified(uvs_reason) => {
                 println!("ACCESSOR ERROR: {uvs_reason}\n");
             }
             AddrReason::OperationTimeoutExceeded { timeout, attempts } => {
@@ -270,7 +287,7 @@ pub fn report_error(e: StructError<MainReason>) {
         println!("\n[DETAIL]:\n{detail}",);
     }
     println!("\n[CONTEXT]:\n");
-    for x in e.context().iter() {
+    for x in e.contexts().iter() {
         println!("{x}",)
     }
 }
@@ -294,10 +311,10 @@ mod tests {
 
         let converted = MainReason::from_addr_error(source);
 
-        assert_eq!(converted.error_code(), 504);
+        assert_eq!(converted.reason().error_code(), 504);
         assert_eq!(converted.detail().as_deref(), Some("download failed"));
         assert!(matches!(
-            converted.get_reason(),
+            converted.reason(),
             MainReason::Accessor(AddrReason::RetryExhausted {
                 attempts: 3,
                 last_error,

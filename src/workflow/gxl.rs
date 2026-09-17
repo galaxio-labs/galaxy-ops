@@ -23,7 +23,7 @@ impl GxlAction {
 impl FilePersist<GxlAction> for GxlAction {
     fn save_to(&self, path: &Path, _name: Option<String>) -> SerdeResult<()> {
         let path_file = path.join(self.file());
-        std::fs::write(path_file, self.code.as_str()).owe_res()?;
+        std::fs::write(path_file, self.code.as_str()).source_resource()?;
         Ok(())
     }
 
@@ -33,7 +33,7 @@ impl FilePersist<GxlAction> for GxlAction {
             .and_then(|f| f.to_str())
             .ok_or_else(|| SerdeReason::from("bad file name".to_string()))?;
 
-        let code = std::fs::read_to_string(path).owe_res()?;
+        let code = std::fs::read_to_string(path).source_resource()?;
         Ok(Self {
             file: file_name.to_string(),
             code,

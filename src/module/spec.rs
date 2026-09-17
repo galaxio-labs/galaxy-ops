@@ -44,7 +44,7 @@ impl ModuleSpec {
     pub fn clean_other(&mut self, node: &ModelSTD) -> MainResult<()> {
         if let Some(local) = &self.local {
             let src_path = local.join(MOD_DIR);
-            let subs = get_sub_dirs(&src_path).owe_res()?;
+            let subs = get_sub_dirs(&src_path).source_resource()?;
             for sub in subs {
                 if !sub.ends_with(node.to_string().as_str()) {
                     Self::clean_path(&sub)?;
@@ -55,14 +55,14 @@ impl ModuleSpec {
     }
     fn clean_path(path: &Path) -> MainResult<()> {
         if path.exists() {
-            std::fs::remove_dir_all(path).owe_res().with(path)?;
+            std::fs::remove_dir_all(path).source_resource().with(path)?;
         }
         Ok(())
     }
     pub fn save_main(&self, path: &Path, name: Option<String>) -> MainResult<()> {
         let mod_path = path.join(name.unwrap_or(self.name().clone()));
         std::fs::create_dir_all(&mod_path)
-            .owe_conf()
+            .source_conf()
             .with(format!("path: {}", mod_path.display()))?;
 
         for node in self.targets.values() {
@@ -93,10 +93,10 @@ impl FilePersist<ModuleSpec> for ModuleSpec {
         let mod_path = path.join(name.unwrap_or(self.name().clone()));
         let src_path = mod_path.join(MOD_DIR);
         std::fs::create_dir_all(&mod_path)
-            .owe_conf()
+            .source_conf()
             .with(format!("path: {}", mod_path.display()))?;
 
-        mod_init_gitignore(&mod_path).owe_res()?;
+        mod_init_gitignore(&mod_path).source_resource()?;
         for node in self.targets.values() {
             node.save_to(&src_path, None)?;
         }
@@ -105,14 +105,14 @@ impl FilePersist<ModuleSpec> for ModuleSpec {
     }
 
     fn load_from(path: &Path) -> SerdeResult<Self> {
-        let name = path_file_name(path).owe_logic()?;
+        let name = path_file_name(path).source_logic()?;
         let name_copy = name.clone();
         let mut flag = auto_exit_log!(
             info!(target: "mod/spec", "load mod-spec {} success!", name_copy ),
             error!(target: "mod/spec", "load mod-spec {} fail!", name_copy)
         );
         let src_path = path.join(MOD_DIR);
-        let subs = get_sub_dirs(&src_path).owe_logic()?;
+        let subs = get_sub_dirs(&src_path).source_logic()?;
         let mut targets = IndexMap::new();
         for sub in subs {
             let node = MMOperator::load_from(&sub).with(&sub)?;
@@ -137,10 +137,11 @@ impl ModuleLocalizable<ModValuePaths> for ModuleSpec {
         for model in self.targets.values() {
             let mut ctx = OperationContext::want("model localize").with_auto_log();
             let model_path = val_path.clone().join(model.model().to_string());
-            ctx.record("sys-value", &model_path.sys_value_file());
+            ctx.record("sys-value", model_path.sys_value_file().display());
             //let cur_options = if model_path.sys_value_file().exists() {
-            let mut sys_vars =
-                OriginDict::from(ValueDict::load_yaml(&model_path.sys_value_file()).owe_res()?);
+            let mut sys_vars = OriginDict::from(
+                ValueDict::load_yaml(&model_path.sys_value_file()).source_resource()?,
+            );
             sys_vars.set_source("sys-setting");
             let mut cur_dict = options.raw_value().clone();
             cur_dict.merge(&sys_vars);

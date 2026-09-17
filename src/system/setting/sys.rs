@@ -99,15 +99,15 @@ impl SysSetting {
     pub fn save_local(&self, path: &Path) -> MainResult<()> {
         let vars_file_name = path.join(VARS_YML);
         let list_file_name = path.join("list.yml");
-        self.vars.save_yaml(&vars_file_name).owe_res()?;
-        self.list.save_yaml(&list_file_name).owe_res()?;
+        self.vars.save_yaml(&vars_file_name).source_resource()?;
+        self.list.save_yaml(&list_file_name).source_resource()?;
         Ok(())
     }
     pub fn load_from(root: &Path) -> MainResult<Self> {
         let vars_file_name = root.join(VARS_YML);
         let list_file_name = root.join("list.yml");
-        let vars = VarCollection::load_yaml(&vars_file_name).owe_res()?;
-        let list = LocalizeDict::load_yaml(&list_file_name).owe_res()?;
+        let vars = VarCollection::load_yaml(&vars_file_name).source_resource()?;
+        let list = LocalizeDict::load_yaml(&list_file_name).source_resource()?;
         let root = Some(root.to_path_buf());
         Ok(SysSetting { vars, list, root }.finalize_loaded())
     }
@@ -139,9 +139,10 @@ impl SystemLocalizable<SysValuePaths> for SysSetting {
             let used = mix_used_value(options.clone(), &self.vars, &val_path.mod_value_file())?;
             used.export_origin()
                 .save_yaml(&val_path.used_with_origon())
-                .owe_res()?;
-            ctx.record("value_file", &cur_used_file);
-            orion_conf::JsonIO::save_json(&used.export_value(), &cur_used_file).owe_res()?;
+                .source_resource()?;
+            ctx.record("value_file", cur_used_file.display());
+            orion_conf::JsonIO::save_json(&used.export_value(), &cur_used_file)
+                .source_resource()?;
 
             exe_setting
                 .mod_localize(cur_used_file, options.clone())
@@ -155,7 +156,7 @@ impl SystemLocalizable<SysValuePaths> for SysSetting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orion_error::TestAssert;
+    use orion_error::dev::testing::TestAssert;
     use orion_vars::vars::Mutability;
     use tempfile::tempdir;
 

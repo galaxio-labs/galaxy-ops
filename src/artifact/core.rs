@@ -41,7 +41,7 @@ impl Artifact {
         dest_path: &Path,
         options: &DownloadOptions,
     ) -> AddrResult<UpdateUnit> {
-        std::fs::create_dir_all(dest_path).owe_res()?;
+        std::fs::create_dir_all(dest_path).source_resource()?;
         let result = accessor
             .download_rename(self.origin_addr(), dest_path, &self.name, options)
             .await?;

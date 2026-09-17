@@ -4,10 +4,10 @@ use crate::{
     localize::{TemplateConfig, TemplatePath},
 };
 
+use crate::prelude::ErrorOwe;
 use fs_extra::dir::CopyOptions;
 use handlebars::Handlebars;
 use log::debug;
-use orion_conf::ErrorOwe;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -631,7 +631,10 @@ impl TplHandleBars<'_> {
     }
 
     pub fn render_data<T: Serialize>(&self, template: &str, data: &T) -> MainResult<String> {
-        let out_data = self.handlebars.render_template(template, data).owe_biz()?;
+        let out_data = self
+            .handlebars
+            .render_template(template, data)
+            .source_biz()?;
         Ok(out_data)
     }
 }
@@ -667,11 +670,11 @@ impl LocalizeTemplate<'_> {
     ) -> MainResult<()> {
         let mut err_ctx = WithContext::want("render tpl path");
         // 处理目录模板
-        err_ctx.record("data", data);
-        let content = std::fs::read_to_string(data).owe_data().with(&err_ctx)?;
+        err_ctx.record("data", data.display());
+        let content = std::fs::read_to_string(data).source_data().with(&err_ctx)?;
         err_ctx.record("need-fmt", "json");
         let data: serde_json::Value = serde_json::from_str(content.as_str())
-            .owe_data()
+            .source_data()
             .with(&err_ctx)?;
         if tpl.is_dir() {
             self.render_dir_impl(tpl, dst, &data, setting)
@@ -691,14 +694,14 @@ impl LocalizeTemplate<'_> {
     ) -> MainResult<()> {
         debug!("tpl dir: {}", tpl_dir.display());
         for entry in walkdir::WalkDir::new(tpl_dir) {
-            let entry = entry.owe_data()?;
+            let entry = entry.source_data()?;
             let tpl_path = entry.path().to_path_buf();
-            let relative_path = tpl_path.strip_prefix(tpl_dir).owe_data()?;
+            let relative_path = tpl_path.strip_prefix(tpl_dir).source_data()?;
             let dst_path = Path::new(dst).join(relative_path);
 
             if tpl_path.is_dir() {
                 // 如果是目录，确保在目标位置创建对应的目录
-                std::fs::create_dir_all(&dst_path).owe_sys()?;
+                std::fs::create_dir_all(&dst_path).source_sys()?;
                 debug!("created dir: {}", dst_path.display());
             } else if tpl_path.is_file() {
                 // 如果是文件，则渲染模板
@@ -719,7 +722,7 @@ impl LocalizeTemplate<'_> {
         debug!("dst:{}", dst_path.display());
 
         let mut err_ctx = WithContext::want("render tpl");
-        err_ctx.record("tpl", tpl_path);
+        err_ctx.record("tpl", tpl_path.display());
         // 2. 验证模板文件
         if !tpl_path.exists() {
             return Err(MainReason::conf_detail(format!(
@@ -736,7 +739,7 @@ impl LocalizeTemplate<'_> {
             if let Some(dist) = dst_path.parent() {
                 println!("copy {:30} ---> {}", tpl_path.display(), dist.display());
                 fs_extra::copy_items(&[&tpl_path], dist, &CopyOptions::default())
-                    .owe_res()
+                    .source_resource()
                     .with(("tpl", tpl_path))
                     .with(("dst", dist))?;
 
@@ -748,15 +751,15 @@ impl LocalizeTemplate<'_> {
             )))
             .with(dst_path);
         }
-        err_ctx.record("dst", dst_path);
+        err_ctx.record("dst", dst_path.display());
 
         // 3. 准备目标文件
         let dst_path = Path::new(&dst_path);
         if let Some(parent) = dst_path.parent() {
-            std::fs::create_dir_all(parent).owe_sys()?;
+            std::fs::create_dir_all(parent).source_sys()?;
         }
         if dst_path.exists() {
-            std::fs::remove_file(dst_path).owe_sys()?;
+            std::fs::remove_file(dst_path).source_sys()?;
         }
 
         // 4. 日志记录
@@ -768,7 +771,7 @@ impl LocalizeTemplate<'_> {
 
         // 5. 读取模板内容
         let template = std::fs::read_to_string(tpl_path)
-            .owe_data()
+            .source_data()
             .with(&err_ctx)?;
 
         //let convert = TplCoverter::new("[[", "]]", "{{", "}}", CommentLabel::yml_style());
@@ -782,18 +785,18 @@ impl LocalizeTemplate<'_> {
             .handlebars
             //.render_template_to_write(&template, data, &mut dst_file)
             .render_data(&template, data)
-            .owe_biz()
+            .source_biz()
             .with(&err_ctx)?;
         let completed = self.cust_cover.restore(rendered_data).with(&err_ctx)?;
         std::fs::write(dst_path, completed)
-            .owe_conf()
+            .source_conf()
             .with(dst_path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o644); // rw-r--r--
             std::fs::set_permissions(dst_path, perms)
-                .owe_sys()
+                .source_sys()
                 .with(&err_ctx)?;
         }
         println!(
@@ -810,7 +813,7 @@ impl LocalizeTemplate<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orion_error::TestAssert;
+    use orion_error::dev::testing::TestAssert;
     use tempfile::tempdir;
 
     #[test]

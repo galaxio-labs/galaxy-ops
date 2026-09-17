@@ -69,9 +69,9 @@ impl OpsProject {
 
         let value_file = value_path.join(SYS_VALUE_FILE);
 
-        let vars_vec = VarCollection::load_conf(vars_path).owe_res()?;
+        let vars_vec = VarCollection::load_conf(vars_path).source_resource()?;
         let mut vals_dict = if value_file.exists() {
-            ValueDict::load_conf(&value_file).owe_res()?
+            ValueDict::load_conf(&value_file).source_resource()?
         } else {
             ValueDict::default()
         };
@@ -94,7 +94,7 @@ impl OpsProject {
                     .with_prompt(&prompt)
                     .default(var.value().to_string())
                     .interact_text()
-                    .owe_data()?
+                    .source_data()?
             } else {
                 // 非交互模式，如果已有值则保留，否则使用默认值
                 if let Some(existing_value) = vals_dict.get(var.name()) {
@@ -105,7 +105,7 @@ impl OpsProject {
             };
             default_value
                 .update_from_str(value_str.as_str())
-                .owe_data()?;
+                .source_data()?;
             vals_dict.insert(var.name().to_string(), default_value);
         }
 
@@ -114,7 +114,7 @@ impl OpsProject {
             Confirm::new()
                 .with_prompt("Do you want to save these changes?")
                 .interact()
-                .owe_data()?
+                .source_data()?
         } else {
             // 非交互模式，自动保存
             true
@@ -123,7 +123,7 @@ impl OpsProject {
             // 保存修改后的vars到文件
             // vars.save_to_file(&vars_path)?; // 假设的方法
             println!("Changes saved to {}", value_file.display());
-            orion_conf::ConfigIO::save_conf(&vals_dict, &value_file).owe_res()?;
+            orion_conf::ConfigIO::save_conf(&vals_dict, &value_file).source_resource()?;
         }
         Ok(())
     }
@@ -137,7 +137,7 @@ impl OpsProject {
                 .join(SYS_VARS_YML);
 
             let value_path = self.root_local().join("values").join(i.sys().name());
-            ensure_path(&value_path).owe_res()?;
+            ensure_path(&value_path).source_resource()?;
 
             Self::process_system_vars(&vars_path, &value_path, i.sys().name(), interactive)?;
         }

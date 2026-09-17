@@ -63,11 +63,11 @@ impl ModuleLocalizable<PathBuf> for LocalizeExecPath {
     async fn mod_localize(&self, value_file: PathBuf, _options: LocalizeOptions) -> MainResult<()> {
         // Ensure parent directory exists
         if let Some(parent) = self.dst.parent() {
-            std::fs::create_dir_all(parent).owe_res()?;
+            std::fs::create_dir_all(parent).source_resource()?;
         }
         let mut ctx = OperationContext::want("sys-path localize").with_auto_log();
-        ctx.record("dst", &self.dst);
-        ctx.record("src", &self.src);
+        ctx.record("dst", self.dst.display());
+        ctx.record("src", self.src.display());
         if !self.src.exists() {
             ctx.warn("src path miss");
             ctx.mark_cancel();
@@ -80,8 +80,8 @@ impl ModuleLocalizable<PathBuf> for LocalizeExecPath {
                 value_file.display()
             )));
         }
-        ctx.record("value_file", &value_file);
-        let dict = ValueDict::load_json(&value_file).owe_res()?;
+        ctx.record("value_file", value_file.display());
+        let dict = ValueDict::load_json(&value_file).source_resource()?;
 
         // Handle template configuration if available
         if let Some(setting) = self
@@ -131,7 +131,7 @@ pub fn assert_file_content(path: &Path, expected_content: &str) {
 mod tests {
     use super::*;
     use crate::system::setting::Setting;
-    use orion_error::TestAssert;
+    use orion_error::dev::testing::TestAssert;
     use orion_vars::vars::{ValueDict, ValueType};
     // serde_json not currently used
     use std::io::Write;

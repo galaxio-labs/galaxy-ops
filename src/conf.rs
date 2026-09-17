@@ -5,7 +5,6 @@ use crate::{
     const_vars::CONFS_DIR,
     types::{Accessor, RefUpdateable},
 };
-use orion_error::ErrorConv;
 use orion_variate::{
     addr::{Address, accessor::path_file_name},
     types::{ResourceDownloader, UpdateUnit},
@@ -68,12 +67,12 @@ impl ConfSpecRef {
     pub fn new<S: Into<String>>(path: S) -> MainResult<Self> {
         let path = path.into();
         let file_path = PathBuf::from(path.as_str());
-        let obj = ConfSpec::load_conf(&file_path).owe_conf()?;
+        let obj = ConfSpec::load_conf(&file_path).source_conf()?;
         Ok(Self { path, obj })
     }
     fn load_ref(path: &str) -> MainResult<ConfSpec> {
         let path = PathBuf::from(path);
-        ConfSpec::load_conf(&path).owe_conf()
+        ConfSpec::load_conf(&path).source_conf()
     }
 }
 
@@ -93,8 +92,8 @@ impl ConfSpec {
     pub fn save(&self, path: &PathBuf) -> MainResult<()> {
         let mut ctx = WithContext::want("save conf spec");
         ctx.record("path", format!("path: {}", path.display()));
-        let data_content = toml::to_string(self).owe_data().with(&ctx)?;
-        fs::write(path, data_content).owe_res().with(&ctx)?;
+        let data_content = toml::to_string(self).source_data().with(&ctx)?;
+        fs::write(path, data_content).source_resource().with(&ctx)?;
         Ok(())
     }
 
@@ -128,11 +127,11 @@ impl RefUpdateable<UpdateUnit> for ConfSpec {
         let mut ctx = OperationContext::want("upload local confspec")
             .with_auto_log()
             .with_mod_path("spec/conf");
-        ctx.record("path", path);
+        ctx.record("path", path.display());
         ctx.debug("begin");
 
         let root = path.join(self.local_root());
-        std::fs::create_dir_all(&root).owe_res()?;
+        std::fs::create_dir_all(&root).source_resource()?;
         for f in &self.files {
             if let Some(addr) = f.addr() {
                 let filename = path_file_name(&PathBuf::from(f.path.as_str())).err_conv()?;
@@ -155,7 +154,7 @@ mod tests {
 
     use super::*;
     use mockito::Server;
-    use orion_error::TestAssert;
+    use orion_error::dev::testing::TestAssert;
     use orion_variate::{
         addr::{HttpResource, LocalPath},
         tools::test_init,
@@ -192,23 +191,23 @@ mod tests {
 
         // 模拟本地文件
 
-        fs::create_dir_all(&src_dir).await.owe_res()?;
-        fs::create_dir_all(&dst_dir).await.owe_res()?;
+        fs::create_dir_all(&src_dir).await.source_resource()?;
+        fs::create_dir_all(&dst_dir).await.source_resource()?;
         fs::write(src_dir.join("db.yml"), "[database]\nurl=\"localhost\"")
             .await
-            .owe_res()?;
+            .source_resource()?;
 
         let accessor = accessor_for_test();
         // 执行更新
         let _ = spec
             .update_local(accessor, &dst_dir, &DownloadOptions::for_test())
             .await
-            .owe_logic()?;
+            .source_logic()?;
         assert!(dst_dir.join("confs/db.yml").exists());
 
         // 清理
-        fs::remove_dir_all(dst_dir).await.owe_res()?;
-        fs::remove_dir_all(src_dir).await.owe_res()?;
+        fs::remove_dir_all(dst_dir).await.source_resource()?;
+        fs::remove_dir_all(src_dir).await.source_resource()?;
         Ok(())
     }
 
@@ -259,7 +258,7 @@ mod tests {
         // 验证下载的文件
         let content = fs::read_to_string(updated_v.position())
             .await
-            .owe_res()
+            .source_resource()
             .with(format!("path: {}", updated_v.position().display()))?;
         assert!(content.contains("env=\"test\""));
         //fs::remove_dir_all(dst_dir).await.owe_res()?;
@@ -303,7 +302,7 @@ mod tests {
         );
         let content = fs::read_to_string(updated_v.position())
             .await
-            .owe_res()
+            .source_resource()
             .with(format!("path: {}", updated_v.position().display()))?;
         assert_eq!(content, "name=bitnami");
 

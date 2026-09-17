@@ -61,7 +61,7 @@ pub fn mod_init_gitignore(path: &Path) -> MainResult<()> {
     let ignore_path = path.join(".gitignore");
     if !ignore_path.exists() {
         std::fs::write(&ignore_path, MOD_PRJ_GITIGNORE)
-            .owe_res()
+            .source_resource()
             .with(&ignore_path)?;
     }
     Ok(())

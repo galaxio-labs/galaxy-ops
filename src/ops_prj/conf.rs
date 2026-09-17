@@ -25,7 +25,7 @@ impl ProjectConf {
     }
     pub fn load(path: &Path) -> MainResult<Self> {
         let conf_file = path.join(OPS_PRJ_CONF_FILE);
-        let ins = Self::load_conf(&conf_file).owe_conf()?;
+        let ins = Self::load_conf(&conf_file).source_conf()?;
         Ok(ins)
     }
 }

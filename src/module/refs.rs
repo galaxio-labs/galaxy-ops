@@ -83,7 +83,9 @@ impl RefUpdateable<UpdateUnit> for ModuleSpecRef {
                 info!(target: "/mod/ref",  "update mod ref {} success!", self.name ),
                 error!(target: "/mod/ref", "update mod ref {} fail!", self.name )
             );
-            std::fs::create_dir_all(local).owe_res().with(local)?;
+            std::fs::create_dir_all(local)
+                .source_resource()
+                .with(local)?;
             let target_root = local.join(self.name());
             let target_path = target_root.join(self.model().to_string());
             if !target_path.exists() || options.clean_cache() {
@@ -94,14 +96,14 @@ impl RefUpdateable<UpdateUnit> for ModuleSpecRef {
                     .map_err(MainReason::from_addr_error)?;
                 let mod_path = prj_path.position().join(MOD_DIR);
                 let tmp_path = local.join(tmp_name);
-                make_clean_path(&target_root).owe_res()?;
+                make_clean_path(&target_root).source_resource()?;
 
                 std::fs::rename(&mod_path, &target_root)
-                    .owe_logic()
+                    .source_logic()
                     .with(("from", &mod_path))
                     .with(("to", &target_root))?;
                 if tmp_path.exists() {
-                    std::fs::remove_dir_all(tmp_path).owe_sys()?;
+                    std::fs::remove_dir_all(tmp_path).source_sys()?;
                 }
             }
 

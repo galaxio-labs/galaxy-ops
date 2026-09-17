@@ -3,8 +3,8 @@ use derive_getters::Getters;
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::ops_prj::project::OpsProject;
+use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::types::InsUpdateable;
-use orion_error::{ErrorConv, ErrorOwe};
 use orion_infra::path::make_new_path;
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::ValueDict;
@@ -78,9 +78,9 @@ pub struct PrjCommandHandler;
 
 impl PrjCommandHandler {
     pub async fn handle_new(args: PrjNewArgs) -> MainResult<()> {
-        let current_dir = std::env::current_dir().owe_res()?;
+        let current_dir = std::env::current_dir().source_resource()?;
         let new_prj = current_dir.join(args.name());
-        make_new_path(&new_prj).owe_res()?;
+        make_new_path(&new_prj).source_resource()?;
 
         let spec = OpsProject::make_new(&new_prj, args.name()).err_conv()?;
         spec.save().err_conv()?;
@@ -89,7 +89,7 @@ impl PrjCommandHandler {
 
     pub async fn handle_import(args: PrjImportArgs) -> MainResult<()> {
         galaxy_ops::infra::configure_dfx_logging(&args);
-        let current_dir = std::env::current_dir().owe_res()?;
+        let current_dir = std::env::current_dir().source_resource()?;
         let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
         let mut prj = OpsProject::load(&current_dir).err_conv()?;
         let accessor = galaxy_ops::accessor::accessor_for_default();
@@ -103,7 +103,7 @@ impl PrjCommandHandler {
     pub async fn handle_update(args: PrjUpdateArgs) -> MainResult<()> {
         galaxy_ops::infra::configure_dfx_logging(&args);
 
-        let current_dir = std::env::current_dir().owe_res()?;
+        let current_dir = std::env::current_dir().source_resource()?;
         let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
         let prj = OpsProject::load(&current_dir).err_conv()?;
         let accessor = galaxy_ops::accessor::accessor_for_default();

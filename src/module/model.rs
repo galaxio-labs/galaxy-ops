@@ -1,4 +1,4 @@
-use orion_error::{ContextRecord, OperationContext};
+use crate::internal_prelude::OperationContext;
 
 use super::prelude::*;
 use crate::localize::{LocalizeTemplate, TemplateConfig};
@@ -61,14 +61,14 @@ impl MMOperator {
     pub fn save_main(&self, root: &Path, name: Option<String>) -> MainResult<()> {
         let target_path = root.join(name.unwrap_or(self.model().to_string()));
         std::fs::create_dir_all(&target_path)
-            .owe_conf()
+            .source_conf()
             .with(format!("path: {}", target_path.display()))?;
-        self.workflow.save_to(&target_path, None).owe_logic()?;
+        self.workflow.save_to(&target_path, None).source_logic()?;
         Ok(())
     }
 
     pub fn clean_other(root: &Path, node: &ModelSTD) -> MainResult<()> {
-        let subs = get_sub_dirs(root).owe_logic()?;
+        let subs = get_sub_dirs(root).source_logic()?;
         for sub in subs {
             if !sub.ends_with(node.to_string().as_str()) {
                 Self::clean_path(&sub)?;
@@ -78,7 +78,7 @@ impl MMOperator {
     }
     fn clean_path(path: &Path) -> MainResult<()> {
         if path.exists() {
-            std::fs::remove_dir_all(path).owe_res().with(path)?;
+            std::fs::remove_dir_all(path).source_resource().with(path)?;
         }
         Ok(())
     }
@@ -138,28 +138,28 @@ impl FilePersist<MMOperator> for MMOperator {
         let target_path = root.join(name.unwrap_or(self.model().to_string()));
 
         let mut ctx = OperationContext::want("save target").with_auto_log();
-        ctx.record("target", &target_path);
+        ctx.record("target", target_path.display());
         let paths = ModTargetPaths::from(&target_path);
         std::fs::create_dir_all(paths.spec_path())
-            .owe_conf()
+            .source_conf()
             .with(&ctx)
             .with(format!("path: {}", paths.spec_path().display()))?;
 
         if let Some(setting) = &self.setting {
             orion_conf::ConfigIO::save_conf(setting, paths.setting_path())
-                .owe_logic()
+                .source_logic()
                 .with(&ctx)?;
         }
         self.workflow.save_to(paths.workflow_path(), None)?;
         orion_conf::ConfigIO::save_conf(&self.artifact, paths.artifact_path())
-            .owe_logic()
+            .source_logic()
             .with(&ctx)?;
 
         orion_conf::ConfigIO::save_conf(&self.depends, paths.depends_path())
-            .owe_logic()
+            .source_logic()
             .with(&ctx)?;
         orion_conf::ConfigIO::save_conf(&self.vars, paths.vars_path())
-            .owe_logic()
+            .source_logic()
             .with(&ctx)?;
         self.gxl_prj.save_to(&paths.target_root, None).with(&ctx)?;
         //flag.mark_suc();
@@ -175,34 +175,34 @@ impl FilePersist<MMOperator> for MMOperator {
             error!(target: "spec/mod/target", "load target failed!:{}", target_root.display())
         );
         let paths = ModTargetPaths::from(&target_root.to_path_buf());
-        ctx.record("root", target_root);
-        let target = ModelSTD::from_str(path_file_name(target_root).owe_logic()?.as_str())
-            .owe_res()
+        ctx.record("root", target_root.display());
+        let target = ModelSTD::from_str(path_file_name(target_root).source_logic()?.as_str())
+            .source_resource()
             .with(&ctx)?;
         let actions = ModWorkflows::load_from(paths.workflow_path()).with(&ctx)?;
 
         let setting = if paths.setting_path().exists() {
-            Some(Setting::load_conf(paths.setting_path()).owe_logic()?)
+            Some(Setting::load_conf(paths.setting_path()).source_logic()?)
         } else {
             None
         };
-        ctx.record("artifact", paths.artifact_path());
+        ctx.record("artifact", paths.artifact_path().display());
         let artifact = ArtifactPackage::load_conf(paths.artifact_path())
             .with(&ctx)
-            .owe_logic()?;
+            .source_logic()?;
 
         //ctx.record("conf_spec", paths.conf_path());
         //let conf_spec = ConfSpec::load_conf(paths.conf_path()).with(&ctx)?;
 
-        ctx.record("depends", paths.depends_path());
+        ctx.record("depends", paths.depends_path().display());
         let depends = DependencySet::load_conf(paths.depends_path())
             .with(&ctx)
-            .owe_logic()?;
-        ctx.record("vars", paths.vars_path());
+            .source_logic()?;
+        ctx.record("vars", paths.vars_path().display());
         //let vars = VarCollection::eval_from_file(&ValueDict::default(), paths.vars_path())
         let vars = VarCollection::load_conf(paths.vars_path())
             .with(&ctx)
-            .owe_logic()?;
+            .source_logic()?;
 
         let gxl_prj = GxlProject::load_from(paths.target_root()).with(&ctx)?;
         flag.mark_suc();
@@ -243,7 +243,7 @@ impl MMOperator {
     pub fn get_local_values(&self, parent: ValuePath) -> MainResult<Option<String>> {
         let value_paths = TargetValuePaths::from(parent.path());
         if value_paths.used_readable().exists() {
-            let data = read_to_string(value_paths.used_readable()).owe_sys()?;
+            let data = read_to_string(value_paths.used_readable()).source_sys()?;
             return Ok(Some(data));
         }
         Ok(None)
@@ -277,16 +277,16 @@ impl ModuleLocalizable<ModValuePaths> for MMOperator {
 
         //let value_paths = TargetValuePaths::from(&val_path);
         let local_path = mod_root.join(LOCAL_DIR);
-        ctx.record("local", &local_path);
+        ctx.record("local", local_path.display());
         debug!( target:"spec/mod/target", "localize mod-target begin: {}" ,local_path.display() );
-        make_clean_path(&local_path).owe_logic()?;
+        make_clean_path(&local_path).source_logic()?;
 
         let used = self.build_used_value(options, &val_path.mod_value_file())?;
         orion_conf::TextConfigIO::save_valconf(&used.export_origin(), &val_path.used_with_origon())
-            .owe_res()?;
+            .source_resource()?;
         let used_value_file = self.used_value_path()?;
-        ctx.record("value_file", &used_value_file);
-        orion_conf::JsonIO::save_json(&used.export_value(), &used_value_file).owe_res()?;
+        ctx.record("value_file", used_value_file.display());
+        orion_conf::JsonIO::save_json(&used.export_value(), &used_value_file).source_resource()?;
 
         debug!(target : "/mod/target/loc", "use value: {}", used_value_file.display());
         let tpl_path_opt = self

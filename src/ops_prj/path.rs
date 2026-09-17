@@ -62,7 +62,7 @@ impl ProjectPath {
 
     /// 确保项目根目录存在
     pub fn ensure_root_exists(&self) -> MainResult<()> {
-        ensure_path(&self.root).owe_logic()?;
+        ensure_path(&self.root).source_logic()?;
         Ok(())
     }
 }

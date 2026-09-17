@@ -63,7 +63,7 @@ impl ModuleLocalizable<PathBuf> for LocalizeSet {
 
 #[cfg(test)]
 mod tests {
-    use orion_error::TestAssert;
+    use orion_error::dev::testing::TestAssert;
     use orion_vars::vars::ValueDict;
     use tempfile::tempdir;
 

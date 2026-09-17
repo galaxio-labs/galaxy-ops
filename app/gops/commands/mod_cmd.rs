@@ -4,10 +4,10 @@ use galaxy_ops::const_vars::VALUE_DIR;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::operator::ModOperator;
 use galaxy_ops::module::spec::make_mod_spec_example;
+use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::types::{LocalizeOptions, ModuleLocalizable, RefUpdateable};
 use galaxy_ops::{error::MainResult, module::operator::ModValuePaths};
 use orion_conf::FilePersist;
-use orion_error::{ErrorConv, ErrorOwe};
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{OriginDict, ValueDict};
 
@@ -135,14 +135,14 @@ impl ModCommandHandler {
 
         let spec = make_mod_spec_example().err_conv()?;
         spec.save_to(&std::path::PathBuf::from("./"), None)
-            .owe_res()?;
+            .source_resource()?;
         Ok(())
     }
 
     pub async fn handle_new(args: ModNewArgs) -> MainResult<()> {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         let project_dir = current_dir.join(args.name());
-        std::fs::create_dir(&project_dir).owe_res()?;
+        std::fs::create_dir(&project_dir).source_resource()?;
 
         galaxy_ops::infra::configure_dfx_logging(&args);
         let spec = ModOperator::make_new(&project_dir, args.name.as_str()).err_conv()?;

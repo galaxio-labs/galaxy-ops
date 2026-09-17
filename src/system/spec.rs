@@ -63,16 +63,20 @@ impl SysModelSpec {
             error!(target: "sys", "save sys spec failed!:{}", root.display())
         );
         let paths = SysTargetPaths::from(&root);
-        std::fs::create_dir_all(paths.spec_path()).owe_conf()?;
+        std::fs::create_dir_all(paths.spec_path()).source_conf()?;
         sys_init_gitignore(&root)?;
-        self.define.save_yaml(paths.define_path()).owe_res()?;
-        self.mod_list.save_yaml(paths.modlist_path()).owe_res()?;
-        ensure_path(&paths.setting_path()).owe_res()?;
+        self.define
+            .save_yaml(paths.define_path())
+            .source_resource()?;
+        self.mod_list
+            .save_yaml(paths.modlist_path())
+            .source_resource()?;
+        ensure_path(&paths.setting_path()).source_resource()?;
         self.setting().save_local(paths.setting_path())?;
 
         self.workflow
             .save_to(paths.workflow_path(), None)
-            .owe_logic()?;
+            .source_logic()?;
         flag.mark_suc();
         Ok(())
     }
@@ -90,7 +94,7 @@ impl SysModelSpec {
         );
         let paths = SysTargetPaths::from(&root.to_path_buf());
 
-        ctx.record("mod_list", paths.modlist_path());
+        ctx.record("mod_list", paths.modlist_path().display());
         let define = if !paths.define_path().exists() {
             return Err(MainReason::logic_detail(format!(
                 "miss define file: {}",
@@ -100,12 +104,12 @@ impl SysModelSpec {
             SysDefine::load_yaml(paths.define_path())
                 .with("load define".to_string())
                 .with(&ctx)
-                .owe_data()?
+                .source_data()?
         };
         let mut mod_list = ModulesList::load_yaml(paths.modlist_path())
             .with("load mod-list".to_string())
             .with(&ctx)
-            .owe_data()?;
+            .source_data()?;
         mod_list.set_mods_local(paths.spec_path().clone());
         let workflow = SysWorkflows::load_from(paths.workflow_path())
             .with(&ctx)
@@ -144,10 +148,10 @@ impl RefUpdateable<()> for SysModelSpec {
             let value = self.mod_list.update_local(accessor, local, options).await?;
             let path = local.join(SYS_VARS_YML);
             if path.exists() {
-                std::fs::remove_file(&path).owe_sys()?;
+                std::fs::remove_file(&path).source_sys()?;
             }
             let sys_vars = value.vars.merge_system(self.setting().vars().clone());
-            sys_vars.save_yaml(&path).owe_res()?;
+            sys_vars.save_yaml(&path).source_resource()?;
             Ok(())
         } else {
             MainReason::from(ElementReason::Miss("local path".into())).err_result()

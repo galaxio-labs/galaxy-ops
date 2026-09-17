@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use orion_error::{ErrorOwe, ErrorWith};
+use crate::internal_prelude::{ErrorOwe, ErrorWith};
 
 use crate::{error::MainResult, workflow::gxl::GxlAction};
 
@@ -28,7 +28,7 @@ pub fn workins_init_gitignore(path: &Path) -> MainResult<()> {
     let ignore_path = path.join(".gitignore");
     if !ignore_path.exists() {
         std::fs::write(&ignore_path, SYS_GITIGNORE)
-            .owe_res()
+            .source_resource()
             .with(&ignore_path)?;
     }
     Ok(())

@@ -10,12 +10,12 @@ use galaxy_ops::const_vars::{SETTING_DIR, VALUE_DIR};
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::ModelSTD;
+use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::system::SysValuePaths;
 use galaxy_ops::system::operator::SysOperator;
 use galaxy_ops::system::setting::SysSetting;
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_conf::YamlIO;
-use orion_error::{ErrorConv, ErrorOwe};
 use orion_infra::path::{ensure_path, make_new_path};
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{OriginDict, ValueDict};
@@ -249,7 +249,7 @@ impl SysCommandHandler {
     pub async fn handle_new(args: SysNewArgs) -> MainResult<()> {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         let new_prj = current_dir.join(args.name());
-        make_new_path(&new_prj).owe_res()?;
+        make_new_path(&new_prj).source_resource()?;
 
         let model_in = Self::ia_model_std()?;
         let spec = SysOperator::make_new(&new_prj, args.name(), model_in).err_conv()?;
@@ -279,7 +279,8 @@ impl SysCommandHandler {
 
         let spec = SysOperator::load(&current_dir).err_conv()?;
         let val_path = SysValuePaths::from(current_dir.clone()).join(VALUE_DIR);
-        let dict = OriginDict::from(ValueDict::load_yaml(&val_path.sys_value_file()).owe_res()?);
+        let dict =
+            OriginDict::from(ValueDict::load_yaml(&val_path.sys_value_file()).source_resource()?);
         spec.localize(
             val_path,
             LocalizeOptions::new(dict).with_only_mod(args.module),
@@ -293,7 +294,8 @@ impl SysCommandHandler {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         if args.init {
             let setting = SysSetting::example();
-            let setting_path = ensure_path(current_dir.join("sys").join(SETTING_DIR)).owe_res()?;
+            let setting_path =
+                ensure_path(current_dir.join("sys").join(SETTING_DIR)).source_resource()?;
             setting.save_local(&setting_path)?;
         }
         Ok(())
@@ -309,38 +311,38 @@ impl SysCommandHandler {
             .arg("-V")
             .output()
             .map_err(|e| format!("无法执行 gflow 命令: {}", e))
-            .owe_res()?;
+            .source_resource()?;
 
         if !output.status.success() {
-            return Err("gflow 命令执行失败").owe_res()?;
+            return Err("gflow 命令执行失败").source_resource()?;
         }
 
         let version_str = String::from_utf8_lossy(&output.stdout);
         // 解析版本号，假设输出格式为 "gflow x.y.z"
         let version_parts: Vec<&str> = version_str.split_whitespace().collect();
         if version_parts.len() < 2 {
-            return Err(format!("无法解析 gflow 版本: {}", version_str)).owe_res()?;
+            return Err(format!("无法解析 gflow 版本: {}", version_str)).source_resource()?;
         }
 
         let version = version_parts[1];
         let version_parts: Vec<&str> = version.split('.').collect();
         if version_parts.len() < 3 {
-            return Err(format!("无效的 gflow 版本格式: {}", version)).owe_res()?;
+            return Err(format!("无效的 gflow 版本格式: {}", version)).source_resource()?;
         }
 
         // 解析主版本、次版本和修订版本
         let major: u32 = version_parts[0]
             .parse()
             .map_err(|_| format!("无效的主版本号: {}", version_parts[0]))
-            .owe_res()?;
+            .source_resource()?;
         let minor: u32 = version_parts[1]
             .parse()
             .map_err(|_| format!("无效的次版本号: {}", version_parts[1]))
-            .owe_res()?;
+            .source_resource()?;
         let patch: u32 = version_parts[2]
             .parse()
             .map_err(|_| format!("无效的修订版本号: {}", version_parts[2]))
-            .owe_res()?;
+            .source_resource()?;
 
         // 检查版本是否 >= 0.11.2
         if major > 0 || (major == 0 && minor > 11) || (major == 0 && minor == 11 && patch >= 2) {
@@ -350,7 +352,7 @@ impl SysCommandHandler {
                 "gflow 版本过低，需要 >= 0.11.2，当前版本: {}",
                 version
             ))
-            .owe_res()?
+            .source_resource()?
         }
     }
 
@@ -383,18 +385,18 @@ impl SysCommandHandler {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| anyhow::anyhow!("无法启动 gflow 命令: {}", e))
-            .owe_res()?;
+            .source_resource()?;
 
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("无法获取stdout"))
-            .owe_res()?;
+            .source_resource()?;
         let stderr = child
             .stderr
             .take()
             .ok_or_else(|| anyhow::anyhow!("无法获取stderr"))
-            .owe_res()?;
+            .source_resource()?;
 
         // 创建异步读取器并并发处理stdout和stderr
         let stdout_handle = tokio::spawn(async move {
@@ -419,10 +421,11 @@ impl SysCommandHandler {
             .wait()
             .await
             .map_err(|e| anyhow::anyhow!("等待子进程失败: {}", e))
-            .owe_res()?;
+            .source_resource()?;
 
         if !exit_status.success() {
-            return Err(anyhow::anyhow!("命令执行失败，退出状态: {}", exit_status)).owe_res()?;
+            return Err(anyhow::anyhow!("命令执行失败，退出状态: {}", exit_status))
+                .source_resource()?;
         }
 
         Ok(())

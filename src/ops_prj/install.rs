@@ -51,9 +51,9 @@ impl SystemPackageInstaller {
         match package {
             PackageType::Bin(bin_package) => {
                 let out_path = self.work_paths.work_dir.join(bin_package.name());
-                make_clean_path(&out_path).owe_res()?;
+                make_clean_path(&out_path).source_resource()?;
                 decompress(&self.work_paths.pkg_path, out_path.clone())
-                    .owe_sys()
+                    .source_sys()
                     .want("decompress tar.gz")
                     .with(self.work_paths.pkg_path.display().to_string())?;
                 Ok(out_path)
@@ -102,21 +102,22 @@ impl SystemPackageInstaller {
         paths: &crate::ops_prj::path::InstallationPaths,
     ) -> MainResult<()> {
         let mut ctx = OperationContext::want("move&rename sys").with_auto_log();
-        ctx.record("src", sys_src);
-        ctx.record("src", &paths.project_root);
-        fs_extra::dir::move_dir(sys_src, &paths.project_root, &self.copy_options).owe_res()?;
+        ctx.record("src", sys_src.display());
+        ctx.record("src", paths.project_root.display());
+        fs_extra::dir::move_dir(sys_src, &paths.project_root, &self.copy_options)
+            .source_resource()?;
 
-        ctx.record("temp", &paths.temp_target_path);
-        ctx.record("fianl", &paths.final_target_path);
-        std::fs::rename(&paths.temp_target_path, &paths.final_target_path).owe_res()?;
-        ctx.record("prj-values", &paths.value_path);
+        ctx.record("temp", paths.temp_target_path.display());
+        ctx.record("fianl", paths.final_target_path.display());
+        std::fs::rename(&paths.temp_target_path, &paths.final_target_path).source_resource()?;
+        ctx.record("prj-values", paths.value_path.display());
         std::fs::create_dir_all(&paths.value_path)
-            .owe_res()
+            .source_resource()
             .want("crate")?;
         let sys_value = paths.final_target_path.join("values");
-        ctx.record("sys-values", &sys_value);
+        ctx.record("sys-values", sys_value.display());
         if let Some(link_target) = diff_paths(&paths.value_path, &paths.final_target_path) {
-            std::os::unix::fs::symlink(&link_target, &sys_value).owe_res()?;
+            std::os::unix::fs::symlink(&link_target, &sys_value).source_resource()?;
         }
         ctx.mark_suc();
         Ok(())

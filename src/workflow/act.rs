@@ -1,6 +1,6 @@
 use super::prelude::*;
+use crate::prelude::ErrorOwe;
 use derive_getters::Getters;
-use orion_conf::ErrorOwe;
 use serde::Serialize;
 
 use crate::const_vars::WORKFLOWS_DIR;
@@ -24,7 +24,7 @@ impl FilePersist<Workflows> for Workflows {
     fn save_to(&self, path: &Path, name: Option<String>) -> SerdeResult<()> {
         let action_path = path.join(WORKFLOWS_DIR);
         std::fs::create_dir_all(&action_path)
-            .owe_res()
+            .source_resource()
             .with(&action_path)?;
         for item in &self.actions {
             item.save_to(&action_path, name.clone())?;
@@ -37,12 +37,12 @@ impl FilePersist<Workflows> for Workflows {
         let mut actions = Vec::new();
         let actions_path = path.join(WORKFLOWS_DIR);
         for entry in std::fs::read_dir(&actions_path)
-            .owe_res()
+            .source_resource()
             .with(&actions_path)
             .want("read workflows")
             .with(("workflow", "read workflows"))?
         {
-            let entry = entry.owe_res()?;
+            let entry = entry.source_resource()?;
             let entry_path = entry.path();
 
             if entry_path.is_file() {
@@ -114,14 +114,14 @@ mod tests {
 
     #[test]
     fn test_save_and_load_actions() -> MainResult<()> {
-        let temp_dir = TempDir::new().owe_res()?;
+        let temp_dir = TempDir::new().source_resource()?;
         let path = temp_dir.path().to_path_buf();
 
         // 测试保存和加载
         let original = ModWorkflows::mod_host_tpl_init();
-        original.save_to(&path, None).owe_logic()?;
+        original.save_to(&path, None).source_logic()?;
 
-        let loaded = ModWorkflows::load_from(&path).owe_logic()?;
+        let loaded = ModWorkflows::load_from(&path).source_logic()?;
         assert_eq!(loaded.actions().len(), original.actions().len());
         Ok(())
     }

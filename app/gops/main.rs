@@ -5,7 +5,7 @@ mod commands;
 use clap::Parser;
 use commands::{CommandDispatcher, GInsCmd};
 use galaxy_ops::error::{MainResult, report_error};
-use orion_error::ErrorOwe;
+use galaxy_ops::prelude::ErrorOwe;
 use orion_vars::vars::setup_start_env_vars;
 
 #[tokio::main]
@@ -24,7 +24,7 @@ pub struct GxOps {}
 
 impl GxOps {
     pub async fn run() -> MainResult<()> {
-        setup_start_env_vars().owe_res()?;
+        setup_start_env_vars().source_resource()?;
         let cmd = GInsCmd::parse();
         println!("gops: {}", env!("CARGO_PKG_VERSION"));
         CommandDispatcher::dispatch(cmd).await?;

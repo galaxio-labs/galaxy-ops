@@ -2,11 +2,10 @@
 
 pub use getset::{Getters, MutGetters, Setters, WithSetters};
 pub use log::{debug, error, info, warn};
-pub use orion_error::{ContextRecord, DomainReason, ErrorCode, OperationContext};
-pub use orion_error::{
-    ErrorOwe, ErrorOweBase, ErrorWith, StructError, StructErrorTrait, UvsFrom, UvsReason,
-    WithContext,
-};
+pub use orion_error::UnifiedReason as UvsReason;
+pub use orion_error::reason::{DomainReason, ErrorCode};
+pub use orion_error::runtime::WithContext;
+pub use orion_error::{OperationContext, StructError};
 pub use orion_variate::addr::AddrReason;
 
 pub use derive_more::{Deref, DerefMut, Display, From};
@@ -27,8 +26,11 @@ pub use orion_conf::error::{OrionConfResult as SerdeResult, SerdeReason};
 pub use orion_conf::{ConfigIO, FilePersist, JsonIO, LoadHook, TextConfigIO, YamlIO};
 pub use serde::ser::Serializer;
 
-pub use orion_error::ErrorConv;
-pub use orion_error::ToStructError;
+pub use crate::compat::{
+    ContextRecord, ErrorConv, ErrorOwe, ErrorOweBase, ErrorWith, OperationContextCompat,
+    StructErrorTrait, UvsFrom,
+};
+pub use orion_error::conversion::ToStructError;
 pub use orion_infra::auto_exit_log;
 pub use orion_infra::path::{PathResult, ensure_path, make_clean_path};
 pub use orion_variate::addr::Address;

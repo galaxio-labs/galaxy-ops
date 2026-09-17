@@ -44,18 +44,18 @@ impl SysOperator {
         // 执行配置文件迁移
         paths.migrate_conf_file().with(&ctx).want("migrate conf")?;
 
-        ctx.record("sys-conf", &paths.conf_file_v2());
+        ctx.record("sys-conf", paths.conf_file_v2().display());
         let conf = SysConf::load_conf(&paths.conf_file_v2())
-            .owe_res()
+            .source_resource()
             .with(&ctx)?;
         let sys_path = paths.sys_dir();
-        ctx.record("sys_path", &sys_path);
+        ctx.record("sys_path", sys_path.display());
         let sys_spec = SysModelSpec::load_from(&sys_path).with(&ctx)?;
 
         let project = GxlProject::load_from(paths.root())
             .owe(SysReason::Load.into())
             .with(&ctx)?;
-        ensure_path(paths.value_dir()).owe_logic().with(&ctx)?;
+        ensure_path(paths.value_dir()).source_logic().with(&ctx)?;
         ctx.mark_suc();
         Ok(Self {
             conf,
@@ -68,10 +68,10 @@ impl SysOperator {
         let mut ctx = OperationContext::want("save sys-prj")
             .with_auto_log()
             .with_mod_path("sys/prj");
-        ctx.record("root", self.paths.root());
+        ctx.record("root", self.paths.root().display());
         let conf_file_v2 = self.paths.conf_file_v2();
         orion_conf::ConfigIO::save_conf(&self.conf, &conf_file_v2)
-            .owe_res()
+            .source_resource()
             .with(&ctx)?;
         self.sys_spec.save_local(self.paths.root(), "sys")?;
         self.project
@@ -81,7 +81,9 @@ impl SysOperator {
 
         // 保存 sys_local 配置
 
-        ensure_path(self.paths.value_dir()).owe_logic().with(&ctx)?;
+        ensure_path(self.paths.value_dir())
+            .source_logic()
+            .with(&ctx)?;
         sys_init_gitignore(self.paths.root()).with(&ctx)?;
         ctx.mark_suc();
         Ok(())
@@ -135,7 +137,7 @@ impl SysOperator {
     }
     pub fn make_test_prj(name: &str) -> MainResult<Self> {
         let prj_path = PathBuf::from(SYS_MODEL_SPC_ROOT).join(name);
-        make_clean_path(&prj_path).owe_logic()?;
+        make_clean_path(&prj_path).source_logic()?;
         let proj = SysOperator::make_new(&prj_path, name, ModelSTD::from_cur_sys())?;
         proj.save()?;
         Ok(proj)
@@ -143,34 +145,41 @@ impl SysOperator {
     pub fn init_setting_value(&self) -> MainResult<SysValuePaths> {
         let value_root = SysValuePaths::from(PathBuf::from(self.root_local()))
             .ensure_join(VALUE_DIR)
-            .owe_res()?;
+            .source_resource()?;
         //let mut all_vars = VarCollection::default();
         for x in self.sys_spec().mod_list().iter() {
             if let Some(mmo) = x.get_target_spec()? {
-                let mm_path = value_root.clone().ensure_join(x.name()).owe_res()?;
+                let mm_path = value_root.clone().ensure_join(x.name()).source_resource()?;
                 //all_vars = all_vars.merge(mmo.vars().clone());
                 if !mm_path.mod_value_file().exists() {
                     let mod_vars = mmo.vars().module_vars().to_val();
-                    mod_vars.save_yaml(&mm_path.mod_value_file()).owe_res()?;
+                    mod_vars
+                        .save_yaml(&mm_path.mod_value_file())
+                        .source_resource()?;
                 }
 
                 //mm.vars()
             }
         }
-        let setting_val_path = value_root.clone().ensure_join("setting").owe_res()?;
+        let setting_val_path = value_root
+            .clone()
+            .ensure_join("setting")
+            .source_resource()?;
         if !setting_val_path.mod_value_file().exists() {
             let setting_vars = self.sys_spec().setting().vars().module_vars().to_val();
             setting_vars
                 .save_yaml(&setting_val_path.mod_value_file())
-                .owe_res()?;
+                .source_resource()?;
         }
         if !value_root.sys_value_file().exists() {
             let sys_vars = VarCollection::load_yaml(&self.paths.sys_vars_file())
-                .owe_res()?
+                .source_resource()?
                 .system_vars()
                 .to_val();
             //all_vars.system_vars().to_val();
-            sys_vars.save_yaml(&value_root.sys_value_file()).owe_res()?;
+            sys_vars
+                .save_yaml(&value_root.sys_value_file())
+                .source_resource()?;
         }
         Ok(value_root)
     }
@@ -186,8 +195,9 @@ pub fn setup_prj_root_env_vars(base: PathBuf) -> MainResult<()> {
 pub mod tests {
     use std::path::{Path, PathBuf};
 
+    use crate::prelude::ErrorOwe;
     use orion_conf::YamlIO;
-    use orion_error::{ErrorOwe, TestAssertWithMsg};
+    use orion_error::dev::testing::TestAssertWithMsg;
     use orion_infra::path::make_clean_path;
     use orion_variate::{
         addr::{Address, HttpResource, types::PathTemplate},
@@ -214,7 +224,7 @@ pub mod tests {
     async fn test_mod_prj_new() -> MainResult<()> {
         test_init();
         let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_new");
-        make_clean_path(&prj_path).owe_logic()?;
+        make_clean_path(&prj_path).source_logic()?;
         let proj = SysOperator::make_new(&prj_path, "sys_new", ModelSTD::from_cur_sys())?;
         proj.save()?;
         Ok(())
@@ -225,7 +235,7 @@ pub mod tests {
         test_init();
 
         let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("example_sys_y");
-        make_clean_path(&prj_path).owe_logic()?;
+        make_clean_path(&prj_path).source_logic()?;
         let project = make_sys_operator(&prj_path).assert("make cust");
         project.save().assert("save dss_prj");
         let project = SysOperator::load(&prj_path).assert("dss-project");
@@ -236,9 +246,9 @@ pub mod tests {
             .assert("spec.update_local");
         let value_path = project.init_setting_value()?;
         let mut dict =
-            OriginDict::from(ValueDict::load_yaml(&value_path.sys_value_file()).owe_res()?);
+            OriginDict::from(ValueDict::load_yaml(&value_path.sys_value_file()).source_resource()?);
         dict.set_source("sys-setting");
-        setup_prj_root_env_vars(prj_path.clone()).owe_sys()?;
+        setup_prj_root_env_vars(prj_path.clone()).source_sys()?;
         project
             .localize(value_path, LocalizeOptions::new(dict))
             .await

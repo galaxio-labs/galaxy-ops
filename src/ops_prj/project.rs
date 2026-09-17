@@ -46,7 +46,7 @@ impl OpsProject {
         let paths = ProjectPath::new(root_local);
         let conf = ProjectConf::load(paths.root())?;
 
-        let ops_target = OpsTarget::load_conf(&paths.target_file()).owe_conf()?;
+        let ops_target = OpsTarget::load_conf(&paths.target_file()).source_conf()?;
         let project = GxlProject::load_from(paths.root()).owe(OpsReason::Load.into())?;
         flag.mark_suc();
         Ok(Self {
@@ -67,9 +67,12 @@ impl OpsProject {
                 "save project  to {} fail!", self.paths.root().display()
             )
         );
-        orion_conf::ConfigIO::save_conf(&self.ops_target, &self.paths.target_file()).owe_res()?;
-        orion_conf::ConfigIO::save_conf(&self.conf, &self.paths.conf_file()).owe_res()?;
-        self.project.save_to(self.paths.root(), None).owe_logic()?;
+        orion_conf::ConfigIO::save_conf(&self.ops_target, &self.paths.target_file())
+            .source_resource()?;
+        orion_conf::ConfigIO::save_conf(&self.conf, &self.paths.conf_file()).source_resource()?;
+        self.project
+            .save_to(self.paths.root(), None)
+            .source_logic()?;
 
         workins_init_gitignore(self.paths.root())?;
         flag.mark_suc();
@@ -108,7 +111,7 @@ impl OpsProject {
     }
     pub fn for_test(name: &str) -> MainResult<Self> {
         let prj_path = PathBuf::from(OPS_PRJ_ROOT).join(name);
-        make_clean_path(&prj_path).owe_logic()?;
+        make_clean_path(&prj_path).source_logic()?;
 
         let conf = ProjectConf::for_test();
         let proj = OpsProject::new(conf, prj_path);
@@ -123,7 +126,7 @@ mod tests {
         const_vars::{SYS_VALUE_FILE, SYS_VARS_YML},
         ops_prj::project::OpsProject,
     };
-    use orion_error::TestAssert;
+    use orion_error::dev::testing::TestAssert;
     use orion_variate::tools::test_init;
     use orion_vars::vars::ValueDict;
 

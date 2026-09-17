@@ -6,47 +6,47 @@ use crate::{
 };
 
 pub fn load_mod_opr_value(root: &Path, model: &str) -> MainResult<OriginDict> {
-    let value_root = ensure_path(root.join(VALUE_DIR)).owe_logic()?;
+    let value_root = ensure_path(root.join(VALUE_DIR)).source_logic()?;
     let sys_v_file = value_root.join(SYS_VALUE_FILE);
     if !sys_v_file.exists() {
         let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
         let vars_file = root.join("mod").join(model).join("vars.yml");
-        let vars_vec = VarCollection::load_conf(&vars_file).owe_res()?;
+        let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
         let sys_value = vars_vec.system_vars();
-        ctx.record("sys-value", &sys_v_file);
-        orion_conf::ConfigIO::save_conf(sys_value, &sys_v_file).owe_res()?;
+        ctx.record("sys-value", sys_v_file.display());
+        orion_conf::ConfigIO::save_conf(sys_value, &sys_v_file).source_resource()?;
         ctx.mark_suc();
     }
-    let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).owe_logic()?);
+    let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).source_logic()?);
     sys_dict.set_source("sys-setting");
 
     let mod_v_file = value_root.join(model).join(MOD_VALUE_FILE);
     if !mod_v_file.exists() {
-        ensure_path(&value_root.join(model)).owe_res()?;
+        ensure_path(&value_root.join(model)).source_resource()?;
         let vars_file = root.join("mod").join(model).join("vars.yml");
-        let vars_vec = VarCollection::load_conf(&vars_file).owe_res()?;
+        let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
         let sys_value = vars_vec.module_vars();
-        orion_conf::ConfigIO::save_conf(sys_value, &mod_v_file).owe_res()?;
+        orion_conf::ConfigIO::save_conf(sys_value, &mod_v_file).source_resource()?;
     }
-    let mut mod_dict = OriginDict::from(ValueDict::load_yaml(&mod_v_file).owe_logic()?);
+    let mut mod_dict = OriginDict::from(ValueDict::load_yaml(&mod_v_file).source_logic()?);
     mod_dict.set_source("mod-setting");
     sys_dict.merge(&mod_dict);
     Ok(sys_dict)
 }
 
 pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
-    let value_root = ensure_path(prj_root.join(VALUE_DIR)).owe_logic()?;
+    let value_root = ensure_path(prj_root.join(VALUE_DIR)).source_logic()?;
     let sys_v_file = value_root.join(SYS_VALUE_FILE);
     if !sys_v_file.exists() {
         let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
         let vars_file = prj_root.join("sys").join(SYS_VARS_YML);
-        let vars_vec = VarCollection::load_conf(&vars_file).owe_res()?;
+        let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
         let sys_value = vars_vec.system_vars();
-        ctx.record("sys-value", &sys_v_file);
-        orion_conf::ConfigIO::save_conf(sys_value, &sys_v_file).owe_res()?;
+        ctx.record("sys-value", sys_v_file.display());
+        orion_conf::ConfigIO::save_conf(sys_value, &sys_v_file).source_resource()?;
         ctx.mark_suc();
     }
-    let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).owe_logic()?);
+    let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).source_logic()?);
     sys_dict.set_source("sys-setting");
     Ok(sys_dict)
 }
@@ -64,12 +64,13 @@ pub fn mix_used_value(
     // 加载用户值文件（如果存在）
     let user_value_path = mod_value.parent().unwrap().join(USER_VALUE_FILE);
     if user_value_path.exists() {
-        let mut user_dict = OriginDict::from(ValueDict::load_yaml(&user_value_path).owe_res()?);
+        let mut user_dict =
+            OriginDict::from(ValueDict::load_yaml(&user_value_path).source_resource()?);
         user_dict.set_source("mod-cust");
         used.merge(&user_dict);
     }
 
-    let mut mod_dict = OriginDict::from(ValueDict::load_yaml(mod_value).owe_res()?);
+    let mut mod_dict = OriginDict::from(ValueDict::load_yaml(mod_value).source_resource()?);
     mod_dict.set_source("mod-setting");
     let mut global = options.raw_value().clone();
     global.set_source("global");
@@ -86,7 +87,7 @@ mod tests {
     use crate::const_vars::USER_VALUE_FILE;
 
     use super::*;
-    use orion_error::TestAssert;
+    use orion_error::dev::testing::TestAssert;
     use orion_vars::vars::{Mutability, OriginValue, ValueType, VarDefinition};
     use tempfile::tempdir;
 

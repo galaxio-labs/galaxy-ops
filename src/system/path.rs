@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::const_vars::{MOD_LIST_YML, VARS_YML};
 use crate::error::MainResult;
+use crate::internal_prelude::ErrorOwe;
 use crate::types::ValuePath;
 use getset::Getters;
-use orion_error::ErrorOwe;
 use orion_infra::path::{PathResult, ensure_path};
 
 #[derive(Getters, Clone, Debug)]
@@ -88,7 +88,7 @@ impl SysOperatorPath {
     /// 执行配置文件迁移（如果需要）
     pub fn migrate_conf_file(&self) -> MainResult<()> {
         if self.needs_conf_migration() {
-            std::fs::rename(self.conf_file_v1(), self.conf_file_v2()).owe_res()?;
+            std::fs::rename(self.conf_file_v1(), self.conf_file_v2()).source_resource()?;
         }
         Ok(())
     }
@@ -100,7 +100,7 @@ impl SysOperatorPath {
 
     /// 确保项目根目录存在
     pub fn ensure_root_exists(&self) -> MainResult<()> {
-        ensure_path(&self.root).owe_logic()?;
+        ensure_path(&self.root).source_logic()?;
         Ok(())
     }
 }

@@ -206,7 +206,7 @@ gops sys uninstall  # = docker compose down
 
 ## 当前已知问题（已知限制）
 
-- **`prj import` 要求系统已解析变量**：导入流程依赖 `sys/merged_vars.yml`（由 `gops sys update` 解析模块并合并变量后生成）。该文件需要入库（不 gitignore），保证源码、交付包与导入期望一致；若导入一个从未 `update` 过、且未提交 `merged_vars.yml` 的系统，会明确报错：`系统变量未解析：缺少 .../sys/merged_vars.yml。请先在该系统上执行 gops sys update 解析变量，再打包导入`。推荐直接使用 `gops sys package`（内部先 update 再打包）。
+- **`prj import` 要求系统已解析变量**：导入流程依赖 `sys/merged_vars.yml`（由 `gops sys update` 解析模块并合并变量后生成）。该文件需要入库（不 gitignore），保证源码、交付包与导入期望一致；若导入一个从未 `update` 过、且未提交 `merged_vars.yml` 的系统，会明确报错：`系统变量未解析：缺少 .../sys/merged_vars.yml。请先在该系统上执行 gops sys update 解析变量`。推荐直接使用 `gops sys package`（内部先 update 再打包）。
 - **执行链依赖外部环境**：工作流模板引用了 `galaxy-operators/*.git` 等外部仓库，`update` / 执行需网络，离线不可用。
 - 已修复的问题：`prj import` 的 `values` 符号链接冲突、`convert_addr` 对裸目录的 panic、`mod new` 硬编码 postgresql 构件地址、`merged_vars.yml` 缺失时的晦涩报错（现改为清晰可操作的提示），并新增 `gops sys package` 固化“先 update 再打包”的交付约束。
 

@@ -74,11 +74,13 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
 ///
 /// 允许“全注释/空”文件：值文件模板把可用变量以注释形式列出，未取消注释时内容全为注释，
 /// 此时视为**空覆盖**（不钉住任何默认值），而不是报解析错误。
+/// 仅含 YAML 文档标记（`---`、`...`）的文件同样视为空覆盖。
 pub fn load_value_file(path: &Path) -> MainResult<ValueDict> {
     let text = std::fs::read_to_string(path).source_resource()?;
+    // 仅注释 / 空 / 仅文档标记（`---`、`...`）都视为空覆盖
     let has_content = text.lines().any(|line| {
         let trimmed = line.trim();
-        !trimmed.is_empty() && !trimmed.starts_with('#')
+        !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed != "---" && trimmed != "..."
     });
     if !has_content {
         return Ok(ValueDict::default());
@@ -493,6 +495,12 @@ mod tests {
 
         // 空文件同样视为空覆盖
         std::fs::write(&path, "\n").unwrap();
+        assert_eq!(load_value_file(&path).assert().len(), 0);
+
+        // 仅 YAML 文档标记（--- / ...）也视为空覆盖，而不是解析报错
+        std::fs::write(&path, "---\n").unwrap();
+        assert_eq!(load_value_file(&path).assert().len(), 0);
+        std::fs::write(&path, "---\n...\n").unwrap();
         assert_eq!(load_value_file(&path).assert().len(), 0);
 
         // 有内容时正常解析

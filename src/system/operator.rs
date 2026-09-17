@@ -257,7 +257,7 @@ impl SysOperator {
         // 系统变量必须先解析：本地化基线来自 sys/merged_vars.yml
         if !self.has_resolved_vars() {
             return Err(crate::error::MainReason::logic_detail(format!(
-                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
+                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量",
                 self.paths.merged_vars_file().display()
             )));
         }
@@ -510,6 +510,93 @@ pub mod tests {
         assert_eq!(
             vals.get("SERVICE_PORT").map(|v| v.to_string()).as_deref(),
             Some("8080")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_value_reference_is_inert() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_value_ref_inert");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_value_ref_inert")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+
+        // 含空格与 `#` 的值也要能被安全注释
+        std::fs::write(
+            prj_path.join("sys/merged_vars.yml"),
+            "system:\n  - name: SERVICE_IMAGE\n    value: \"nginx:alpine\"\n  - name: NOTE\n    value: \"a # b\"\n",
+        )
+        .unwrap();
+
+        let reference = proj.value_reference()?;
+        assert!(reference.contains("# SERVICE_IMAGE:"));
+        assert!(reference.contains("# NOTE:"));
+        // 模板内容必须全部是注释（或空行）
+        assert!(
+            reference
+                .lines()
+                .all(|l| l.trim().is_empty() || l.trim().starts_with('#'))
+        );
+
+        // 核心不变式：模板作为值文件加载时等价于空覆盖（惰性）
+        let value_path = proj.init_setting_value()?;
+        let loaded = crate::project::load_value_file(&value_path.sys_value_file())?;
+        assert!(loaded.is_empty(), "template must be inert, got: {loaded:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_value_reference_empty_defaults() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_value_ref_empty");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_value_ref_empty")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+        // 已解析但没有 system 变量
+        std::fs::write(prj_path.join("sys/merged_vars.yml"), "system: []\n").unwrap();
+
+        let reference = proj.value_reference()?;
+        assert!(reference.contains("系统变量参考"));
+        assert!(
+            reference
+                .lines()
+                .all(|l| l.trim().is_empty() || l.trim().starts_with('#'))
+        );
+
+        // 仍生成模板文件（作为覆盖位置），但为空覆盖
+        let value_path = proj.init_setting_value()?;
+        assert!(value_path.sys_value_file().exists());
+        assert!(crate::project::load_value_file(&value_path.sys_value_file())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_init_setting_value_keeps_existing_value_file() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_value_keep");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_value_keep")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+        std::fs::write(
+            prj_path.join("sys/merged_vars.yml"),
+            "system:\n  - name: SERVICE_IMAGE\n    value: \"nginx:alpine\"\n",
+        )
+        .unwrap();
+
+        // 用户已写好的值文件（只覆盖一项）不应被模板覆盖
+        let user_value = prj_path.join("values/sys_value.yml");
+        std::fs::create_dir_all(user_value.parent().unwrap()).unwrap();
+        std::fs::write(&user_value, "SERVICE_IMAGE: custom:tag\n").unwrap();
+
+        let value_path = proj.init_setting_value()?;
+        assert_eq!(value_path.sys_value_file(), user_value);
+        assert_eq!(
+            std::fs::read_to_string(&user_value).unwrap(),
+            "SERVICE_IMAGE: custom:tag\n"
         );
         Ok(())
     }

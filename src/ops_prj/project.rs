@@ -459,5 +459,11 @@ system:
         let plain = temp_dir.path().join("plain-sys");
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(owner_project_value_dir(&plain), None);
+
+        // ops-prj.yml 损坏时静默回退（不 panic）
+        let broken = temp_dir.path().join("broken");
+        std::fs::create_dir_all(broken.join("web-stack")).unwrap();
+        std::fs::write(broken.join("ops-prj.yml"), "sys_models: [oops\n").unwrap();
+        assert_eq!(owner_project_value_dir(&broken.join("web-stack")), None);
     }
 }

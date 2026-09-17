@@ -1086,4 +1086,94 @@ mod tests {
         );
         assert!(env.contains("REPLICAS=1"), "unexpected .env: {env}");
     }
+
+    #[tokio::test]
+    async fn test_sys_localize_ops_template_only_uses_defaults() {
+        once_init_log();
+        let temp_dir = tempdir().unwrap();
+        let prj = temp_dir.path().join("proj");
+        std::fs::create_dir_all(&prj).unwrap();
+
+        // 项目下创建 docker-compose 系统并声明到 ops-prj.yml
+        {
+            let _wd = WorkDirWithLock::change(&prj).unwrap();
+            SysCommandHandler::handle_new(SysNewArgs {
+                name: "my-sys".to_string(),
+                kind: Some("docker-compose".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+        std::fs::write(
+            prj.join("ops-prj.yml"),
+            "name: proj\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: my-sys\n    kind: docker-compose\n    vender: ''\n  addr:\n    url: http://example.com/my-sys.tar.gz\n",
+        )
+        .unwrap();
+
+        // 首次 localize：自动解析变量，并在**项目值目录**生成注释模板
+        {
+            let _wd = WorkDirWithLock::change(prj.join("my-sys")).unwrap();
+            SysCommandHandler::handle_localize(SysLocalizeArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                module: None,
+                only: false,
+            })
+            .await
+            .unwrap();
+        }
+
+        // 模板落在项目值目录，且全为注释
+        let tpl = prj.join("values/my-sys/sys_value.yml");
+        let text = std::fs::read_to_string(&tpl).unwrap();
+        assert!(
+            text.lines()
+                .all(|l| l.trim().is_empty() || l.trim().starts_with('#')),
+            "template should be fully commented: {text}"
+        );
+
+        // 模板未取消注释 -> .env 完全取系统默认值
+        let env = std::fs::read_to_string(prj.join("my-sys/.env")).unwrap();
+        assert!(
+            env.contains("SERVICE_IMAGE=nginx:alpine"),
+            "unexpected .env: {env}"
+        );
+        assert!(env.contains("REPLICAS=1"), "unexpected .env: {env}");
+    }
+
+    #[tokio::test]
+    async fn test_sys_localize_only_errors_when_vars_unresolved() {
+        once_init_log();
+        let temp_dir = tempdir().unwrap();
+
+        // 新建 docker-compose 系统（尚未 update，无 merged_vars.yml）
+        {
+            let _wd = WorkDirWithLock::change(temp_dir.path()).unwrap();
+            SysCommandHandler::handle_new(SysNewArgs {
+                name: "only_demo".to_string(),
+                kind: Some("docker-compose".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+
+        // --only 跳过 update：变量未解析时应给出明确错误
+        {
+            let _wd = WorkDirWithLock::change(temp_dir.path().join("only_demo")).unwrap();
+            let result = SysCommandHandler::handle_localize(SysLocalizeArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                module: None,
+                only: true,
+            })
+            .await;
+            assert!(result.is_err(), "--only should fail without resolved vars");
+            let err = format!("{:?}", result.unwrap_err());
+            assert!(err.contains("系统变量未解析"), "unexpected error: {err}");
+        }
+    }
 }

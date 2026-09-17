@@ -16,9 +16,6 @@ _used.json
 _used.yml
 _value.yml
 
-# 系统变量解析结果（gops sys update / package 生成）
-sys/resolved_vars.yml
-
 # 值文件：忽略派生的值文件（sys_value.yml / <mod>/mod_value.yml / setting/...），
 # 但保留客户覆盖 values/value.yml（版本化）。
 values/*

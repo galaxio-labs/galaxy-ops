@@ -20,7 +20,7 @@
 
 ### 改进优化
 - **系统文件可选化**: `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml` 缺失时降级为空，纯 docker-compose 系统可省略
-- **`.gitignore` 改进**: 忽略派生的值文件但保留客户覆盖 `values/value.yml`；新增 `.env` / `sys/resolved_vars.yml`
+- **`.gitignore` 改进**: 忽略派生的值文件但保留客户覆盖 `values/value.yml`；新增 `.env`。`sys/resolved_vars.yml` 需要入库（供 `prj import` 读取），不加入 gitignore
 - **`sys new` 默认生成 `docker-compose.yml`**: 内置 `${SERVICE_IMAGE}` / `${SERVICE_PORT}` / `${REPLICAS}` 占位与对应 system 变量段
 - **引入 `orion-sec` 依赖**: 密钥加载走 `orion-sec::load_sec_dict()`（读 `~/.galaxy/sec_value.yml` 或 `./.galaxy/sec_value.yml`），key 归一化为大写 `SEC_*` 前缀后注入 `docker compose` 子进程环境，密钥不落盘
 - **许可证统一为 MIT**

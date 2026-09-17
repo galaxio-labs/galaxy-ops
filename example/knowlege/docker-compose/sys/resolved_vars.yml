@@ -1,0 +1,11 @@
+system:
+- name: NGINX_TAG
+  value: 1.25-alpine
+- name: HTTP_PORT
+  value: 8080
+- name: DB_HOST
+  value: 10.0.0.11
+- name: REPLICAS
+  value: 3
+- name: POSTGRES_TAG
+  value: 16-alpine

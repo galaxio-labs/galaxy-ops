@@ -87,7 +87,7 @@ gops sys download/install/uninstall/start/stop/status/diagnose
 
 ```text
 docker-compose.yml        →  ${SEC_DB_PASSWORD}（原生占位）
-sys localize             →  .env = 非密钥配置（vars.yml 默认 + values/value.yml 覆盖）
+sys localize             →  .env = 系统默认值（merged_vars.yml）+ values/sys_value.yml + values/value.yml 覆盖（仅非密钥，后两者可只写要覆盖的项）
 sys start (compose)      →  orion_sec::load_sec_dict()
                             读 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）
                             → SEC_DB_PASSWORD=<明文> 注入 docker compose 子进程环境

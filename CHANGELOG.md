@@ -18,13 +18,14 @@
 
 ### 改进优化
 - 系统文件可选化：`mod_list.yml` / `workflows/` / `setting/list.yml` 缺失时降级为空
+- `sys localize` 以系统默认值（`sys/merged_vars.yml` 的 `system:` 段）为基线，值文件只需写需要覆盖的项
 - `sys localize` 值文件缺失时自动先 `update`（`--only` 跳过）；`sys new` 支持已存在目录（幂等）
 - 引入 `orion-sec`；许可证统一为 MIT
 
 ### Bug 修复
 - 修复 `values` 符号链接冲突、`convert_addr`/`build_pkg` 裸目录 panic、`mod new` 硬编码构件地址
 - 修复 `load_sys_opr_value`/`load_mod_opr_value` 值文件序列化不一致
-- 修复运维项目内 `cd <sys>; gops sys localize` 未使用项目值的问题：现在按 `ops-prj.yml` 直接解析 `values/<sys_name>/`，不再依赖 `<sys>/values` 符号链接是否完整
+- 修复运维项目内 `cd <sys>; gops sys localize` 未使用项目值的问题：按 `ops-prj.yml` 直接解析 `values/<sys_name>/`，不再依赖 `<sys>/values` 符号链接是否完整
 
 ## [1.2.0] - 2026-05-04
 

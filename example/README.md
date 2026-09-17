@@ -125,7 +125,7 @@ System/Module Spec（共享定义）
 ```
 
 - `gops prj import` 把同一个系统导入多个项目
-- 每个项目在 `values/<system>/` 下维护自己的值（`sys_value.yml` 为客户生效值，`value.yml` 为覆盖值）
+- 每个项目在 `values/<system>/` 下维护客户值：**只需写要覆盖的项**，其余取系统默认值（`sys/merged_vars.yml` 的 `system:` 段）；`value.yml` 作为额外覆盖层
 - `gops sys localize` / `gops mod localize` 渲染出本地化产物
 - 在项目内的系统目录执行 `gops sys localize` 时，会按上层 `ops-prj.yml` 直接使用 `values/<system>/`，不依赖 `<sys>/values` 符号链接是否完整
 
@@ -143,7 +143,7 @@ System（共享定义）              Ops Project（客户差异）
 密钥（密码/token）→ 运行时由 gops sys start 从 ~/.galaxy/sec_value.yml 注入子进程环境，不落盘
 ```
 
-**规则**：`.env = vars.yml 默认值 + values/value.yml 客户覆盖（仅非密钥配置）`；密钥用 `${SEC_xxx}` 占位，不写进 `.env`。
+**规则**：`.env = 系统默认值（merged_vars.yml）+ values/sys_value.yml + values/value.yml`（后两者只需写要覆盖的项，仅非密钥配置）；密钥用 `${SEC_xxx}` 占位，不写进 `.env`。
 
 理由：compose 文件保持“合法”，可随时 `docker compose config` 校验；**版本化的是值文件（配置），`.env` 只是非密钥配置的生成产物**；密钥走 `~/.galaxy/sec_value.yml`（`orion-sec` 运行时注入），不进版本库、不落盘。
 

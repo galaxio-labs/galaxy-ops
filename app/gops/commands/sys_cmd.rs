@@ -406,11 +406,18 @@ impl SysCommandHandler {
             spec.init_setting_value_in(val_path.clone())?;
         }
 
-        let mut dict =
-            OriginDict::from(ValueDict::load_yaml(&val_path.sys_value_file()).source_resource()?);
-        dict.set_source("sys-setting");
+        // 基线：系统解析出的默认值（sys/merged_vars.yml 的 system 段），
+        // 使值文件只需写“需要修改的项”，其余取系统默认值。
+        let mut dict = OriginDict::from(spec.system_default_values().err_conv()?);
+        dict.set_source("sys-defaults");
 
-        // 合并客户覆盖值 values/value.yml（若存在），覆盖系统默认值
+        // 叠加系统/项目的值文件（可为部分覆盖）
+        let mut sys_dict =
+            OriginDict::from(ValueDict::load_yaml(&val_path.sys_value_file()).source_resource()?);
+        sys_dict.set_source("sys-setting");
+        dict.merge(&sys_dict);
+
+        // 叠加客户覆盖值 values/value.yml（若存在），优先于系统默认与值文件
         let user_value_file = val_path.root().join(USER_VALUE_FILE);
         if user_value_file.exists() {
             let mut user_dict =
@@ -999,13 +1006,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sys_localize_prefers_ops_project_values() {
+    async fn test_sys_localize_merges_partial_ops_project_values() {
         once_init_log();
         let temp_dir = tempdir().unwrap();
         let prj = temp_dir.path().join("proj");
         std::fs::create_dir_all(&prj).unwrap();
 
-        // 1. 在项目下创建 docker-compose 系统
+        // 1. 项目下创建 docker-compose 系统
         {
             let _wd = WorkDirWithLock::change(&prj).unwrap();
             SysCommandHandler::handle_new(SysNewArgs {
@@ -1016,17 +1023,32 @@ mod tests {
             .unwrap();
         }
 
-        // 2. 项目声明该系统并为它维护客户值（系统目录内的 values 并非符号链接）
+        // 2. 项目声明该系统
         std::fs::write(
             prj.join("ops-prj.yml"),
             "name: proj\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: my-sys\n    kind: docker-compose\n    vender: ''\n  addr:\n    url: http://example.com/my-sys.tar.gz\n",
         )
         .unwrap();
-        let prj_values = prj.join("values/my-sys");
-        std::fs::create_dir_all(&prj_values).unwrap();
-        std::fs::write(prj_values.join("sys_value.yml"), "HTTP_PORT: 9090\n").unwrap();
 
-        // 3. 在系统目录内 localize：应使用项目值（客户值）
+        // 3. 解析变量（生成 sys/merged_vars.yml，并初始化项目值文件）
+        {
+            let _wd = WorkDirWithLock::change(prj.join("my-sys")).unwrap();
+            SysCommandHandler::handle_update(SysUpdateArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                force: false,
+            })
+            .await
+            .unwrap();
+        }
+
+        // 4. 项目值文件只写需要修改的项（部分覆盖）
+        let prj_values = prj.join("values/my-sys");
+        std::fs::write(prj_values.join("sys_value.yml"), "SERVICE_PORT: 9090\n").unwrap();
+
+        // 5. 在系统目录内 localize：未列出的项取系统默认值
         {
             let _wd = WorkDirWithLock::change(prj.join("my-sys")).unwrap();
             SysCommandHandler::handle_localize(SysLocalizeArgs {
@@ -1042,8 +1064,11 @@ mod tests {
         }
 
         let env = std::fs::read_to_string(prj.join("my-sys/.env")).unwrap();
-        assert!(env.contains("HTTP_PORT=9090"), "unexpected .env: {env}");
-        // 项目值已存在，不应在系统目录另生成一份派生值文件
-        assert!(!prj.join("my-sys/values/sys_value.yml").exists());
+        assert!(env.contains("SERVICE_PORT=9090"), "unexpected .env: {env}");
+        assert!(
+            env.contains("SERVICE_IMAGE=nginx:alpine"),
+            "unexpected .env: {env}"
+        );
+        assert!(env.contains("REPLICAS=1"), "unexpected .env: {env}");
     }
 }

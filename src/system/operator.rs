@@ -165,6 +165,21 @@ impl SysOperator {
     pub fn value_path(&self) -> ValuePath {
         self.paths.to_value_path()
     }
+
+    /// 系统解析出的默认值（`sys/merged_vars.yml` 的 `system:` 段）。
+    ///
+    /// 用作本地化基线：值文件（`values/sys_value.yml` / `values/value.yml`）
+    /// 可以只写需要覆盖的项，其余取系统默认值。缺少已解析变量时返回空字典。
+    pub fn system_default_values(&self) -> MainResult<ValueDict> {
+        let vars_file = self.paths.resolve_merged_vars_file();
+        if !vars_file.exists() {
+            return Ok(ValueDict::default());
+        }
+        Ok(VarCollection::load_yaml(&vars_file)
+            .source_resource()?
+            .system_vars()
+            .to_val())
+    }
 }
 
 impl SysOperator {
@@ -421,6 +436,36 @@ pub mod tests {
                 .map(|v| v.to_string())
                 .as_deref(),
             Some("legacy-image")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_system_default_values_reads_merged_vars() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_default_values");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_default_values")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+
+        // 缺少已解析变量时返回空字典（本地化会退化为只用值文件）
+        assert!(proj.system_default_values()?.get("SERVICE_PORT").is_none());
+
+        std::fs::write(
+            prj_path.join("sys/merged_vars.yml"),
+            "system:\n  - name: SERVICE_IMAGE\n    value: \"nginx:alpine\"\n  - name: SERVICE_PORT\n    value: \"8080\"\n",
+        )
+        .unwrap();
+
+        let vals = proj.system_default_values()?;
+        assert_eq!(
+            vals.get("SERVICE_IMAGE").map(|v| v.to_string()).as_deref(),
+            Some("nginx:alpine")
+        );
+        assert_eq!(
+            vals.get("SERVICE_PORT").map(|v| v.to_string()).as_deref(),
+            Some("8080")
         );
         Ok(())
     }

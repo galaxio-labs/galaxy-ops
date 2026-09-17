@@ -5,11 +5,8 @@ use crate::workflow::prj::GxlProject;
 
 // 常量定义
 const POSTGRESQL_URL: &str = "https://mirrors.aliyun.com/postgresql/latest/postgresql-17.4.tar.gz";
-const POSTGRESQL_MD5_URL: &str =
-    "https://mirrors.aliyun.com/postgresql/latest/postgresql-17.4.tar.gz.md5";
 const POSTGRESQL_README_URL: &str = "https://mirrors.aliyun.com/postgresql/README";
 const POSTGRESQL_ARCHIVE: &str = "postgresql-17.4.tar.gz";
-const POSTGRESQL_MD5_ARCHIVE: &str = "postgresql-17.4.tar.gz.md5";
 use crate::artifact::{Artifact, ArtifactPackage};
 use indexmap::IndexMap;
 use orion_variate::addr::HttpResource;
@@ -213,61 +210,42 @@ impl ModuleSpec {
             VarDefinition::from(("mem", 1048)).with_mut_module(),
         ]);
 
+        // 构件地址跟随模块名，避免硬编码到具体组件（如 postgresql）
+        let artifact_version = "0.1.0";
+        let artifact_local = format!("{name}-{artifact_version}.tar.gz");
+        let artifact_url = format!("http://your-artifact-repo/{artifact_local}");
+        let artifact = Artifact::new(
+            name,
+            artifact_version,
+            HttpResource::from(artifact_url.as_str()),
+            artifact_local.as_str(),
+        )
+        .with_cache_addr(Some(Address::from(HttpResource::from(
+            "{{ART_CACHE_REPO}}",
+        ))));
+
         let x86_ubu22_k8s = MMOperator::init(
             ModelSTD::x86_ubt22_k8s(),
-            ArtifactPackage::from(vec![
-                Artifact::new(
-                    name,
-                    "0.1.0",
-                    HttpResource::from(POSTGRESQL_MD5_URL),
-                    POSTGRESQL_MD5_ARCHIVE,
-                )
-                .with_cache_addr(Some(Address::from(HttpResource::from(
-                    "{{ART_CACHE_REPO}}",
-                )))),
-            ]),
+            ArtifactPackage::from(vec![artifact.clone()]),
             ModWorkflows::mod_k8s_tpl_init(),
             GxlProject::spec_k8s_tpl(),
-            //conf.clone(),
             vars.clone(),
             None,
         );
 
         let arm_mac_host = MMOperator::init(
             ModelSTD::arm_mac14_host(),
-            ArtifactPackage::from(vec![
-                Artifact::new(
-                    name,
-                    "0.1.0",
-                    HttpResource::from(POSTGRESQL_MD5_URL),
-                    POSTGRESQL_MD5_ARCHIVE,
-                )
-                .with_cache_addr(Some(Address::from(HttpResource::from(
-                    "{{ART_CACHE_REPO}}",
-                )))),
-            ]),
+            ArtifactPackage::from(vec![artifact.clone()]),
             ModWorkflows::mod_host_tpl_init(),
             GxlProject::spec_host_tpl(),
-            //conf.clone(),
             vars.clone(),
             None,
         );
         let x86_ubt22_host = MMOperator::init(
-            ModelSTD::arm_mac14_host(),
-            ArtifactPackage::from(vec![
-                Artifact::new(
-                    name,
-                    "0.1.0",
-                    HttpResource::from(POSTGRESQL_MD5_URL),
-                    POSTGRESQL_MD5_ARCHIVE,
-                )
-                .with_cache_addr(Some(Address::from(HttpResource::from(
-                    "{{ART_CACHE_REPO}}",
-                )))),
-            ]),
+            ModelSTD::x86_ubt22_host(),
+            ArtifactPackage::from(vec![artifact.clone()]),
             ModWorkflows::mod_host_tpl_init(),
             GxlProject::spec_host_tpl(),
-            //conf.clone(),
             vars.clone(),
             None,
         );

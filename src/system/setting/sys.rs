@@ -35,7 +35,7 @@ impl ModSetting {
         }
     }
 }
-#[derive(Getters, Clone, Debug, Serialize, Deserialize)]
+#[derive(Getters, Clone, Debug, Default, Serialize, Deserialize)]
 #[getset(get = "pub ")]
 #[serde(transparent)]
 pub struct LocalizeDict {
@@ -107,7 +107,12 @@ impl SysSetting {
         let vars_file_name = root.join(VARS_YML);
         let list_file_name = root.join("list.yml");
         let vars = VarCollection::load_yaml(&vars_file_name).source_resource()?;
-        let list = LocalizeDict::load_yaml(&list_file_name).source_resource()?;
+        // list.yml 可选：缺失时视为空本地化列表（纯 docker-compose 等场景）
+        let list = if list_file_name.exists() {
+            LocalizeDict::load_yaml(&list_file_name).source_resource()?
+        } else {
+            LocalizeDict::default()
+        };
         let root = Some(root.to_path_buf());
         Ok(SysSetting { vars, list, root }.finalize_loaded())
     }

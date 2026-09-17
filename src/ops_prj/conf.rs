@@ -1,26 +1,40 @@
 use super::prelude::*;
 
 use crate::module::depend::DependencySet;
+use crate::ops_prj::system::OpsSystem;
 use crate::types::{Accessor, RefUpdateable};
 
+/// 运维项目 manifest：项目身份 + 工作环境 + 已导入系统列表。
+///
+/// 由原来的 `ops-prj.yml`（ProjectConf：name + work_envs）与 `ops-systems.yml`
+/// （OpsTarget：sys_models）合并为单个 `ops-prj.yml`。
 #[derive(Getters, Clone, Debug, Serialize, Deserialize)]
-pub struct ProjectConf {
+#[getset(get = "pub")]
+pub struct OpsProjectConf {
     name: String,
     work_envs: DependencySet,
+    #[serde(default)]
+    sys_models: Vec<OpsSystem>,
 }
 
-impl ProjectConf {
+impl OpsProjectConf {
     pub fn new<S: Into<String>>(name: S, local_res: DependencySet) -> Self {
         Self {
             name: name.into(),
             work_envs: local_res,
+            sys_models: Vec::new(),
         }
     }
     pub fn for_test() -> Self {
-        let work_envs = DependencySet::example();
         Self {
             name: "example_sys".to_string(),
-            work_envs,
+            work_envs: DependencySet::example(),
+            sys_models: Vec::new(),
+        }
+    }
+    pub fn import_sys(&mut self, sys: OpsSystem) {
+        if !self.sys_models.contains(&sys) {
+            self.sys_models.push(sys);
         }
     }
     pub fn load(path: &Path) -> MainResult<Self> {
@@ -30,7 +44,7 @@ impl ProjectConf {
     }
 }
 #[async_trait]
-impl InsUpdateable<ProjectConf> for ProjectConf {
+impl InsUpdateable<OpsProjectConf> for OpsProjectConf {
     async fn update_local(
         mut self,
         accessor: Accessor,

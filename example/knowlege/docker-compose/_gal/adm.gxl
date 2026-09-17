@@ -1,0 +1,16 @@
+extern mod cfm  { git = "https://github.com/galaxy-operators/cfm-gxl.git",     channel = "${GXL_CHANNEL:main}" } 
+//extern mod sys_repo,sys_pub { git = "https://cnb.cool/dy-sec/ops/mechanism/gxl-dayu.git" , channel = "${GXL_CHANNEL_DY:main}" }
+mod  envs {
+  env default {
+        PKG_NAME = "you_sys";
+  }
+}
+
+
+mod main  : ver_adm {
+    //#[task(name="package")]
+    //flow @package  | sys_pub.package ;
+    //#[task(name="publish")]
+    //flow @publish  | sys_pub.publish ;
+}
+

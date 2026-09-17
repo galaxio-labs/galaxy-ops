@@ -40,7 +40,7 @@ impl ProjectPath {
         self.root.join("ops-prj.yml")
     }
 
-    /// 获取目标配置文件路径 (ops-systems.yml)
+    /// 获取目标配置文件路径 (ops-systems.yml) —— 仅用于向后兼容旧项目
     pub fn target_file(&self) -> PathBuf {
         self.root.join("ops-systems.yml")
     }

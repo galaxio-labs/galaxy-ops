@@ -30,16 +30,16 @@ src/ops_prj/
 
 ### `project.rs`
 
-运维项目对象入口，围绕：
+运维项目对象入口，围绕 `ops-prj.yml`（项目 manifest：name + work_envs + sys_models）工作。
 
-- `ops-prj.yml`
-- `ops-systems.yml`
-
-等项目级文件工作。
+> 历史：原 `ops-systems.yml` 已合并进 `ops-prj.yml`；加载时若存在旧的 `ops-systems.yml` 会自动合并并迁移到单文件。
 
 ### `import.rs`
 
-系统导入逻辑，对应 `gops prj import`。
+系统导入与重新导入逻辑，对应 `gops prj import` / `gops prj reimport`。
+
+- `import_sys`：导入一个新系统
+- `reimport`：按 `ops-prj.yml` 记录的 `sys_models` 重新导入系统，保留 `values/` 客户值（适用于“删除了已导入系统目录、但保留了 values/ + ops-prj.yml”的场景）
 
 ### `init.rs`
 
@@ -47,14 +47,11 @@ src/ops_prj/
 
 ### `path.rs`
 
-项目路径组织，负责定位：
-
-- `ops-prj.yml`
-- `ops-systems.yml`
+项目路径组织，负责定位 `ops-prj.yml`（`target_file` 保留用于向后兼容旧 `ops-systems.yml`）。
 
 ### `system.rs`
 
-项目内系统引用相关逻辑。
+项目内系统引用相关逻辑（`OpsSystem` / `OpsTarget`）。
 
 ## 与 CLI 的对应
 
@@ -62,6 +59,7 @@ src/ops_prj/
 gops prj new
 gops prj import
 gops prj update
+gops prj reimport
 ```
 
 ## 输出对象
@@ -70,8 +68,8 @@ gops prj update
 
 ```text
 <ops-project-root>/
-├── ops-prj.yml
-├── ops-systems.yml
+├── ops-prj.yml       # name + work_envs + sys_models（已导入系统列表）
+├── values/           # 客户值目录（values/<sys>/value.yml 客户覆盖；prj reimport 保留）
 ├── version.txt
 └── _gal/
 ```

@@ -36,6 +36,10 @@ impl FilePersist<Workflows> for Workflows {
     fn load_from(path: &Path) -> SerdeResult<Self> {
         let mut actions = Vec::new();
         let actions_path = path.join(WORKFLOWS_DIR);
+        // workflows/ 可选：缺失时视为空工作流（例如纯 docker-compose 系统）
+        if !actions_path.exists() {
+            return Ok(Workflows { actions });
+        }
         for entry in std::fs::read_dir(&actions_path)
             .source_resource()
             .with(&actions_path)

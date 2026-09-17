@@ -37,6 +37,14 @@ pub struct PrjUpdateArgs {
     pub force: ForceArgs,
 }
 
+#[derive(Debug, Args, Getters)]
+pub struct PrjReimportArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+    #[clap(flatten)]
+    pub force: ForceArgs,
+}
+
 #[derive(Debug, Parser)]
 pub enum PrjCmd {
     #[command(about = "创建维护工程 (Create Maintenance Project)")]
@@ -45,6 +53,12 @@ pub enum PrjCmd {
     Import(PrjImportArgs),
     #[command(about = "维护工程 (Maintain Project)")]
     Update(PrjUpdateArgs),
+    #[command(
+        about = "重新导入系统 (Reimport Systems)",
+        long_about = "按 ops-prj.yml 里记录的 sys_models 重新导入系统，保留 values/ 客户值。适用于删除了已导入系统目录、但保留了 values/ + ops-prj.yml 的场景。\n\
+                     Reimport recorded systems from ops-prj.yml, preserving values/. Use when the imported system dir is removed but values/ + ops-prj.yml are kept."
+    )]
+    Reimport(PrjReimportArgs),
 }
 
 impl DfxArgsGetter for PrjNewArgs {
@@ -66,6 +80,15 @@ impl DfxArgsGetter for PrjImportArgs {
 }
 
 impl DfxArgsGetter for PrjUpdateArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
+impl DfxArgsGetter for PrjReimportArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -114,11 +137,24 @@ impl PrjCommandHandler {
         Ok(())
     }
 
+    pub async fn handle_reimport(args: PrjReimportArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+
+        let current_dir = std::env::current_dir().source_resource()?;
+        let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
+        let mut prj = OpsProject::load(&current_dir).err_conv()?;
+        let accessor = galaxy_ops::accessor::accessor_for_default();
+
+        prj.reimport(accessor, &options).await.err_conv()?;
+        Ok(())
+    }
+
     pub async fn execute(cmd: PrjCmd) -> MainResult<()> {
         match cmd {
             PrjCmd::New(args) => Self::handle_new(args).await,
             PrjCmd::Import(args) => Self::handle_import(args).await,
             PrjCmd::Update(args) => Self::handle_update(args).await,
+            PrjCmd::Reimport(args) => Self::handle_reimport(args).await,
         }
     }
 }

@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -6,17 +7,18 @@ use tokio::process::Command as TokioCommand;
 use clap::{Args, Parser};
 use derive_getters::Getters;
 use dialoguer::Select;
-use galaxy_ops::const_vars::{SETTING_DIR, VALUE_DIR};
+use galaxy_ops::const_vars::{SETTING_DIR, USER_VALUE_FILE, VALUE_DIR};
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::ModelSTD;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
-use galaxy_ops::system::SysValuePaths;
 use galaxy_ops::system::operator::SysOperator;
 use galaxy_ops::system::setting::SysSetting;
+use galaxy_ops::system::{SysKind, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_conf::YamlIO;
 use orion_infra::path::{ensure_path, make_new_path};
+use orion_variate::archive::compress;
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{OriginDict, ValueDict};
 
@@ -32,6 +34,13 @@ pub struct SysNewArgs {
         help = "系统名称 (System name): 字母数字，可包含连字符和下划线\nalphanumeric with hyphens/underscores"
     )]
     pub(crate) name: String,
+
+    #[arg(
+        long,
+        help = "系统部署类型 (System kind): gxl | docker-compose\ngxl=模块化 GXL 工作流系统(默认); docker-compose=声明式 docker compose 系统",
+        default_value = "gxl"
+    )]
+    pub(crate) kind: String,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -41,6 +50,22 @@ pub struct SysUpdateArgs {
 
     #[arg(short, long, help = "update force", default_value = "false")]
     pub force: bool,
+}
+
+#[derive(Debug, Args, Getters)]
+pub struct SysPackageArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+
+    #[arg(short, long, help = "update force", default_value = "false")]
+    pub force: bool,
+
+    #[arg(
+        short,
+        long = "output",
+        help = "输出 tar.gz 路径 (默认: ../<name>-<version>.tar.gz)"
+    )]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -87,6 +112,14 @@ pub enum SysCmd {
                      Update an existing system's configuration, specifications, or dependencies. Supports force updates to override existing configurations without confirmation."
     )]
     Update(SysUpdateArgs),
+
+    /// 打包系统 (Package System)
+    #[command(
+        about = "打包系统 (Package System)",
+        long_about = "先更新系统（解析模块变量并生成 resolved_vars.yml），再打包为可交付的 .tar.gz。\n\
+                     Update the system first (resolve module variables and generate resolved_vars.yml), then package it into a deliverable .tar.gz."
+    )]
+    Package(SysPackageArgs),
 
     /// 为环境本地化系统配置 (Localize System Configuration for Environment)
     #[command(
@@ -195,6 +228,15 @@ impl DfxArgsGetter for SysUpdateArgs {
     }
 }
 
+impl DfxArgsGetter for SysPackageArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
 impl DfxArgsGetter for SysLocalizeArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
@@ -251,8 +293,16 @@ impl SysCommandHandler {
         let new_prj = current_dir.join(args.name());
         make_new_path(&new_prj).source_resource()?;
 
-        let model_in = Self::ia_model_std()?;
-        let spec = SysOperator::make_new(&new_prj, args.name(), model_in).err_conv()?;
+        let kind = parse_kind(args.kind().as_str());
+        // docker-compose 系统无需交互选择型号，用当前系统型号兜底
+        let model_in = if kind == SysKind::DockerCompose {
+            ModelSTD::from_cur_sys()
+        } else {
+            Self::ia_model_std()?
+        };
+        let spec = SysOperator::make_new(&new_prj, args.name(), model_in)
+            .err_conv()?
+            .with_kind(kind);
         spec.save().err_conv()?;
         Ok(())
     }
@@ -273,14 +323,55 @@ impl SysCommandHandler {
         Ok(())
     }
 
+    pub async fn handle_package(args: SysPackageArgs) -> MainResult<()> {
+        let current_dir = std::env::current_dir().expect("无法获取当前目录");
+        galaxy_ops::infra::configure_dfx_logging(&args);
+
+        // 1. 先解析变量（生成 sys/resolved_vars.yml），保证交付包可被 prj import 完整导入
+        let options = DownloadOptions::from((args.force, ValueDict::default()));
+        let operator = SysOperator::load(&current_dir).err_conv()?;
+        let accessor = galaxy_ops::accessor::accessor_for_default();
+        operator
+            .update_local(accessor, &current_dir, &options)
+            .await
+            .err_conv()?;
+
+        // 2. 确定输出路径与版本
+        let name = operator.sys_spec().define().name().clone();
+        let version = read_version(&current_dir);
+        let out_path = match &args.output {
+            Some(p) => PathBuf::from(p),
+            None => current_dir
+                .parent()
+                .map(|p| p.join(format!("{name}-{version}.tar.gz")))
+                .unwrap_or_else(|| PathBuf::from(format!("{name}-{version}.tar.gz"))),
+        };
+
+        // 3. 打包
+        compress(&current_dir, &out_path).source_sys()?;
+        println!("系统已打包: {}", out_path.display());
+        Ok(())
+    }
+
     pub async fn handle_localize(args: SysLocalizeArgs) -> MainResult<()> {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         galaxy_ops::infra::configure_dfx_logging(&args);
 
         let spec = SysOperator::load(&current_dir).err_conv()?;
         let val_path = SysValuePaths::from(current_dir.clone()).join(VALUE_DIR);
-        let dict =
+        let mut dict =
             OriginDict::from(ValueDict::load_yaml(&val_path.sys_value_file()).source_resource()?);
+        dict.set_source("sys-setting");
+
+        // 合并客户覆盖值 values/value.yml（若存在），覆盖系统默认值
+        let user_value_file = val_path.root().join(USER_VALUE_FILE);
+        if user_value_file.exists() {
+            let mut user_dict =
+                OriginDict::from(ValueDict::load_yaml(&user_value_file).source_resource()?);
+            user_dict.set_source("customer");
+            dict.merge(&user_dict);
+        }
+
         spec.localize(
             val_path,
             LocalizeOptions::new(dict).with_only_mod(args.module),
@@ -359,6 +450,14 @@ impl SysCommandHandler {
     pub async fn handle_ops_cmd(cmd_name: &str, args: SysOpsArgs) -> MainResult<()> {
         galaxy_ops::infra::configure_dfx_logging(&args);
 
+        let current_dir = std::env::current_dir().expect("无法获取当前目录");
+        match SysOperator::load_kind(&current_dir) {
+            SysKind::DockerCompose => Self::run_compose_cmd(cmd_name, &args).await,
+            SysKind::Gxl => Self::run_gflow_cmd(cmd_name, &args).await,
+        }
+    }
+
+    async fn run_gflow_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
         // 检查 gflow 版本
         Self::check_gflow_version()?;
 
@@ -379,12 +478,44 @@ impl SysCommandHandler {
             cmd.arg("--").arg(module);
         }
 
+        Self::run_and_stream(cmd, "gflow").await
+    }
+
+    async fn run_compose_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
+        let current_dir = std::env::current_dir().expect("无法获取当前目录");
+
+        // 将 gops sys 语义映射到 docker compose 子命令：
+        //   download -> pull, install -> create, start -> up -d, stop -> stop,
+        //   uninstall -> down, status -> ps, diagnose -> config
+        let (subcommand, extra) = compose_subcommand(cmd_name);
+
+        if args.module().is_some() {
+            println!("note: docker-compose 类型系统忽略 --mod 参数");
+        }
+
+        let mut cmd = TokioCommand::new("docker");
+        cmd.arg("compose").arg(subcommand).args(extra);
+        cmd.current_dir(&current_dir);
+
+        // 运行时注入密钥：从 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）读取 SEC_* 变量，
+        // 只进入 docker compose 子进程环境，不落盘、不进 .env。
+        // diagnose（docker compose config）只读校验，注入掩码值以免泄露明文。
+        let sec_dict = orion_sec::load_sec_dict().source_resource()?;
+        for (key, value) in sec_env_pairs_for(cmd_name, &sec_dict) {
+            cmd.env(key, value);
+        }
+
+        Self::run_and_stream(cmd, "docker compose").await
+    }
+
+    /// 启动子进程并转发 stdout/stderr，非零退出返回错误。
+    async fn run_and_stream(mut cmd: TokioCommand, label: &str) -> MainResult<()> {
         // 设置管道并启动进程
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| anyhow::anyhow!("无法启动 gflow 命令: {}", e))
+            .map_err(|e| anyhow::anyhow!("无法启动 {label} 命令: {}", e))
             .source_resource()?;
 
         let stdout = child
@@ -435,6 +566,7 @@ impl SysCommandHandler {
         match cmd {
             SysCmd::New(args) => Self::handle_new(args).await,
             SysCmd::Update(args) => Self::handle_update(args).await,
+            SysCmd::Package(args) => Self::handle_package(args).await,
             SysCmd::Localize(args) => Self::handle_localize(args).await,
             SysCmd::Setting(args) => Self::handle_setting(args).await,
             SysCmd::Download(sys_ops_args) => Self::handle_ops_cmd("download", sys_ops_args).await,
@@ -450,12 +582,66 @@ impl SysCommandHandler {
     }
 }
 
+fn read_version(root: &Path) -> String {
+    let version_file = root.join("version.txt");
+    let version = std::fs::read_to_string(&version_file)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "0.1.0".to_string());
+    if version.is_empty() {
+        "0.1.0".to_string()
+    } else {
+        version
+    }
+}
+
+/// 把 `--kind` 的字符串解析为系统类型，未知值默认 Gxl。
+fn parse_kind(s: &str) -> SysKind {
+    match s {
+        "docker-compose" | "compose" => SysKind::DockerCompose,
+        _ => SysKind::Gxl,
+    }
+}
+
+/// 把 gops sys 命令名映射为 docker compose 子命令（及附加参数）。
+fn compose_subcommand(cmd_name: &str) -> (&str, &'static [&'static str]) {
+    match cmd_name {
+        "download" => ("pull", &[]),
+        "install" => ("create", &[]),
+        "start" => ("up", &["-d"]),
+        "stop" => ("stop", &[]),
+        "uninstall" => ("down", &[]),
+        "status" => ("ps", &[]),
+        "diagnose" => ("config", &[]),
+        other => (other, &[]),
+    }
+}
+
+/// 密钥掩码值，与 `orion-sec` 的 `SECRET_MASK` 保持一致。
+const SECRET_MASK: &str = "********";
+
+/// 把 secret dict（SEC_* → 明文值）转成要注入子进程的 (KEY, VALUE) 环境变量对。
+/// `diagnose`（docker compose config）是只读校验，注入掩码值以免泄露明文；其余命令注入明文。
+fn sec_env_pairs_for(cmd_name: &str, dict: &ValueDict) -> Vec<(String, String)> {
+    let mask = cmd_name == "diagnose";
+    dict.iter()
+        .map(|(k, v)| {
+            let value = if mask {
+                SECRET_MASK.to_string()
+            } else {
+                v.to_string()
+            };
+            (k.as_str().to_string(), value)
+        })
+        .collect()
+}
+
 // === 测试 ===
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use galaxy_ops::infra::{WorkDirWithLock, once_init_log};
+    use orion_vars::vars::ValueType;
     use tempfile::tempdir;
     #[tokio::test]
     async fn test_sys_new_command() {
@@ -469,6 +655,7 @@ mod tests {
 
         let args = SysNewArgs {
             name: "test_system".to_string(),
+            kind: "gxl".to_string(),
         };
 
         let result = SysCommandHandler::handle_new(args).await;
@@ -506,6 +693,7 @@ mod tests {
         // 测试 new 命令
         let new_cmd = SysCmd::New(SysNewArgs {
             name: "test_system".to_string(),
+            kind: "gxl".to_string(),
         });
         let result = SysCommandHandler::execute(new_cmd).await;
         assert!(result.is_ok());
@@ -520,11 +708,13 @@ mod tests {
         once_init_log();
         let args = SysNewArgs {
             name: "test_system".to_string(),
+            kind: "docker-compose".to_string(),
         };
 
         assert_eq!(args.debug_level(), 0);
         assert_eq!(args.log_setting(), None);
         assert_eq!(args.name(), "test_system");
+        assert_eq!(args.kind(), "docker-compose");
     }
 
     #[test]
@@ -544,6 +734,24 @@ mod tests {
     }
 
     #[test]
+    fn test_sys_package_args_getter() {
+        once_init_log();
+        let args = SysPackageArgs {
+            debug_log: DebugLogArgs {
+                debug: 1,
+                log: None,
+            },
+            force: false,
+            output: None,
+        };
+
+        assert_eq!(args.debug_level(), 1);
+        assert_eq!(args.log_setting(), None);
+        assert!(!args.force);
+        assert!(args.output.is_none());
+    }
+
+    #[test]
     fn test_sys_localize_args_getter() {
         once_init_log();
         let args = SysLocalizeArgs {
@@ -556,5 +764,101 @@ mod tests {
 
         assert_eq!(args.debug_level(), 1);
         assert_eq!(args.log_setting(), Some("debug".to_string()));
+    }
+
+    #[test]
+    fn test_parse_kind() {
+        assert_eq!(parse_kind("gxl"), SysKind::Gxl);
+        assert_eq!(parse_kind("docker-compose"), SysKind::DockerCompose);
+        assert_eq!(parse_kind("compose"), SysKind::DockerCompose);
+        assert_eq!(parse_kind("unknown"), SysKind::Gxl);
+        assert_eq!(parse_kind(""), SysKind::Gxl);
+    }
+
+    #[test]
+    fn test_compose_subcommand() {
+        fn check(cmd: &str, sub: &str, extra: &[&str]) {
+            let (s, e) = compose_subcommand(cmd);
+            assert_eq!(s, sub);
+            assert_eq!(e, extra);
+        }
+        check("download", "pull", &[]);
+        check("install", "create", &[]);
+        check("start", "up", &["-d"]);
+        check("stop", "stop", &[]);
+        check("uninstall", "down", &[]);
+        check("status", "ps", &[]);
+        check("diagnose", "config", &[]);
+        // 未知命令透传
+        check("whatever", "whatever", &[]);
+    }
+
+    #[tokio::test]
+    async fn test_sys_new_writes_kind() {
+        once_init_log();
+        let temp_dir = tempdir().unwrap();
+        let _wd = WorkDirWithLock::change(temp_dir.path());
+        unsafe {
+            std::env::set_var("TEST_MODE", "true");
+        }
+
+        let args = SysNewArgs {
+            name: "compose_demo".to_string(),
+            kind: "docker-compose".to_string(),
+        };
+        SysCommandHandler::handle_new(args).await.unwrap();
+
+        unsafe {
+            std::env::remove_var("TEST_MODE");
+        }
+
+        let prj = temp_dir.path().join("compose_demo");
+        assert_eq!(SysOperator::load_kind(&prj), SysKind::DockerCompose);
+        let conf = std::fs::read_to_string(prj.join("sys-prj.yml")).unwrap();
+        assert!(conf.contains("kind: docker-compose"));
+    }
+
+    #[test]
+    fn test_sec_env_pairs_for_diagnose_masks() {
+        let mut dict = ValueDict::new();
+        dict.insert("SEC_DB_PASSWORD", ValueType::from("pw"));
+        dict.insert("SEC_API_KEY", ValueType::from("tok-123"));
+        // diagnose 注入掩码值，不泄露明文
+        let pairs = sec_env_pairs_for("diagnose", &dict);
+        assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "********".to_string())));
+        assert!(pairs.contains(&("SEC_API_KEY".to_string(), "********".to_string())));
+    }
+
+    #[test]
+    fn test_sec_env_pairs_for_start_plaintext() {
+        let mut dict = ValueDict::new();
+        dict.insert("SEC_DB_PASSWORD", ValueType::from("pw"));
+        dict.insert("SEC_API_KEY", ValueType::from("tok-123"));
+        // 非 diagnose 注入明文
+        let pairs = sec_env_pairs_for("start", &dict);
+        assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "pw".to_string())));
+        assert!(pairs.contains(&("SEC_API_KEY".to_string(), "tok-123".to_string())));
+    }
+
+    #[test]
+    fn test_load_sec_dict_normalizes_keys() {
+        let temp_dir = tempdir().unwrap();
+        let _wd = WorkDirWithLock::change(temp_dir.path()).unwrap();
+        let dot_dir = temp_dir.path().join(".galaxy");
+        std::fs::create_dir_all(&dot_dir).unwrap();
+        std::fs::write(
+            dot_dir.join("sec_value.yml"),
+            "db_password: secretpw\npostgres_password: secretpgpw\n",
+        )
+        .unwrap();
+
+        // orion-sec 归一化为大写并加 SEC_ 前缀
+        let dict = orion_sec::load_sec_dict().unwrap();
+        let pairs = sec_env_pairs_for("start", &dict);
+        assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "secretpw".to_string())));
+        assert!(pairs.contains(&(
+            "SEC_POSTGRES_PASSWORD".to_string(),
+            "secretpgpw".to_string()
+        )));
     }
 }

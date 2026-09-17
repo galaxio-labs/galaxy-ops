@@ -4,32 +4,26 @@ use crate::module::depend::DependencySet;
 const OPS_PRJ_WORK: &str = include_str!("init/_gal/work.gxl");
 const OPS_PRJ_ADM: &str = include_str!("init/_gal/adm.gxl");
 pub const OPS_PRJ_FILE: &str = "ops-prj.yml";
-pub const PRJ_OPS_TARGET: &str = "ops-systems.yml";
 
 use crate::types::Accessor;
 
-#[derive(Getters, Clone, Debug, MutGetters)]
+#[derive(Getters, Clone, Debug)]
 #[getset(get = "pub")]
 pub struct OpsProject {
-    conf: ProjectConf,
+    conf: OpsProjectConf,
     project: GxlProject,
     paths: ProjectPath,
-    #[getset(get = "pub", get_mut = "pub")]
-    ops_target: OpsTarget,
 }
 impl OpsProject {
-    pub fn new(conf: ProjectConf, root_local: PathBuf) -> Self {
+    pub fn new(conf: OpsProjectConf, root_local: PathBuf) -> Self {
         Self {
             conf,
             project: GxlProject::from((OPS_PRJ_WORK, OPS_PRJ_ADM)),
             paths: ProjectPath::new(root_local),
-            ops_target: OpsTarget::default(),
         }
     }
     pub fn import_ops_sys(&mut self, ops_sys: OpsSystem) {
-        if !self.ops_target.contains(&ops_sys) {
-            self.ops_target.push(ops_sys);
-        }
+        self.conf.import_sys(ops_sys);
     }
     pub fn load(root_local: &Path) -> MainResult<Self> {
         let mut flag = auto_exit_log!(
@@ -44,16 +38,23 @@ impl OpsProject {
         );
 
         let paths = ProjectPath::new(root_local);
-        let conf = ProjectConf::load(paths.root())?;
+        let mut conf = OpsProjectConf::load(paths.root())?;
 
-        let ops_target = OpsTarget::load_conf(&paths.target_file()).source_conf()?;
+        // 向后兼容：旧的 ops-systems.yml 存在时，合并其 sys_models，下次 save 迁移到单文件
+        let target_file = paths.target_file();
+        if target_file.exists() {
+            let old = OpsTarget::load_conf(&target_file).source_conf()?;
+            for sys in old.iter() {
+                conf.import_sys(sys.clone());
+            }
+        }
+
         let project = GxlProject::load_from(paths.root()).owe(OpsReason::Load.into())?;
         flag.mark_suc();
         Ok(Self {
             conf,
             project,
             paths,
-            ops_target,
         })
     }
     pub fn save(&self) -> MainResult<()> {
@@ -67,9 +68,12 @@ impl OpsProject {
                 "save project  to {} fail!", self.paths.root().display()
             )
         );
-        orion_conf::ConfigIO::save_conf(&self.ops_target, &self.paths.target_file())
-            .source_resource()?;
         orion_conf::ConfigIO::save_conf(&self.conf, &self.paths.conf_file()).source_resource()?;
+        // 迁移：删除旧的 ops-systems.yml（已合并进 ops-prj.yml）
+        let target_file = self.paths.target_file();
+        if target_file.exists() {
+            std::fs::remove_file(&target_file).source_resource()?;
+        }
         self.project
             .save_to(self.paths.root(), None)
             .source_logic()?;
@@ -106,14 +110,14 @@ impl OpsProject {
 }
 impl OpsProject {
     pub fn make_new(prj_path: &Path, name: &str) -> MainResult<Self> {
-        let conf = ProjectConf::new(name, DependencySet::default());
+        let conf = OpsProjectConf::new(name, DependencySet::default());
         Ok(OpsProject::new(conf, prj_path.to_path_buf()))
     }
     pub fn for_test(name: &str) -> MainResult<Self> {
         let prj_path = PathBuf::from(OPS_PRJ_ROOT).join(name);
         make_clean_path(&prj_path).source_logic()?;
 
-        let conf = ProjectConf::for_test();
+        let conf = OpsProjectConf::for_test();
         let proj = OpsProject::new(conf, prj_path);
         Ok(proj)
     }
@@ -123,7 +127,7 @@ impl OpsProject {
 mod tests {
     use super::*;
     use crate::{
-        const_vars::{SYS_VALUE_FILE, SYS_VARS_YML},
+        const_vars::{RESOLVED_VARS_YML, SYS_VALUE_FILE},
         ops_prj::project::OpsProject,
     };
     use orion_error::dev::testing::TestAssert;
@@ -139,7 +143,7 @@ mod tests {
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys/sys_vars.yml");
+        let vars_path = root.join("sys/resolved_vars.yml");
         let value_path = root.join("values/test");
         let value_file = root.join("values/test/").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -180,7 +184,7 @@ system:
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(SYS_VARS_YML);
+        let vars_path = root.join("sys").join(RESOLVED_VARS_YML);
         let value_path = root.join("values/test");
         let value_file = root.join("values/test").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -236,7 +240,7 @@ system:
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(SYS_VARS_YML);
+        let vars_path = root.join("sys").join(RESOLVED_VARS_YML);
         let value_path = root.join("values/test");
         let value_file = root.join("values/test/").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -296,7 +300,7 @@ immutable_var: "existing_immutable"
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(SYS_VARS_YML);
+        let vars_path = root.join("sys").join(RESOLVED_VARS_YML);
         let value_path = root.join("values/test");
         let value_link = root.join("test/values");
 
@@ -322,7 +326,7 @@ immutable_var: "existing_immutable"
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(SYS_VARS_YML);
+        let vars_path = root.join("sys").join(RESOLVED_VARS_YML);
         let value_path = root.join("values/test");
         let value_file = root.join("values/test/").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -363,7 +367,7 @@ system:
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys/sys_vars.yml");
+        let vars_path = root.join("sys/resolved_vars.yml");
         let value_path = root.join("values/test");
 
         // Create directories but no vars.yml file (this should cause an error)
@@ -375,5 +379,34 @@ system:
 
         // Verify that an error occurred
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_legacy_ops_systems_migrates() {
+        test_init();
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // 构造旧式项目：ops-prj.yml（无 sys_models）+ ops-systems.yml（有 sys_models）
+        std::fs::write(
+            root.join("ops-prj.yml"),
+            "name: legacy\nwork_envs:\n  dep_root: ''\n  deps: []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ops-systems.yml"),
+            "sys_models:\n- sys:\n    name: web-stack\n    model: arm-mac14-host\n    vender: ''\n  addr:\n    path: ../web-stack-0.1.0.tar.gz\n",
+        )
+        .unwrap();
+        // GxlProject::load_from 需要 _gal/work.gxl
+        std::fs::create_dir_all(root.join("_gal")).unwrap();
+        std::fs::write(root.join("_gal/work.gxl"), "mod envs {}\nmod main {}\n").unwrap();
+
+        let project = OpsProject::load(root).assert();
+        assert_eq!(project.conf().sys_models().len(), 1);
+
+        project.save().assert();
+        assert!(!root.join("ops-systems.yml").exists());
+        assert!(root.join("ops-prj.yml").exists());
     }
 }

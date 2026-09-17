@@ -5,6 +5,42 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] - 2026-09-17
+
+### 新增功能
+- **docker-compose 类型系统**: 新增 `SysKind`（`gxl` / `docker-compose`）与 `sys-prj.yml` 的 `kind` 字段，用统一的 `gops sys` 入口同时管理 GXL 模块式系统与纯 docker-compose 系统
+- **`gops sys new --kind docker-compose`**: 支持按类型创建系统；compose 模式跳过交互式型号选择，直接采用当前系统型号
+- **`sys` 部署命令按类型分派**: `download/install/start/stop/uninstall/status/diagnose` 在 `docker-compose` 类型下自动映射到 `docker compose pull/create/up -d/stop/down/ps/config`，无需安装 gflow
+- **`gops prj reimport`**: 按 `ops-prj.yml` 记录的 `sys_models` 重新导入系统，并保留 `values/` 客户值
+- **`.env` 导出与 `${SEC_xxx}` 密钥注入**: `sys localize` 合并系统默认值 + `values/value.yml` 客户覆盖生成 `.env`（仅非密钥配置）；密钥用 `${SEC_xxx}` 占位，`sys start` 运行时从 `~/.galaxy/sec_value.yml` 注入 `docker compose` 子进程环境，不落盘
+
+### 重大变更
+- **`ops-prj.yml` 与 `ops-systems.yml` 合并**: 运维项目 manifest 收敛为单个 `ops-prj.yml`（`name` + `work_envs` + `sys_models`）；加载时向后兼容旧 `ops-systems.yml`，保存后删除旧文件
+- **`sys_vars.yml` 重命名为 `resolved_vars.yml`**: 明确其为「解析结果」而非源定义，与 `sys/setting/vars.yml`（源）区分；派生产物不做旧名兼容，旧系统下次 `sys update` 自动生成新名
+
+### 改进优化
+- **系统文件可选化**: `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml` 缺失时降级为空，纯 docker-compose 系统可省略
+- **`.gitignore` 改进**: 忽略派生的值文件但保留客户覆盖 `values/value.yml`；新增 `.env` / `sys/resolved_vars.yml`
+- **`sys new` 默认生成 `docker-compose.yml`**: 内置 `${SERVICE_IMAGE}` / `${SERVICE_PORT}` / `${REPLICAS}` 占位与对应 system 变量段
+- **引入 `orion-sec` 依赖**: 密钥加载走 `orion-sec::load_sec_dict()`（读 `~/.galaxy/sec_value.yml` 或 `./.galaxy/sec_value.yml`），key 归一化为大写 `SEC_*` 前缀后注入 `docker compose` 子进程环境，密钥不落盘
+- **许可证统一为 MIT**
+
+### Bug 修复
+- 修复 `prj import` 时 `values` 符号链接冲突（先移除旧 `values/`）
+- 修复 `convert_addr` / `build_pkg` 对裸目录的 panic，改为返回友好错误
+- 修复 `mod new` 构件地址硬编码 postgresql、`x86_ubt22_host` 误用 `arm_mac14_host` 模型的问题
+
+### 测试
+- 新增 `SysKind` / `SysConf` 序列化与「缺失 `kind` 向后兼容」测试
+- 新增 `load_kind` 兼容测试（无 `sys-prj.yml` / 缺 `kind` / `docker-compose` / 旧 `sys_prj.yml` 文件名）
+- 新增 `with_kind` 保存回读、`parse_kind`、`compose_subcommand`、`sys new` 写入 `kind` 测试
+- 新增 `sec_env_pairs`（secret dict → 环境变量对）与 `load_sec_dict` 密钥键归一化测试
+
+### 文档更新
+- 重写 `PROJECT_OVERVIEW.md`、`src/artifact/README.md`、`src/workflow/README.md` 以对齐真实代码
+- 更新 `example/README.md`、`src/system/README.md`，补充 docker-compose 类型分派与命令映射说明
+- 新增 `example/knowlege/docker-compose/`、`example/knowlege/customer-a/` 示例与演示脚本
+
 ## [1.2.0] - 2026-05-04
 
 ### 重大变更

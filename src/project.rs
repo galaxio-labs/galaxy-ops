@@ -1,7 +1,9 @@
 use crate::internal_prelude::*;
 
+use orion_vars::vars::ValueType;
+
 use crate::{
-    const_vars::{MOD_VALUE_FILE, SYS_VALUE_FILE, SYS_VARS_YML, USER_VALUE_FILE, VALUE_DIR},
+    const_vars::{MOD_VALUE_FILE, RESOLVED_VARS_YML, SYS_VALUE_FILE, USER_VALUE_FILE, VALUE_DIR},
     types::LocalizeOptions,
 };
 
@@ -39,7 +41,13 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
     let sys_v_file = value_root.join(SYS_VALUE_FILE);
     if !sys_v_file.exists() {
         let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
-        let vars_file = prj_root.join("sys").join(SYS_VARS_YML);
+        let vars_file = prj_root.join("sys").join(RESOLVED_VARS_YML);
+        if !vars_file.exists() {
+            return Err(crate::error::MainReason::logic_detail(format!(
+                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
+                vars_file.display()
+            )));
+        }
         let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
         let sys_value = vars_vec.system_vars();
         ctx.record("sys-value", sys_v_file.display());
@@ -78,6 +86,53 @@ pub fn mix_used_value(
     used.merge(&global);
     let used = used.env_eval(&EnvDict::default());
     Ok(used)
+}
+
+/// 把值字典导出为 dotenv 格式（`KEY=VALUE`），供 docker-compose 等使用 `${VAR}` 的工具消费。
+///
+/// - 键保持大写（与 `UpperKey` 一致）；
+/// - 简单标量（字母数字 + `_.:/@+-`）原样输出，其余（含空格、引号、`#`、`$`、嵌套对象/列表）用双引号包裹并转义。
+pub fn export_env_file(dict: &OriginDict, out_path: &Path) -> MainResult<()> {
+    let mut content = String::new();
+    for (key, value) in dict.iter() {
+        content.push_str(key.as_str());
+        content.push('=');
+        content.push_str(&format_env_value(value.value()));
+        content.push('\n');
+    }
+    std::fs::write(out_path, content).source_resource()?;
+    Ok(())
+}
+
+fn format_env_value(v: &ValueType) -> String {
+    match v {
+        ValueType::String(s) => {
+            if needs_env_quote(s) {
+                quote_env(s)
+            } else {
+                s.clone()
+            }
+        }
+        ValueType::Obj(o) => quote_env(&serde_json::to_string(o).unwrap_or_default()),
+        ValueType::List(l) => quote_env(&serde_json::to_string(l).unwrap_or_default()),
+        other => other.to_string(),
+    }
+}
+
+fn needs_env_quote(s: &str) -> bool {
+    s.is_empty()
+        || s.chars().any(|c| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '@' | '+' | '-'))
+        })
+}
+
+fn quote_env(s: &str) -> String {
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    )
 }
 
 #[cfg(test)]
@@ -342,5 +397,27 @@ mod tests {
             result.get("TEST_KEY"),
             Some(&OriginValue::from("global_value").with_origin("global"))
         );
+    }
+
+    #[test]
+    fn test_export_env_file() {
+        test_init();
+        let mut dict = OriginDict::new();
+        dict.insert("nginx_tag", ValueType::from("1.25-alpine"));
+        dict.insert("http_port", ValueType::from(8080u64));
+        dict.insert("db_host", ValueType::from("10.0.0.11"));
+        dict.insert("db_password", ValueType::from("p@ss word#1"));
+        dict.insert("debug", ValueType::from(true));
+
+        let temp_dir = tempdir().unwrap();
+        let out = temp_dir.path().join(".env");
+        export_env_file(&dict, &out).unwrap();
+
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(content.contains("NGINX_TAG=1.25-alpine"));
+        assert!(content.contains("HTTP_PORT=8080"));
+        assert!(content.contains("DB_HOST=10.0.0.11"));
+        assert!(content.contains("DB_PASSWORD=\"p@ss word#1\""));
+        assert!(content.contains("DEBUG=true"));
     }
 }

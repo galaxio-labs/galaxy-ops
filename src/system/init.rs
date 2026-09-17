@@ -15,6 +15,7 @@ const SYS_OPS_GXL: &str = include_str!("init/workflows/operators.gxl");
 pub const SYS_PRJ_WORK: &str = include_str!("init/_gal/work.gxl");
 pub const SYS_PRJ_ADM: &str = include_str!("init/_gal/adm.gxl");
 const SYS_GITIGNORE: &str = include_str!("init/.gitignore");
+const SYS_DOCKER_COMPOSE: &str = include_str!("init/docker-compose.yml");
 
 pub trait SysActIniter {
     fn sys_operators_tpl() -> Self;
@@ -51,6 +52,16 @@ pub fn sys_init_gitignore(path: &Path) -> MainResult<()> {
         std::fs::write(&ignore_path, SYS_GITIGNORE)
             .source_resource()
             .with(&ignore_path)?;
+    }
+    Ok(())
+}
+
+pub fn sys_init_docker_compose(path: &Path) -> MainResult<()> {
+    let compose_path = path.join("docker-compose.yml");
+    if !compose_path.exists() {
+        std::fs::write(&compose_path, SYS_DOCKER_COMPOSE)
+            .source_resource()
+            .with(&compose_path)?;
     }
     Ok(())
 }

@@ -1,0 +1,11 @@
+name: customer-a
+work_envs:
+  dep_root: ''
+  deps: []
+sys_models:
+- sys:
+    name: web-stack
+    model: arm-mac14-host
+    vender: ''
+  addr:
+    path: ../web-stack-0.1.0.tar.gz

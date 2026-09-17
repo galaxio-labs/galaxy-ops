@@ -1,6 +1,0 @@
-sys_models:
-  - sys:
-      name: mac-devkit
-      vender: dayu-sec
-    addr:
-      path: /Users/zuowenjian/ds-build/mac-devkit-0.1.6.tar.gz

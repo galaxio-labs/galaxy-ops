@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-ops"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -830,6 +830,7 @@ dependencies = [
  "orion-accessor",
  "orion-error",
  "orion-infra",
+ "orion-sec",
  "orion-variate",
  "orion_conf",
  "os_info",
@@ -1951,6 +1952,31 @@ dependencies = [
  "serde_derive",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "orion-sec"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb5aec268fc9385600b5f7995fc01eb2cb421a8cc9c5788db9ebf9d0fc8bbf2e"
+dependencies = [
+ "chrono",
+ "contracts",
+ "derive_more",
+ "fs_extra",
+ "getset",
+ "indexmap",
+ "log",
+ "once_cell",
+ "orion-error",
+ "orion-variate",
+ "orion_conf",
+ "serde",
+ "serde_derive",
+ "serde_yaml",
+ "thiserror",
+ "unicase",
+ "url",
 ]
 
 [[package]]

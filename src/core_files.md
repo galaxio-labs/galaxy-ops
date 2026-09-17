@@ -29,7 +29,6 @@ CLI 最终通过这里把内部错误整理成一致的 `MainResult` / 报错格
 - `mod-prj.yml`
 - `sys-prj.yml`
 - `ops-prj.yml`
-- `ops-systems.yml`
 - `mod_list.yml`
 - `sys_model.yml`
 - `values/`

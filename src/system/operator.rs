@@ -6,8 +6,11 @@ use crate::system::spec::SysDefine;
 use crate::types::ValuePath;
 use crate::workflow::prj::GxlProject;
 
-use super::init::{SYS_PRJ_ADM, SYS_PRJ_WORK, sys_init_gitignore};
-use super::{conf::SysConf, path::SysOperatorPath};
+use super::init::{SYS_PRJ_ADM, SYS_PRJ_WORK, sys_init_docker_compose, sys_init_gitignore};
+use super::{
+    conf::{SysConf, SysKind},
+    path::SysOperatorPath,
+};
 use orion_infra::path::{ensure_path, make_clean_path};
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{VarCollection, VarToValue, find_project_define_base};
@@ -64,6 +67,33 @@ impl SysOperator {
             paths,
         })
     }
+    /// 读取系统部署类型，用于 `gops sys` 命令分派。
+    ///
+    /// 仅解析 `sys-prj.yml`（或旧的 `sys_prj.yml`）里的 `kind` 字段，
+    /// 缺失或解析失败时退回默认的 GXL 类型，保证向后兼容。
+    pub fn load_kind(root_local: &Path) -> SysKind {
+        let paths = SysOperatorPath::new(root_local);
+        let conf_file = if paths.conf_file_v2().exists() {
+            paths.conf_file_v2()
+        } else if paths.conf_file_v1().exists() {
+            paths.conf_file_v1()
+        } else {
+            return SysKind::default();
+        };
+        SysConf::load_conf(&conf_file)
+            .map(|conf| conf.kind())
+            .unwrap_or_default()
+    }
+    pub fn with_kind(mut self, kind: SysKind) -> Self {
+        self.conf = self.conf.with_kind(kind);
+        self
+    }
+    pub fn kind(&self) -> SysKind {
+        self.conf.kind()
+    }
+    pub fn is_docker_compose(&self) -> bool {
+        self.conf.is_docker_compose()
+    }
     pub fn save(&self) -> MainResult<()> {
         let mut ctx = OperationContext::want("save sys-prj")
             .with_auto_log()
@@ -85,6 +115,7 @@ impl SysOperator {
             .source_logic()
             .with(&ctx)?;
         sys_init_gitignore(self.paths.root()).with(&ctx)?;
+        sys_init_docker_compose(self.paths.root()).with(&ctx)?;
         ctx.mark_suc();
         Ok(())
     }
@@ -114,6 +145,10 @@ impl SysOperator {
         //let value_path = self.value_path().ensure_exist().owe_res()?;
 
         self.conf.sys_localize((), options.clone()).await?;
+        // 导出系统值到 .env（供 docker-compose 等使用 ${VAR} 的工具消费）。
+        // 密钥不落盘：compose 里用 ${SEC_xxx} 占位，由 `gops sys start` 运行时从 ~/.galaxy/sec_value.yml 注入子进程环境。
+        let env_path = self.paths.root().join(ENV_FILE);
+        crate::project::export_env_file(options.evaled_value(), &env_path)?;
         self.sys_spec()
             .sys_localize(val_path, options.clone())
             .await?;
@@ -172,7 +207,14 @@ impl SysOperator {
                 .source_resource()?;
         }
         if !value_root.sys_value_file().exists() {
-            let sys_vars = VarCollection::load_yaml(&self.paths.sys_vars_file())
+            let resolved_vars_file = self.paths.resolved_vars_file();
+            if !resolved_vars_file.exists() {
+                return Err(crate::error::MainReason::logic_detail(format!(
+                    "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
+                    resolved_vars_file.display()
+                )));
+            }
+            let sys_vars = VarCollection::load_yaml(&resolved_vars_file)
                 .source_resource()?
                 .system_vars()
                 .to_val();
@@ -215,6 +257,7 @@ pub mod tests {
             depend::{Dependency, DependencySet},
         },
         system::{
+            SysKind,
             operator::{SysOperator, setup_prj_root_env_vars},
             spec::SysModelSpec,
         },
@@ -227,6 +270,117 @@ pub mod tests {
         make_clean_path(&prj_path).source_logic()?;
         let proj = SysOperator::make_new(&prj_path, "sys_new", ModelSTD::from_cur_sys())?;
         proj.save()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_kind_compat() -> MainResult<()> {
+        test_init();
+        let root = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_load_kind");
+        make_clean_path(&root).source_logic()?;
+        let conf_file = root.join("sys-prj.yml");
+
+        // 1. 缺 sys-prj.yml → 默认 Gxl，不报错
+        assert_eq!(SysOperator::load_kind(&root), SysKind::Gxl);
+
+        // 2. 有 sys-prj.yml 但缺 kind → 默认 Gxl（向后兼容，不报错）
+        std::fs::write(&conf_file, "test_envs:\n  dep_root: ''\n  deps: []\n").source_resource()?;
+        assert_eq!(SysOperator::load_kind(&root), SysKind::Gxl);
+
+        // 3. kind: docker-compose → DockerCompose
+        std::fs::write(
+            &conf_file,
+            "kind: docker-compose\ntest_envs:\n  dep_root: ''\n  deps: []\n",
+        )
+        .source_resource()?;
+        assert_eq!(SysOperator::load_kind(&root), SysKind::DockerCompose);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_kind_legacy_v1_file() -> MainResult<()> {
+        test_init();
+        let root = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_load_kind_v1");
+        make_clean_path(&root).source_logic()?;
+        // 只有旧版 sys_prj.yml（下划线）时也能读取 kind
+        let legacy = root.join("sys_prj.yml");
+        std::fs::write(
+            &legacy,
+            "kind: docker-compose\ntest_envs:\n  dep_root: ''\n  deps: []\n",
+        )
+        .source_resource()?;
+        assert_eq!(SysOperator::load_kind(&root), SysKind::DockerCompose);
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_kind_save_roundtrip() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_kind_roundtrip");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj =
+            SysOperator::make_new(&prj_path, "sys_kind_roundtrip", ModelSTD::from_cur_sys())?
+                .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+
+        // 保存后 sys-prj.yml 写入 kind，load_kind 能识别
+        assert_eq!(SysOperator::load_kind(&prj_path), SysKind::DockerCompose);
+        // 完整 load 也能读回 kind
+        let loaded = SysOperator::load(&prj_path)?;
+        assert_eq!(loaded.kind(), SysKind::DockerCompose);
+        assert!(loaded.is_docker_compose());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sys_load_without_mod_list() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_no_modlist");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new(&prj_path, "sys_no_modlist", ModelSTD::from_cur_sys())?;
+        proj.save()?;
+
+        // 删除 mod_list.yml，验证加载时退化为空模块列表（纯 docker-compose 等场景）
+        let modlist = prj_path.join("sys").join("mod_list.yml");
+        std::fs::remove_file(&modlist).source_resource()?;
+
+        let loaded = SysOperator::load(&prj_path)?;
+        assert!(loaded.sys_spec().mod_list().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sys_load_without_workflows() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_no_workflows");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new(&prj_path, "sys_no_workflows", ModelSTD::from_cur_sys())?;
+        proj.save()?;
+
+        // 删除 sys/workflows/，验证加载时退化为空工作流
+        let workflows = prj_path.join("sys").join("workflows");
+        std::fs::remove_dir_all(&workflows).source_resource()?;
+
+        let loaded = SysOperator::load(&prj_path)?;
+        assert!(loaded.sys_spec().workflow().actions().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sys_load_without_setting_list() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_no_list");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new(&prj_path, "sys_no_list", ModelSTD::from_cur_sys())?;
+        proj.save()?;
+
+        // 删除 sys/setting/list.yml，验证加载时退化为空本地化列表
+        let list = prj_path.join("sys").join("setting").join("list.yml");
+        std::fs::remove_file(&list).source_resource()?;
+
+        let loaded = SysOperator::load(&prj_path)?;
+        assert!(loaded.sys_spec().setting().list().dicts().is_empty());
         Ok(())
     }
 

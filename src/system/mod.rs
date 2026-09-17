@@ -7,4 +7,5 @@ mod prelude;
 pub mod refs;
 pub mod setting;
 pub mod spec;
+pub use crate::system::conf::{SysConf, SysKind};
 pub use crate::system::path::SysValuePaths;

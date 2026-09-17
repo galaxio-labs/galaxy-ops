@@ -1,0 +1,7 @@
+extern mod cfm { git = "https://github.com/galaxy-operators/cfm-gxl.git", channel = "${GXL_CHANNEL:develop}" }
+mod  envs {
+  env default {
+  }
+}
+mod main  : ver_adm {
+}

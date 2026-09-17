@@ -1,0 +1,4 @@
+kind: docker-compose
+test_envs:
+  dep_root: ''
+  deps: []

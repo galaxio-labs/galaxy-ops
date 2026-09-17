@@ -1,7 +1,7 @@
 use super::prelude::*;
 
 use crate::{
-    const_vars::{MOD_OPERATORS_ROOT, SYS_VARS_YML},
+    const_vars::{MOD_OPERATORS_ROOT, RESOLVED_VARS_YML},
     error::ElementReason,
     module::operator::ModOperator,
     system::setting::ModSetting,
@@ -106,10 +106,15 @@ impl SysModelSpec {
                 .with(&ctx)
                 .source_data()?
         };
-        let mut mod_list = ModulesList::load_yaml(paths.modlist_path())
-            .with("load mod-list".to_string())
-            .with(&ctx)
-            .source_data()?;
+        // mod_list.yml 可选：缺失时视为空模块列表（例如纯 docker-compose 系统）
+        let mut mod_list = if paths.modlist_path().exists() {
+            ModulesList::load_yaml(paths.modlist_path())
+                .with("load mod-list".to_string())
+                .with(&ctx)
+                .source_data()?
+        } else {
+            ModulesList::default()
+        };
         mod_list.set_mods_local(paths.spec_path().clone());
         let workflow = SysWorkflows::load_from(paths.workflow_path())
             .with(&ctx)
@@ -146,7 +151,7 @@ impl RefUpdateable<()> for SysModelSpec {
     ) -> MainResult<()> {
         if let Some(local) = &self.local {
             let value = self.mod_list.update_local(accessor, local, options).await?;
-            let path = local.join(SYS_VARS_YML);
+            let path = local.join(RESOLVED_VARS_YML);
             if path.exists() {
                 std::fs::remove_file(&path).source_sys()?;
             }
@@ -191,7 +196,11 @@ impl SysModelSpec {
 
     pub fn make_new(define: SysDefine) -> MainResult<SysModelSpec> {
         let actions = SysWorkflows::sys_tpl_init();
-        let setting = SysSetting::new(VarCollection::define(vec![]));
+        let setting = SysSetting::new(VarCollection::define(vec![
+            VarDefinition::from(("SERVICE_IMAGE", "nginx:alpine")).with_mut_system(),
+            VarDefinition::from(("SERVICE_PORT", 8080u64)).with_mut_system(),
+            VarDefinition::from(("REPLICAS", 1u64)).with_mut_system(),
+        ]));
         let mut modul_spec = SysModelSpec::new(define.clone(), actions, setting);
         let mod_name = "you_mod1";
 

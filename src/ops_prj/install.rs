@@ -116,6 +116,14 @@ impl SystemPackageInstaller {
             .want("crate")?;
         let sys_value = paths.final_target_path.join("values");
         ctx.record("sys-values", sys_value.display());
+        // 系统包可能自带空的 values/ 目录，需先移除，否则下面的符号链接会因目录已存在而失败
+        if let Ok(meta) = std::fs::symlink_metadata(&sys_value) {
+            if meta.file_type().is_symlink() || meta.is_file() {
+                std::fs::remove_file(&sys_value).source_resource()?;
+            } else if meta.is_dir() {
+                std::fs::remove_dir_all(&sys_value).source_resource()?;
+            }
+        }
         if let Some(link_target) = diff_paths(&paths.value_path, &paths.final_target_path) {
             std::os::unix::fs::symlink(&link_target, &sys_value).source_resource()?;
         }

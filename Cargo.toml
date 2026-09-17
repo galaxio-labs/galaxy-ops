@@ -1,8 +1,8 @@
 [package]
 name = "galaxy-ops"
-version = "1.2.0" # @gxl:set(version)
+version = "1.3.0" # @gxl:set(version)
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
 
 [[bin]]
 name = "gops"
@@ -31,6 +31,7 @@ indicatif = "0.18"
 log = "0.4"
 orion-error = "0.8"
 orion-infra = "0.7"
+orion-sec = "0.6"
 orion_conf = { version = "0.7", features = ["full"] }
 orion_variate = { package = "orion-accessor", version = "0.8" }
 orion_vars = { package = "orion-variate", version = "0.13" }
@@ -74,6 +75,7 @@ log = { workspace = true }
 once_cell = "1.19"
 orion-error = { workspace = true }
 orion-infra = { workspace = true }
+orion-sec = { workspace = true }
 orion_conf = { workspace = true }
 orion_variate = { workspace = true }
 orion_vars = { workspace = true }

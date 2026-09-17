@@ -6,7 +6,7 @@ pub use crate::error::SysReason;
 pub use crate::system::spec::SysModelSpec;
 pub use crate::types::{LocalizeOptions, SystemLocalizable};
 
-pub use crate::const_vars::{SYS_MODEL_SPC_ROOT, VALUE_DIR};
+pub use crate::const_vars::{ENV_FILE, SYS_MODEL_SPC_ROOT, VALUE_DIR};
 
 // system内部常用导入
 pub use orion_infra::auto_exit_log;

@@ -1,0 +1,30 @@
+# 共享的 docker-compose 定义（System 层）
+#
+# 这是一个"合法"的 docker-compose 文件：始终可用 `docker compose config` 校验。
+# 所有随客户/环境变化的量都用 Compose 原生 `${VAR}` 占位，
+# 运行时由同目录下的 `.env` 提供值。
+#
+# 值来源：
+#   - 配置（镜像 tag、端口、副本数、DB host）→ sys/setting/vars.yml（默认）+ values/value.yml（客户覆盖）
+#     └─ gops sys localize 生成 .env
+#   - 密钥（密码/token）→ 用 ${SEC_xxx} 占位，运行时由 gops sys start 从 ~/.galaxy/sec_value.yml 注入，不落盘
+services:
+  web:
+    image: nginx:${NGINX_TAG}
+    ports:
+      - "${HTTP_PORT}:80"
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PASSWORD: ${SEC_DB_PASSWORD}
+    deploy:
+      replicas: ${REPLICAS}
+
+  db:
+    image: postgres:${POSTGRES_TAG}
+    environment:
+      POSTGRES_PASSWORD: ${SEC_POSTGRES_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+volumes:
+  db-data:

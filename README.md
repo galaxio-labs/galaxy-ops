@@ -71,14 +71,21 @@ gops sys new --name web-stack
 # 更新系统引用
 gops sys update
 
+# 解析变量并打包系统为 .tar.gz
+cd web-stack
+gops sys package
+
 # 创建运维工程
 gops prj new --name customer-a
 
-# 向运维工程导入系统
-gops prj import --path ../web-stack
+# 向运维工程导入已打包的系统
+gops prj import --path /path/to/web-stack-0.1.0.tar.gz
 
 # 更新运维工程本地引用
 gops prj update
+
+# 重新导入系统（保留 values/ 客户值）
+gops prj reimport
 ```
 
 查看完整帮助：
@@ -121,12 +128,24 @@ gops sys new --name web-stack
 
 系统用于组合多个模块，并形成一个更接近交付视角的系统定义。
 
-### 3. Create an Ops Project
+默认是模块式（GXL）系统；也支持纯 docker-compose 系统：`gops sys new --name web-stack --kind docker-compose`。此时 `sys start/stop/status/...` 自动映射到 `docker compose`，密钥用 `${SEC_xxx}` 占位、运行时从 `~/.galaxy/sec_value.yml` 注入（详见 [example/README.md](./example/README.md) 与 [src/system/README.md](./src/system/README.md)）。
+
+### 3. Package the System
 
 ```bash
+cd web-stack
+gops sys package
+```
+
+`sys package` 会先执行一次 `update`（解析模块变量、生成 `resolved_vars.yml`），再把系统打包为父目录下的 `<name>-<version>.tar.gz`，作为可交付产物。
+
+### 4. Create an Ops Project
+
+```bash
+cd ..
 gops prj new --name customer-a
 cd customer-a
-gops prj import --path ../web-stack
+gops prj import --path ../web-stack-0.1.0.tar.gz
 gops prj update
 ```
 
@@ -242,17 +261,22 @@ System / Module Spec
 # 创建系统
 gops sys new --name web-stack
 
+# 解析变量并打包（生成 web-stack-0.1.0.tar.gz）
+cd web-stack
+gops sys package
+cd ..
+
 # 客户 A
 gops prj new --name customer-a
 cd customer-a
-gops prj import --path ../web-stack
+gops prj import --path ../web-stack-0.1.0.tar.gz
 gops prj update
 
 # 客户 B
 cd ..
 gops prj new --name customer-b
 cd customer-b
-gops prj import --path ../web-stack
+gops prj import --path ../web-stack-0.1.0.tar.gz
 gops prj update
 ```
 

@@ -1,5 +1,5 @@
 use crate::const_vars::{
-    MOD_VALUE_FILE, SYS_MODLE_DEF_YML, SYS_VALUE_FILE, SYS_VARS_YML, USED_READABLE_FILE,
+    MOD_VALUE_FILE, RESOLVED_VARS_YML, SYS_MODLE_DEF_YML, SYS_VALUE_FILE, USED_READABLE_FILE,
 };
 use std::path::{Path, PathBuf};
 
@@ -66,8 +66,8 @@ impl SysOperatorPath {
     pub fn sys_dir(&self) -> PathBuf {
         self.root.join("sys")
     }
-    pub fn sys_vars_file(&self) -> PathBuf {
-        self.root.join("sys").join(SYS_VARS_YML)
+    pub fn resolved_vars_file(&self) -> PathBuf {
+        self.root.join("sys").join(RESOLVED_VARS_YML)
     }
 
     /// 获取值目录路径 (values/)

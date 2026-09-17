@@ -5,7 +5,7 @@ use orion_variate::addr::Address;
 
 use crate::{
     artifact::types::{build_pkg, convert_addr},
-    const_vars::{SYS_VALUE_FILE, SYS_VARS_YML},
+    const_vars::{RESOLVED_VARS_YML, SYS_VALUE_FILE},
     error::MainResult,
     ops_prj::{project::OpsProject, system::OpsSystem},
     types::Accessor,
@@ -19,7 +19,7 @@ impl OpsProject {
         up_opt: &DownloadOptions,
     ) -> MainResult<()> {
         // 1. 解析地址
-        let addr = convert_addr(path);
+        let addr = convert_addr(path)?;
 
         // 2. 更新到本地目录
         let work_path = PathBuf::from(
@@ -41,7 +41,7 @@ impl OpsProject {
         // 3. 创建安装器并准备包
         let installer = SystemPackageInstaller::new(self.paths().clone()).with_pkg_path(pkg_path);
 
-        let package = build_pkg(path);
+        let package = build_pkg(path)?;
         let sys_src = installer.prepare_package(package)?;
 
         // 4. 导入到工作目录
@@ -55,6 +55,34 @@ impl OpsProject {
         // 5. 提供系统包的信息， 包组所有组件。
         Ok(())
     }
+
+    /// 重新导入：按 `ops-prj.yml` 里记录的 `sys_models` 重新导入系统，保留 `values/` 客户值。
+    ///
+    /// 适用于“删除了已导入的系统目录，但保留了 values/ + ops-prj.yml”的场景。
+    pub async fn reimport(
+        &mut self,
+        accessor: Accessor,
+        options: &DownloadOptions,
+    ) -> MainResult<()> {
+        // 先收集（系统名，addr 反推的路径字符串），避免迭代借用与 &mut self 冲突
+        let targets: Vec<(String, String)> = self
+            .conf()
+            .sys_models()
+            .iter()
+            .map(|sys| (sys.sys().name().clone(), addr_to_path_string(sys.addr())))
+            .collect();
+
+        for (name, path) in targets {
+            // 移除已有系统目录（values/ 在外层，不受影响）
+            let sys_dir = self.paths().root().join(&name);
+            if sys_dir.exists() {
+                std::fs::remove_dir_all(&sys_dir).source_resource()?;
+            }
+            self.import_sys(accessor.clone(), &path, options).await?;
+        }
+        Ok(())
+    }
+
     pub fn ia_setting_interactive(&self) -> MainResult<()> {
         self.ia_setting(true)
     }
@@ -129,12 +157,12 @@ impl OpsProject {
     }
 
     pub fn ia_setting(&self, interactive: bool) -> MainResult<()> {
-        for i in self.ops_target().iter() {
+        for i in self.conf().sys_models().iter() {
             let vars_path = self
                 .root_local()
                 .join(i.sys().name())
                 .join("sys")
-                .join(SYS_VARS_YML);
+                .join(RESOLVED_VARS_YML);
 
             let value_path = self.root_local().join("values").join(i.sys().name());
             ensure_path(&value_path).source_resource()?;
@@ -142,5 +170,33 @@ impl OpsProject {
             Self::process_system_vars(&vars_path, &value_path, i.sys().name(), interactive)?;
         }
         Ok(())
+    }
+}
+
+/// 把 `Address` 反推回可用于 `convert_addr` / `build_pkg` 的路径字符串。
+/// 用于 reimport：从 ops-prj.yml 记录的 addr 重新导入系统。
+fn addr_to_path_string(addr: &Address) -> String {
+    match addr {
+        Address::Local(local) => local.path().clone(),
+        Address::Git(git) => git.repo().clone(),
+        Address::Http(http) => http.url().clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orion_variate::addr::{GitRepository, HttpResource, LocalPath};
+
+    #[test]
+    fn test_addr_to_path_string() {
+        let local = Address::Local(LocalPath::from("/tmp/foo.tar.gz"));
+        assert_eq!(addr_to_path_string(&local), "/tmp/foo.tar.gz");
+
+        let git = Address::Git(GitRepository::from("https://github.com/x/y.git"));
+        assert_eq!(addr_to_path_string(&git), "https://github.com/x/y.git");
+
+        let http = Address::Http(HttpResource::from("https://x.com/y.tar.gz"));
+        assert_eq!(addr_to_path_string(&http), "https://x.com/y.tar.gz");
     }
 }

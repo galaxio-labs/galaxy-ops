@@ -1,336 +1,188 @@
 # galaxy-ops 项目总览
 
-## 项目简介
+## 项目定位
 
-galaxy-ops 是一个现代化的运维管理平台，提供模块化管理、系统配置、包管理、工作流自动化等核心功能。项目采用 Rust 语言开发。
+galaxy-ops 是面向数字业务保障场景的开源运维交付工具，用 Rust 编写，CLI 入口为 `gops`。
+
+它负责**运维能力的组织、配置、组合与交付**，将项目实施过程沉淀为可复用、可演进的交付资产。它不负责工作流的实际执行——执行能力由同生态的 `galaxy-flow`（GXL 工作流引擎）提供。
+
+一句话概括：
+
+> `galaxy-ops` 组织、配置、组合、交付运维能力；`galaxy-flow` 定义并执行这些工作流。
+
+## 核心对象
+
+`galaxy-ops` 围绕三类核心对象工作：
+
+```text
+Module -> System -> Ops Project
+```
+
+- `Module`：最小可复用运维单元，包含规范、依赖、变量、模板和工作流。
+- `System`：由多个模块组合形成的交付单元，用于表达完整系统的结构与操作方式。
+- `Ops Project`：面向具体客户环境或部署现场的运维项目，用于导入系统、管理本地值和持续更新。
+
+三层分离后，同一个系统可以被多个客户项目重复使用，客户差异（域名、IP、端口、证书、资源规格、开关等）放在各自项目的值文件里，不写死在系统定义中。
 
 ## 项目结构
 
-```
+```text
 galaxy-ops/
+├── app/gops/                  # gops CLI（clap 命令定义与分发）
+│   └── commands/
+│       ├── mod_cmd.rs         # gops mod
+│       ├── sys_cmd.rs         # gops sys
+│       ├── prj_cmd.rs         # gops prj
+│       └── common/            # 公共参数（debug/log/force/localize）
 ├── src/
-│   ├── README.md              # 项目概述
-│   ├── core_files.md          # 核心文件文档
-│   ├── lib.rs                 # 主库入口
-│   ├──
-│   ├── app_sys/               # 应用系统管理
-│   │   ├── README.md
-│   │   ├── mod.rs
-│   │   └── sysproj.rs
-│   ├── module/                # 模块管理
-│   │   ├── README.md
-│   │   ├── mod.rs
-│   │   ├── init/
-│   │   └── setting/
-│   ├── ops_prj/               # 运维项目管理
-│   │   ├── README.md
-│   │   ├── mod.rs
-│   │   ├── conf.rs
-│   │   ├── import.rs
-│   │   ├── init.rs
-│   │   ├── proj.rs
-│   │   └── system.rs
-│   ├── package/               # 包管理
-│   │   ├── README.md
-│   │   ├── mod.rs
-│   │   └── types.rs
-│   ├── service/               # 服务层
-│   │   ├── README.md
-│   ├── storage/               # 存储管理
-│   │   ├── README.md
-│   ├── system/                # 系统管理
-│   │   ├── README.md
-│   │   ├── mod.rs
-│   │   ├── init/
-│   │   ├── path.rs
-│   └── workflow/              # 工作流管理
-│       ├── README.md
-│       ├── mod.rs
-│       ├── act.rs
-│       ├── gxl.rs
-│       ├── prj.rs
-├── Cargo.toml
-└── work-plan.md
+│   ├── lib.rs                 # 库入口
+│   ├── artifact/              # 构件与资源下载
+│   ├── module/                # 模块对象层（对应 gops mod）
+│   ├── system/                # 系统对象层（对应 gops sys）
+│   ├── ops_prj/               # 运维项目对象层（对应 gops prj）
+│   ├── workflow/              # 与 GXL 工作流相关的适配层
+│   ├── localize/              # 本地化执行与模板渲染
+│   ├── accessor.rs            # 访问器与资源获取入口
+│   ├── infra/                 # 日志、环境与基础设施辅助
+│   ├── error.rs               # 统一错误类型
+│   ├── types.rs               # 公共 trait / 选项 / 路径类型
+│   ├── const_vars.rs          # 稳定文件名与目录名常量
+│   ├── conf.rs                # 配置辅助
+│   ├── project.rs             # 项目级公共结构
+│   ├── tools.rs               # 工具函数与宏
+│   ├── compat.rs              # 旧接口兼容层（已标记 deprecated）
+│   └── prelude.rs             # 对外预导出
+├── example/                   # 示例项目（当前较稀疏）
+├── tests/                     # 集成测试
+└── test_data/                 # 测试数据（helm/yaml 等）
 ```
 
-## 核心模块
+## 核心模块说明
 
-### 1. 基础架构层
-- **types.rs**: 核心类型定义和trait
-- **error.rs**: 统一的错误处理机制
-- **conf.rs**: 配置管理
-- **const_vars.rs**: 系统常量
-- **tools.rs**: 通用工具函数
+### 1. `module/`（对应 `gops mod`）
 
-### 2. 业务模块层
-- **module/**: 模块生命周期管理
-- **package/**: 软件包管理
-- **system/**: 系统级配置和管理
-- **app_sys/**: 应用系统管理
+模块对象层，负责最小可复用运维单元的骨架初始化、引用/依赖维护、模型组织和本地化。
 
-### 3. 服务层
-- **service/**: 业务服务抽象
-- **storage/**: 数据持久化
-- **workflow/**: 工作流引擎
+- `operator.rs`：模块对象入口（`new` / `update` / `localize` 核心流程）
+- `spec.rs`：模块规范与模板初始化
+- `model.rs`：模块模型结构（围绕 `ModelSTD` 组织）
+- `refs.rs` / `depend.rs`：模块引用与依赖
+- `init/`：模块初始化模板（`_gal` / `host` / `k8s`）
 
-### 4. 运维层
-- **ops_prj/**: 运维项目管理
-- **task/**: 任务调度
-- **resource/**: 资源管理
+### 2. `system/`（对应 `gops sys`）
+
+系统对象层，把多个模块组织成可操作、可本地化、可交付的系统对象，并提供系统级操作入口。
+
+- `operator.rs`：系统对象入口
+- `conf.rs`：`SysConf`（`kind` 部署类型 + `test_envs`），`kind` 决定 `sys` 命令分派到 gflow 还是 docker compose
+- `spec.rs` / `mod_list.rs`：系统定义与模块列表
+- `path.rs`：系统路径组织（`sys-prj.yml` / `sys_model.yml` / `mod_list.yml` / `setting/`）
+- `setting/`：系统设置、本地化与模板化（`export` / `localize` / `sys` / `templatize`）
+- `init/`：系统初始化模板（`_gal` / `workflows`）
+
+纯 docker-compose 系统的密钥用 `${SEC_xxx}` 占位，运行时由 `orion-sec` 从 `~/.galaxy/sec_value.yml` 注入，不落盘。
+
+### 3. `ops_prj/`（对应 `gops prj`）
+
+项目对象层，把 `System` 导入到具体客户或环境项目，形成可持续维护的交付对象。
+
+- `project.rs`：项目对象入口（`ops-prj.yml`，含 name / work_envs / sys_models）
+- `import.rs` / `install.rs`：系统导入、重新部署与安装
+- `system.rs` / `path.rs`：项目内系统引用与路径组织
+- `init/`：项目初始化模板
+
+### 4. `workflow/`
+
+与 GXL 工作流相关的适配层，不是独立的执行引擎。它把 GXL 文件当作工作流资源进行保存、加载与分发：
+
+- `gxl.rs`：`GxlAction`（单个 GXL 文件的内容 + 文件名）
+- `act.rs`：`Workflow` / `Workflows`（一组工作流的保存与加载）
+- `prj.rs`：`GxlProject`（`_gal/work.gxl`、`adm.gxl`、`project.toml` 的项目级组织）
+
+### 5. `artifact/`
+
+构件与资源下载相关结构：
+
+- `core.rs`：`Artifact`（名称、版本、来源地址、缓存地址与本地路径，提供下载到本地能力）
+- `package.rs`：`ArtifactPackage`（`Vec<Artifact>` 的透明包装）
+- `types.rs`：`PackageType` / `BinPackage` / `GitPackage`，以及把 URL/路径解析为地址的 `convert_addr` / `build_pkg`
+
+### 6. `localize/`
+
+本地化执行与模板渲染：
+
+- 基于 Handlebars 的模板渲染（`tpl_impl.rs`）
+- 针对 C / Shell / YAML 三种注释格式的剥离处理（含 heredoc、算术移位、YAML 块标量等边界）
+- `conf` / `exec` / `path` / `set` / `tpl_path` 共同支撑本地化流程
+
+### 7. 公共支撑
+
+- `accessor.rs`：访问器入口，供模块/系统/项目在 update / import / download 场景下获取资源
+- `infra/`：日志（`log.rs`）、环境与路径辅助（`path.rs`）
+- `error.rs`：统一错误类型，CLI 最终通过它整理成一致的 `MainResult` 报错格式
+- `const_vars.rs`：`mod-prj.yml`、`sys-prj.yml`、`ops-prj.yml`、`sys_model.yml` 等稳定文件名/目录名约定
+
+## CLI 命令
+
+```text
+gops mod
+  ├── example     创建示例模块
+  ├── new         定义新模块
+  ├── update      更新模块引用/依赖
+  └── localize    本地化模块配置
+
+gops sys
+  ├── new         创建系统（--kind gxl|docker-compose 指定部署类型）
+  ├── update      更新系统引用
+  ├── package     解析变量并打包为 .tar.gz 交付产物
+  ├── localize    生成系统本地化结果（并导出 .env 供 docker-compose 使用）
+  ├── setting     初始化系统设置
+  └── download / install / uninstall / start / stop / status / diagnose
+                  （按 sys-prj.yml 的 kind 分派：gxl → 外部 gflow；docker-compose → docker compose）
+
+gops prj
+  ├── new         创建运维工程
+  ├── import      导入系统到工程
+  ├── update      更新工程本地引用
+  └── reimport    按 ops-prj.yml 重新导入系统（保留 values/ 客户值）
+```
 
 ## 技术栈
 
-### 核心依赖
-- **orion_conf**: 公共库
-- **orion_infra**: 基础设施库
-- **orion_variate**: 变量管理库
-- **serde**: 序列化/反序列化
-- **tokio**: 异步运行时
-- **anyhow**: 错误处理
+核心依赖（见 `Cargo.toml`）：
 
+- **CLI**：`clap`（derive）
+- **异步**：`tokio`
+- **模板渲染**：`handlebars`
+- **序列化**：`serde` / `serde_json` / `serde_yaml` / `serde_ini` / `toml`
+- **网络**：`reqwest`
+- **Git**：`git2`
+- **压缩**：`flate2` / `tar`
+- **错误/配置/基础设施/密钥**：`orion-error` / `orion-conf` / `orion-infra` / `orion-accessor` / `orion-variate` / `orion-sec`（内部生态）
 
-### 网络通信
-- **reqwest**: HTTP客户端
-- **tokio**: 异步网络
-
-## 功能特性
-
-### 1. 模块化管理
-- 动态模块加载/卸载
-- 依赖关系管理
-- 版本控制
-- 配置管理
-
-### 2. 包管理
-- 软件包安装/卸载
-- 版本管理
-- 依赖解析
-- 仓库管理
-
-### 3. 系统管理
-- 系统配置
-- 资源监控
-- 服务管理
-- 日志管理
-
-### 4. 工作流自动化
-- 可视化工作流设计
-- 任务调度
-- 状态管理
-- 错误处理
-
-### 5. 运维项目管理
-- 项目生命周期管理
-- 环境配置
-- 部署管理
-- 监控告警
-
-## 快速开始
-
-### 1. 环境准备
+## 构建与测试
 
 ```bash
-# 安装 Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# 安装依赖
-```
-
-### 2. 项目构建
-
-```bash
-# 克隆项目
-git clone <repository-url>
-cd galaxy-ops
-
-# 构建项目
+# 构建
 cargo build --release
 
-# 运行测试
+# 调试运行
+cargo run --bin gops -- --help
+
+# 测试
 cargo test
 ```
 
+## 相关文档
 
-
-
-### 4. 启动服务
-
-```bash
-# 启动应用
-cargo run --bin gops
-```
-
-## 开发指南
-
-### 1. 代码结构
-
-```
-src/
-├── lib.rs              # 库入口
-├── types.rs            # 类型定义
-├── error.rs            # 错误处理
-├── conf.rs             # 配置管理
-├── [module]/           # 功能模块
-│   ├── mod.rs          # 模块定义
-│   ├── README.md       # 模块文档
-│   └── [submodule]/    # 子模块
-```
-
-### 2. 添加新模块
-
-1. 创建模块目录
-2. 编写模块代码
-3. 添加模块文档
-4. 更新 lib.rs
-5. 编写测试用例
-
-### 3. 测试策略
-
-```bash
-# 单元测试
-cargo test
-
-# 集成测试
-cargo test --test integration
-
-# 性能测试
-cargo bench
-
-# 代码覆盖率
-cargo tarpaulin --out Html
-```
-
-### 4. 文档生成
-
-```bash
-# 生成文档
-cargo doc --open
-
-# 生成 README
-cargo readme > README.md
-```
-
-## API 文档
-
-### 1. 模块 API
-
-每个模块都提供了清晰的 API 接口：
-
-- **Module API**: 模块生命周期管理
-- **Package API**: 包管理操作
-- **System API**: 系统配置和管理
-- **Workflow API**: 工作流引擎接口
-
-### 2. 错误处理
-
-统一的错误类型系统：
-
-```rust
-use galaxy_ops::error::{MainReason, MainResult};
-
-pub fn example() -> MainResult<String> {
-    // 业务逻辑
-    Ok("success".to_string())
-}
-```
-
-### 3. 配置管理
-
-类型安全的配置系统：
-
-```rust
-use galaxy_ops::conf::AppConfig;
-
-let config = AppConfig::load("config.yaml").await?;
-config.validate()?;
-```
-
-## 部署指南
-
-### 1. Docker 部署
-
-```dockerfile
-FROM rust:1.70 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
-FROM debian:bullseye-slim
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    redis-tools \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/gops /usr/local/bin/
-CMD ["gops"]
-```
-
-
-
-
-
-
-## 贡献指南
-
-### 1. 开发流程
-
-1. Fork 项目
-2. 创建功能分支
-3. 编写代码和测试
-4. 提交 Pull Request
-5. 代码审查
-6. 合并到主分支
-
-### 2. 代码规范
-
-- 遵循 Rust 编码规范
-- 使用 rustfmt 格式化代码
-- 编写清晰的文档注释
-- 添加充分的测试用例
-
-### 3. 提交规范
-
-```
-type(scope): description
-
-body
-
-footer
-```
-
-类型包括：feat, fix, docs, style, refactor, test, chore
+- [README](./README.md)：项目定位、核心对象与 Quick Start
+- [源码结构](./src/README.md)
+- [核心文件说明](./src/core_files.md)
+- [升级迁移指南](./UPGRADE.md)
+- [Module 模块文档](./src/module/README.md)
+- [System 系统文档](./src/system/README.md)
+- [Ops Project 文档](./src/ops_prj/README.md)
 
 ## 许可证
 
-MIT License - 详见 LICENSE 文件
-
-## 联系方式
-
-- 项目主页: [GitHub Repository]
-- 问题反馈: [Issues]
-- 文档: [Documentation]
-- 社区: [Discussions]
-
-## 版本历史
-
-- **v0.10.2**: 当前版本
-  - 模块化管理
-  - 包管理功能
-  - 工作流引擎
-  - 系统监控
-
-## 路线图
-
-### 短期目标 (v0.11.0)
-- [ ] Web UI 界面
-- [ ] 插件系统
-- [ ] 更多存储后端支持
-
-### 中期目标 (v0.12.0)
-- [ ] 分布式部署
-- [ ] 高可用性
-- [ ] 性能优化
-
-### 长期目标 (v1.0.0)
-- [ ] 企业级功能
-- [ ] 多语言支持
-- [ ] 云原生集成
+MIT License，详见 `LICENSE` 文件。

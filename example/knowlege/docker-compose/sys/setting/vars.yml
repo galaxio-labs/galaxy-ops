@@ -1,0 +1,20 @@
+# 系统级变量定义（system 段，仅非密钥配置）
+#
+# `gops sys localize` 会把这些 system 变量合并后导出为 `.env`（KEY=VALUE），
+# 供同目录的 docker-compose.yml 里的 `${VAR}` 消费。
+#
+# 说明：
+#   - 只有 `system:` 段的变量会进入 resolved_vars.yml 并最终导出到 .env；
+#   - 密钥（DB_PASSWORD / POSTGRES_PASSWORD）不要写在这里：compose 里用 ${SEC_xxx} 占位，
+#     运行时由 gops sys start 从 ~/.galaxy/sec_value.yml 注入，不落盘。
+system:
+  - name: NGINX_TAG
+    value: "1.25-alpine"
+  - name: HTTP_PORT
+    value: 8080
+  - name: DB_HOST
+    value: "10.0.0.11"
+  - name: REPLICAS
+    value: 3
+  - name: POSTGRES_TAG
+    value: "16-alpine"

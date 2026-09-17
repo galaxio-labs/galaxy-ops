@@ -5,7 +5,7 @@ use orion_variate::addr::Address;
 
 use crate::{
     artifact::types::{build_pkg, convert_addr},
-    const_vars::{RESOLVED_VARS_YML, SYS_VALUE_FILE},
+    const_vars::{EFFECTIVE_VARS_YML, SYS_VALUE_FILE, SYS_VARS_YML},
     error::MainResult,
     ops_prj::{project::OpsProject, system::OpsSystem},
     types::Accessor,
@@ -158,11 +158,17 @@ impl OpsProject {
 
     pub fn ia_setting(&self, interactive: bool) -> MainResult<()> {
         for i in self.conf().sys_models().iter() {
-            let vars_path = self
-                .root_local()
-                .join(i.sys().name())
-                .join("sys")
-                .join(RESOLVED_VARS_YML);
+            let sys_dir = self.root_local().join(i.sys().name()).join("sys");
+            // 兼容旧名：effective_vars.yml 优先，缺失时回退 sys_vars.yml
+            let new_vars_path = sys_dir.join(EFFECTIVE_VARS_YML);
+            let legacy_vars_path = sys_dir.join(SYS_VARS_YML);
+            let vars_path = if new_vars_path.exists() {
+                new_vars_path
+            } else if legacy_vars_path.exists() {
+                legacy_vars_path
+            } else {
+                new_vars_path
+            };
 
             let value_path = self.root_local().join("values").join(i.sys().name());
             ensure_path(&value_path).source_resource()?;

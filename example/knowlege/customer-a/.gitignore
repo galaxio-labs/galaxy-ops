@@ -1,3 +1,3 @@
 .report
 .run.gxl
-resolved_vars.yml
+effective_vars.yml

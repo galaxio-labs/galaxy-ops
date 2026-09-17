@@ -141,7 +141,7 @@ cd web-stack
 gops sys package
 ```
 
-`sys package` 会先执行一次 `update`（解析模块变量、生成 `resolved_vars.yml`），再把系统打包为父目录下的 `<name>-<version>.tar.gz`，作为可交付产物。
+`sys package` 会先执行一次 `update`（解析模块变量、生成 `effective_vars.yml`），再把系统打包为父目录下的 `<name>-<version>.tar.gz`，作为可交付产物。
 
 ### 4. Create an Ops Project
 

@@ -1,9 +1,11 @@
 use crate::internal_prelude::*;
 
-use orion_vars::vars::ValueType;
+use orion_vars::vars::{ValueType, VarToValue};
 
 use crate::{
-    const_vars::{MOD_VALUE_FILE, RESOLVED_VARS_YML, SYS_VALUE_FILE, USER_VALUE_FILE, VALUE_DIR},
+    const_vars::{
+        EFFECTIVE_VARS_YML, MOD_VALUE_FILE, SYS_VALUE_FILE, SYS_VARS_YML, USER_VALUE_FILE, VALUE_DIR,
+    },
     types::LocalizeOptions,
 };
 
@@ -14,9 +16,9 @@ pub fn load_mod_opr_value(root: &Path, model: &str) -> MainResult<OriginDict> {
         let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
         let vars_file = root.join("mod").join(model).join("vars.yml");
         let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
-        let sys_value = vars_vec.system_vars();
+        let sys_value = vars_vec.system_vars().to_val();
         ctx.record("sys-value", sys_v_file.display());
-        orion_conf::ConfigIO::save_conf(sys_value, &sys_v_file).source_resource()?;
+        orion_conf::ConfigIO::save_conf(&sys_value, &sys_v_file).source_resource()?;
         ctx.mark_suc();
     }
     let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).source_logic()?);
@@ -27,8 +29,8 @@ pub fn load_mod_opr_value(root: &Path, model: &str) -> MainResult<OriginDict> {
         ensure_path(&value_root.join(model)).source_resource()?;
         let vars_file = root.join("mod").join(model).join("vars.yml");
         let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
-        let sys_value = vars_vec.module_vars();
-        orion_conf::ConfigIO::save_conf(sys_value, &mod_v_file).source_resource()?;
+        let mod_value = vars_vec.module_vars().to_val();
+        orion_conf::ConfigIO::save_conf(&mod_value, &mod_v_file).source_resource()?;
     }
     let mut mod_dict = OriginDict::from(ValueDict::load_yaml(&mod_v_file).source_logic()?);
     mod_dict.set_source("mod-setting");
@@ -41,7 +43,16 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
     let sys_v_file = value_root.join(SYS_VALUE_FILE);
     if !sys_v_file.exists() {
         let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
-        let vars_file = prj_root.join("sys").join(RESOLVED_VARS_YML);
+        // 兼容旧名：effective_vars.yml 优先，缺失时回退 sys_vars.yml
+        let new_vars_file = prj_root.join("sys").join(EFFECTIVE_VARS_YML);
+        let legacy_vars_file = prj_root.join("sys").join(SYS_VARS_YML);
+        let vars_file = if new_vars_file.exists() {
+            new_vars_file
+        } else if legacy_vars_file.exists() {
+            legacy_vars_file
+        } else {
+            new_vars_file
+        };
         if !vars_file.exists() {
             return Err(crate::error::MainReason::logic_detail(format!(
                 "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
@@ -49,9 +60,9 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
             )));
         }
         let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
-        let sys_value = vars_vec.system_vars();
+        let sys_value = vars_vec.system_vars().to_val();
         ctx.record("sys-value", sys_v_file.display());
-        orion_conf::ConfigIO::save_conf(sys_value, &sys_v_file).source_resource()?;
+        orion_conf::ConfigIO::save_conf(&sys_value, &sys_v_file).source_resource()?;
         ctx.mark_suc();
     }
     let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).source_logic()?);
@@ -419,5 +430,37 @@ mod tests {
         assert!(content.contains("DB_HOST=10.0.0.11"));
         assert!(content.contains("DB_PASSWORD=\"p@ss word#1\""));
         assert!(content.contains("DEBUG=true"));
+    }
+
+    #[test]
+    fn test_load_sys_opr_value_falls_back_to_legacy_sys_vars() {
+        test_init();
+        let temp_dir = tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("sys")).unwrap();
+        // 只有旧名 sys_vars.yml（模拟旧系统）
+        std::fs::write(
+            temp_dir.path().join("sys/sys_vars.yml"),
+            "system:\n  - name: SERVICE_IMAGE\n    value: legacy-image\n",
+        )
+        .unwrap();
+
+        let dict = load_sys_opr_value(temp_dir.path()).unwrap();
+
+        assert_eq!(
+            dict.get("SERVICE_IMAGE").map(|v| v.value().to_string()).as_deref(),
+            Some("legacy-image")
+        );
+        // 应生成 values/sys_value.yml
+        assert!(temp_dir.path().join("values/sys_value.yml").exists());
+    }
+
+    #[test]
+    fn test_load_sys_opr_value_errors_when_no_vars_file() {
+        test_init();
+        let temp_dir = tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("sys")).unwrap();
+
+        let result = load_sys_opr_value(temp_dir.path());
+        assert!(result.is_err());
     }
 }

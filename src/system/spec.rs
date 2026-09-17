@@ -3,7 +3,7 @@ use super::prelude::*;
 use crate::system::SysKind;
 
 use crate::{
-    const_vars::{MOD_OPERATORS_ROOT, RESOLVED_VARS_YML},
+    const_vars::{EFFECTIVE_VARS_YML, MOD_OPERATORS_ROOT, SYS_VARS_YML},
     error::ElementReason,
     module::operator::ModOperator,
     system::setting::ModSetting,
@@ -191,9 +191,14 @@ impl RefUpdateable<()> for SysModelSpec {
     ) -> MainResult<()> {
         if let Some(local) = &self.local {
             let value = self.mod_list.update_local(accessor, local, options).await?;
-            let path = local.join(RESOLVED_VARS_YML);
+            let path = local.join(EFFECTIVE_VARS_YML);
             if path.exists() {
                 std::fs::remove_file(&path).source_sys()?;
+            }
+            // 迁移：删除旧名 sys_vars.yml，避免与新名并存
+            let legacy_path = local.join(SYS_VARS_YML);
+            if legacy_path.exists() {
+                std::fs::remove_file(&legacy_path).source_sys()?;
             }
             let sys_vars = value.vars.merge_system(self.setting().vars().clone());
             sys_vars.save_yaml(&path).source_resource()?;

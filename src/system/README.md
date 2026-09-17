@@ -112,7 +112,7 @@ sys start (compose)      →  orion_sec::load_sec_dict()
 └── sys/
     ├── sys_model.yml       # 系统定义（name / model 可选 / kind / vender；kind 决定命令分派）
     ├── mod_list.yml        # 可选，缺失时视为空模块列表
-    ├── resolved_vars.yml   # 解析结果（sys update 生成：模块变量 ⊕ 系统变量，需入库）
+    ├── effective_vars.yml   # 生效变量（sys update 生成：模块变量 ⊕ 系统变量，需入库）
     ├── setting/
     │   ├── vars.yml        # system 段变量定义（源，版本化）
     │   └── list.yml        # 可选，按模块的本地化列表；纯 docker-compose 系统可省略

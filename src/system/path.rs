@@ -1,5 +1,6 @@
 use crate::const_vars::{
-    MOD_VALUE_FILE, RESOLVED_VARS_YML, SYS_MODLE_DEF_YML, SYS_VALUE_FILE, USED_READABLE_FILE,
+    EFFECTIVE_VARS_YML, MOD_VALUE_FILE, SYS_MODLE_DEF_YML, SYS_VARS_YML, SYS_VALUE_FILE,
+    USED_READABLE_FILE,
 };
 use std::path::{Path, PathBuf};
 
@@ -66,8 +67,27 @@ impl SysOperatorPath {
     pub fn sys_dir(&self) -> PathBuf {
         self.root.join("sys")
     }
-    pub fn resolved_vars_file(&self) -> PathBuf {
-        self.root.join("sys").join(RESOLVED_VARS_YML)
+    pub fn effective_vars_file(&self) -> PathBuf {
+        self.root.join("sys").join(EFFECTIVE_VARS_YML)
+    }
+
+    /// 旧名路径（`sys_vars.yml`，1.2.0 及更早版本）
+    pub fn legacy_vars_file(&self) -> PathBuf {
+        self.root.join("sys").join(SYS_VARS_YML)
+    }
+
+    /// 解析生效变量文件：`effective_vars.yml` 优先，缺失时回退旧名 `sys_vars.yml`。
+    /// 两者都不存在时返回新名路径（供报错信息显示）。
+    pub fn resolve_effective_vars_file(&self) -> PathBuf {
+        let new_path = self.effective_vars_file();
+        if new_path.exists() {
+            return new_path;
+        }
+        let legacy = self.legacy_vars_file();
+        if legacy.exists() {
+            return legacy;
+        }
+        new_path
     }
 
     /// 获取值目录路径 (values/)
@@ -135,5 +155,49 @@ impl SysValuePaths {
         Ok(Self {
             root: ensure_path(self.root.join(path.as_ref()))?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_resolve_effective_vars_prefers_new_name() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("sys")).unwrap();
+        std::fs::write(dir.path().join("sys/effective_vars.yml"), "new").unwrap();
+        std::fs::write(dir.path().join("sys/sys_vars.yml"), "legacy").unwrap();
+
+        assert_eq!(
+            paths.resolve_effective_vars_file(),
+            dir.path().join("sys/effective_vars.yml")
+        );
+    }
+
+    #[test]
+    fn test_resolve_effective_vars_falls_back_to_legacy_name() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("sys")).unwrap();
+        std::fs::write(dir.path().join("sys/sys_vars.yml"), "legacy").unwrap();
+
+        assert_eq!(
+            paths.resolve_effective_vars_file(),
+            dir.path().join("sys/sys_vars.yml")
+        );
+    }
+
+    #[test]
+    fn test_resolve_effective_vars_defaults_to_new_when_both_missing() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+
+        assert_eq!(
+            paths.resolve_effective_vars_file(),
+            dir.path().join("sys/effective_vars.yml")
+        );
     }
 }

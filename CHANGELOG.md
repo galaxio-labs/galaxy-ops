@@ -16,11 +16,11 @@
 
 ### 重大变更
 - **`ops-prj.yml` 与 `ops-systems.yml` 合并**: 运维项目 manifest 收敛为单个 `ops-prj.yml`（`name` + `work_envs` + `sys_models`）；加载时向后兼容旧 `ops-systems.yml`，保存后删除旧文件
-- **`sys_vars.yml` 重命名为 `resolved_vars.yml`**: 明确其为「解析结果」而非源定义，与 `sys/setting/vars.yml`（源）区分；派生产物不做旧名兼容，旧系统下次 `sys update` 自动生成新名
+- **`sys_vars.yml` 重命名为 `effective_vars.yml`**: 明确其为「生效变量」而非源定义，与 `sys/setting/vars.yml`（源）区分；读取时向后兼容旧名 `sys_vars.yml`（缺失时回退），`sys update` 生成新名并清理旧名
 
 ### 改进优化
 - **系统文件可选化**: `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml` 缺失时降级为空，纯 docker-compose 系统可省略
-- **`.gitignore` 改进**: 忽略派生的值文件但保留客户覆盖 `values/value.yml`；新增 `.env`。`sys/resolved_vars.yml` 需要入库（供 `prj import` 读取），不加入 gitignore
+- **`.gitignore` 改进**: 忽略派生的值文件但保留客户覆盖 `values/value.yml`；新增 `.env`。`sys/effective_vars.yml` 需要入库（供 `prj import` 读取），不加入 gitignore
 - **`sys new` 默认生成 `docker-compose.yml`**: 内置 `${SERVICE_IMAGE}` / `${SERVICE_PORT}` / `${REPLICAS}` 占位与对应 system 变量段
 - **引入 `orion-sec` 依赖**: 密钥加载走 `orion-sec::load_sec_dict()`（读 `~/.galaxy/sec_value.yml` 或 `./.galaxy/sec_value.yml`），key 归一化为大写 `SEC_*` 前缀后注入 `docker compose` 子进程环境，密钥不落盘
 - **许可证统一为 MIT**
@@ -30,6 +30,7 @@
 - 修复 `convert_addr` / `build_pkg` 对裸目录的 panic，改为返回友好错误
 - 修复 `mod new` 构件地址硬编码 postgresql、`x86_ubt22_host` 误用 `arm_mac14_host` 模型的问题
 - 修复 `sys new` 目标目录已存在时报底层 `path exists` 的问题：改为支持已存在目录，只补齐缺失的骨架文件、不覆盖已有文件（幂等）
+- 修复 `load_sys_opr_value` / `load_mod_opr_value` 写入 `sys_value.yml`/`mod_value.yml` 时用 `Vec<VarDefinition>`（列表）落盘却按 `ValueDict`（map）读回导致反序列化失败的问题，改为统一用 `to_val()` 生成 `ValueDict`
 
 ### 测试
 - 新增 `SysKind` 序列化与 `SysDefine` 缺失 `kind` 向后兼容测试
@@ -38,6 +39,7 @@
 - 新增 `sec_env_pairs`（secret dict → 环境变量对）与 `load_sec_dict` 密钥键归一化测试
 - 新增 `sys new` 已存在目录的幂等回归测试（保留已有 `docker-compose.yml`，补齐骨架文件）
 - 新增 `save_local_minimal` / `save_local_vars_only_if_absent` 幂等测试与 `save` 保留已有 `sys-prj.yml`/`sys_model.yml` 测试
+- 新增 `resolve_effective_vars_file` 优先级/回退/默认三例、`load_sys_opr_value` 旧名回退与缺失报错、`update_local` 迁移旧名 `sys_vars.yml` 测试
 
 ### 文档更新
 - 重写 `PROJECT_OVERVIEW.md`、`src/artifact/README.md`、`src/workflow/README.md` 以对齐真实代码

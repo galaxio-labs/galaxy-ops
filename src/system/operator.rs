@@ -221,14 +221,15 @@ impl SysOperator {
                 .source_resource()?;
         }
         if !value_root.sys_value_file().exists() {
-            let resolved_vars_file = self.paths.resolved_vars_file();
-            if !resolved_vars_file.exists() {
+            // 兼容旧名：effective_vars.yml 优先，缺失时回退 sys_vars.yml
+            let vars_file = self.paths.resolve_effective_vars_file();
+            if !vars_file.exists() {
                 return Err(crate::error::MainReason::logic_detail(format!(
                     "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
-                    resolved_vars_file.display()
+                    self.paths.effective_vars_file().display()
                 )));
             }
-            let sys_vars = VarCollection::load_yaml(&resolved_vars_file)
+            let sys_vars = VarCollection::load_yaml(&vars_file)
                 .source_resource()?
                 .system_vars()
                 .to_val();
@@ -382,6 +383,62 @@ pub mod tests {
         proj.save()?;
         assert_eq!(std::fs::read_to_string(&conf).unwrap(), "# user conf\n");
         assert_eq!(std::fs::read_to_string(&define).unwrap(), "# user define\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_init_setting_value_falls_back_to_legacy_sys_vars() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_legacy_vars");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_legacy_vars")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+
+        // save() 不生成 effective_vars.yml；模拟旧系统只有 sys_vars.yml（旧名）
+        assert!(!prj_path.join("sys/effective_vars.yml").exists());
+        std::fs::write(
+            prj_path.join("sys/sys_vars.yml"),
+            "system:\n  - name: SERVICE_IMAGE\n    value: legacy-image\n",
+        )
+        .unwrap();
+
+        // init_setting_value 应回退读取旧名 sys_vars.yml
+        let value_path = proj.init_setting_value()?;
+        let sys_value = ValueDict::load_yaml(&value_path.sys_value_file()).source_resource()?;
+        assert_eq!(
+            sys_value.get("SERVICE_IMAGE").map(|v| v.to_string()).as_deref(),
+            Some("legacy-image")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_update_local_migrates_legacy_sys_vars() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_migrate_vars");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_migrate_vars")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+
+        // 模拟旧系统：只有旧名 sys_vars.yml
+        std::fs::write(
+            prj_path.join("sys/sys_vars.yml"),
+            "system:\n  - name: SERVICE_IMAGE\n    value: legacy-image\n",
+        )
+        .unwrap();
+        assert!(prj_path.join("sys/sys_vars.yml").exists());
+
+        // 重新从磁盘加载（设置 local），再执行 update_local
+        let proj = SysOperator::load(&prj_path)?;
+        let accessor = accessor_for_test();
+        proj.update_local(accessor, &prj_path, &DownloadOptions::default())
+            .await?;
+
+        // 迁移：旧名被清理，新名生成
+        assert!(!prj_path.join("sys/sys_vars.yml").exists());
+        assert!(prj_path.join("sys/effective_vars.yml").exists());
         Ok(())
     }
 

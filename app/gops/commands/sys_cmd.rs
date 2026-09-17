@@ -115,8 +115,8 @@ pub enum SysCmd {
     /// 打包系统 (Package System)
     #[command(
         about = "打包系统 (Package System)",
-        long_about = "先更新系统（解析模块变量并生成 resolved_vars.yml），再打包为可交付的 .tar.gz。\n\
-                     Update the system first (resolve module variables and generate resolved_vars.yml), then package it into a deliverable .tar.gz."
+        long_about = "先更新系统（解析模块变量并生成 effective_vars.yml），再打包为可交付的 .tar.gz。\n\
+                     Update the system first (resolve module variables and generate effective_vars.yml), then package it into a deliverable .tar.gz."
     )]
     Package(SysPackageArgs),
 
@@ -350,7 +350,7 @@ impl SysCommandHandler {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         galaxy_ops::infra::configure_dfx_logging(&args);
 
-        // 1. 先解析变量（生成 sys/resolved_vars.yml），保证交付包可被 prj import 完整导入
+        // 1. 先解析变量（生成 sys/effective_vars.yml），保证交付包可被 prj import 完整导入
         let options = DownloadOptions::from((args.force, ValueDict::default()));
         let operator = SysOperator::load(&current_dir).err_conv()?;
         let accessor = galaxy_ops::accessor::accessor_for_default();

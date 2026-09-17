@@ -13,7 +13,9 @@ pub const RESOURCE_YML: &str = "resource.yml";
 pub const NET_RES_YML: &str = "net_res.yml";
 pub const SYS_MODLE_DEF_YML: &str = "sys_model.yml";
 pub const VARS_YML: &str = "vars.yml";
-pub const RESOLVED_VARS_YML: &str = "resolved_vars.yml";
+pub const EFFECTIVE_VARS_YML: &str = "effective_vars.yml";
+/// 旧名（1.2.0 及更早版本），读取时向后兼容
+pub const SYS_VARS_YML: &str = "sys_vars.yml";
 pub const SPEC_YML: &str = "spec.yml";
 pub const SYS_VALUE_FILE: &str = "sys_value.yml";
 pub const DEFAULT_VALUE_FILE: &str = "_default.yml";

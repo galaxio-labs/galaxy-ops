@@ -8,8 +8,8 @@
 ## [1.3.0] - 2026-09-17
 
 ### 新增功能
-- **docker-compose 类型系统**: 新增 `SysKind`（`gxl` / `docker-compose`）与 `sys-prj.yml` 的 `kind` 字段，用统一的 `gops sys` 入口同时管理 GXL 模块式系统与纯 docker-compose 系统
-- **`gops sys new --kind docker-compose`**: 支持按类型创建系统；compose 模式跳过交互式型号选择，直接采用当前系统型号
+- **docker-compose 类型系统**: 新增 `SysKind`（`gxl` / `docker-compose`）与 `sys/sys_model.yml` 的 `kind` 字段，用统一的 `gops sys` 入口同时管理 GXL 模块式系统与纯 docker-compose 系统
+- **`gops sys new --kind docker-compose`**: 支持按类型创建系统；compose 模式无目标型号，且不生成 GXL 相关的 `_gal`/`mod_list`/`workflows`/`list`/`values` 文件
 - **`sys` 部署命令按类型分派**: `download/install/start/stop/uninstall/status/diagnose` 在 `docker-compose` 类型下自动映射到 `docker compose pull/create/up -d/stop/down/ps/config`，无需安装 gflow
 - **`gops prj reimport`**: 按 `ops-prj.yml` 记录的 `sys_models` 重新导入系统，并保留 `values/` 客户值
 - **`.env` 导出与 `${SEC_xxx}` 密钥注入**: `sys localize` 合并系统默认值 + `values/value.yml` 客户覆盖生成 `.env`（仅非密钥配置）；密钥用 `${SEC_xxx}` 占位，`sys start` 运行时从 `~/.galaxy/sec_value.yml` 注入 `docker compose` 子进程环境，不落盘
@@ -29,12 +29,15 @@
 - 修复 `prj import` 时 `values` 符号链接冲突（先移除旧 `values/`）
 - 修复 `convert_addr` / `build_pkg` 对裸目录的 panic，改为返回友好错误
 - 修复 `mod new` 构件地址硬编码 postgresql、`x86_ubt22_host` 误用 `arm_mac14_host` 模型的问题
+- 修复 `sys new` 目标目录已存在时报底层 `path exists` 的问题：改为支持已存在目录，只补齐缺失的骨架文件、不覆盖已有文件（幂等）
 
 ### 测试
-- 新增 `SysKind` / `SysConf` 序列化与「缺失 `kind` 向后兼容」测试
-- 新增 `load_kind` 兼容测试（无 `sys-prj.yml` / 缺 `kind` / `docker-compose` / 旧 `sys_prj.yml` 文件名）
+- 新增 `SysKind` 序列化与 `SysDefine` 缺失 `kind` 向后兼容测试
+- 新增 `load_kind` 兼容测试（无 `sys/sys_model.yml` / 缺 `kind` / `docker-compose`）
 - 新增 `with_kind` 保存回读、`parse_kind`、`compose_subcommand`、`sys new` 写入 `kind` 测试
 - 新增 `sec_env_pairs`（secret dict → 环境变量对）与 `load_sec_dict` 密钥键归一化测试
+- 新增 `sys new` 已存在目录的幂等回归测试（保留已有 `docker-compose.yml`，补齐骨架文件）
+- 新增 `save_local_minimal` / `save_local_vars_only_if_absent` 幂等测试与 `save` 保留已有 `sys-prj.yml`/`sys_model.yml` 测试
 
 ### 文档更新
 - 重写 `PROJECT_OVERVIEW.md`、`src/artifact/README.md`、`src/workflow/README.md` 以对齐真实代码

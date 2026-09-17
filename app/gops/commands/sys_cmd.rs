@@ -17,7 +17,7 @@ use galaxy_ops::system::setting::SysSetting;
 use galaxy_ops::system::{SysKind, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_conf::YamlIO;
-use orion_infra::path::{ensure_path, make_new_path};
+use orion_infra::path::ensure_path;
 use orion_variate::archive::compress;
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{OriginDict, ValueDict};
@@ -37,10 +37,9 @@ pub struct SysNewArgs {
 
     #[arg(
         long,
-        help = "系统部署类型 (System kind): gxl | docker-compose\ngxl=模块化 GXL 工作流系统(默认); docker-compose=声明式 docker compose 系统",
-        default_value = "gxl"
+        help = "系统部署类型 (System kind): gxl | docker-compose\n不指定时交互式选择。gxl=模块化 GXL 工作流系统; docker-compose=声明式 docker compose 系统"
     )]
-    pub(crate) kind: String,
+    pub(crate) kind: Option<String>,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -259,6 +258,24 @@ impl DfxArgsGetter for SysOpsArgs {
 pub struct SysCommandHandler;
 
 impl SysCommandHandler {
+    /// 交互式选择系统部署类型；测试环境默认 gxl，避免交互卡住。
+    fn ia_kind() -> MainResult<SysKind> {
+        if std::env::var("TEST_MODE").is_ok() {
+            return Ok(SysKind::Gxl);
+        }
+        let options = vec!["gxl".to_string(), "docker-compose".to_string()];
+        let index = Select::new()
+            .with_prompt("请选择部署类型:")
+            .items(&options)
+            .interact()
+            .unwrap();
+        Ok(if index == 0 {
+            SysKind::Gxl
+        } else {
+            SysKind::DockerCompose
+        })
+    }
+
     fn ia_model_std() -> MainResult<ModelSTD> {
         let support_models = ModelSTD::support();
         let options: Vec<String> = support_models
@@ -291,19 +308,25 @@ impl SysCommandHandler {
     pub async fn handle_new(args: SysNewArgs) -> MainResult<()> {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         let new_prj = current_dir.join(args.name());
-        make_new_path(&new_prj).source_resource()?;
+        // 支持目录已存在：只补齐缺失的骨架文件，不覆盖已有文件
+        ensure_path(&new_prj).source_resource()?;
 
-        let kind = parse_kind(args.kind().as_str());
-        // docker-compose 系统无需交互选择型号，用当前系统型号兜底
-        let model_in = if kind == SysKind::DockerCompose {
-            ModelSTD::from_cur_sys()
-        } else {
-            Self::ia_model_std()?
+        // 部署类型：显式 --kind 优先，否则交互式选择
+        let kind = match args.kind() {
+            Some(k) => parse_kind(k.as_str()),
+            None => Self::ia_kind()?,
         };
-        let spec = SysOperator::make_new(&new_prj, args.name(), model_in)
-            .err_conv()?
-            .with_kind(kind);
-        spec.save().err_conv()?;
+        // docker-compose 无目标型号；gxl 才交互选择型号
+        let spec = match kind {
+            SysKind::DockerCompose => {
+                SysOperator::make_new_docker(&new_prj, args.name()).err_conv()?
+            }
+            SysKind::Gxl => {
+                let model = Self::ia_model_std()?;
+                SysOperator::make_new(&new_prj, args.name(), model).err_conv()?
+            }
+        };
+        spec.with_kind(kind).save().err_conv()?;
         Ok(())
     }
 
@@ -655,7 +678,7 @@ mod tests {
 
         let args = SysNewArgs {
             name: "test_system".to_string(),
-            kind: "gxl".to_string(),
+            kind: Some("gxl".to_string()),
         };
 
         let result = SysCommandHandler::handle_new(args).await;
@@ -693,7 +716,7 @@ mod tests {
         // 测试 new 命令
         let new_cmd = SysCmd::New(SysNewArgs {
             name: "test_system".to_string(),
-            kind: "gxl".to_string(),
+            kind: Some("gxl".to_string()),
         });
         let result = SysCommandHandler::execute(new_cmd).await;
         assert!(result.is_ok());
@@ -708,13 +731,13 @@ mod tests {
         once_init_log();
         let args = SysNewArgs {
             name: "test_system".to_string(),
-            kind: "docker-compose".to_string(),
+            kind: Some("docker-compose".to_string()),
         };
 
         assert_eq!(args.debug_level(), 0);
         assert_eq!(args.log_setting(), None);
         assert_eq!(args.name(), "test_system");
-        assert_eq!(args.kind(), "docker-compose");
+        assert_eq!(args.kind(), &Some("docker-compose".to_string()));
     }
 
     #[test]
@@ -776,6 +799,18 @@ mod tests {
     }
 
     #[test]
+    fn test_ia_kind_test_mode_defaults_to_gxl() {
+        unsafe {
+            std::env::set_var("TEST_MODE", "true");
+        }
+        let kind = SysCommandHandler::ia_kind().unwrap();
+        unsafe {
+            std::env::remove_var("TEST_MODE");
+        }
+        assert_eq!(kind, SysKind::Gxl);
+    }
+
+    #[test]
     fn test_compose_subcommand() {
         fn check(cmd: &str, sub: &str, extra: &[&str]) {
             let (s, e) = compose_subcommand(cmd);
@@ -804,7 +839,7 @@ mod tests {
 
         let args = SysNewArgs {
             name: "compose_demo".to_string(),
-            kind: "docker-compose".to_string(),
+            kind: Some("docker-compose".to_string()),
         };
         SysCommandHandler::handle_new(args).await.unwrap();
 
@@ -814,8 +849,43 @@ mod tests {
 
         let prj = temp_dir.path().join("compose_demo");
         assert_eq!(SysOperator::load_kind(&prj), SysKind::DockerCompose);
-        let conf = std::fs::read_to_string(prj.join("sys-prj.yml")).unwrap();
-        assert!(conf.contains("kind: docker-compose"));
+        let define = std::fs::read_to_string(prj.join("sys/sys_model.yml")).unwrap();
+        assert!(define.contains("kind: docker-compose"));
+    }
+
+    #[tokio::test]
+    async fn test_sys_new_existing_dir_preserves_files() {
+        once_init_log();
+        let temp_dir = tempdir().unwrap();
+        let _wd = WorkDirWithLock::change(temp_dir.path());
+        unsafe {
+            std::env::set_var("TEST_MODE", "true");
+        }
+
+        // 预先创建同名目录，并放一个用户已有的 docker-compose.yml，模拟“已存在”的场景
+        let prj = temp_dir.path().join("gateway");
+        std::fs::create_dir_all(&prj).unwrap();
+        let existing_compose = "services:\n  app:\n    image: nginx\n";
+        std::fs::write(prj.join("docker-compose.yml"), existing_compose).unwrap();
+
+        let args = SysNewArgs {
+            name: "gateway".to_string(),
+            kind: Some("docker-compose".to_string()),
+        };
+        SysCommandHandler::handle_new(args).await.unwrap();
+
+        unsafe {
+            std::env::remove_var("TEST_MODE");
+        }
+
+        // 不覆盖用户已有的 docker-compose.yml
+        let compose = std::fs::read_to_string(prj.join("docker-compose.yml")).unwrap();
+        assert_eq!(compose, existing_compose);
+        // 补齐缺失的骨架文件
+        assert_eq!(SysOperator::load_kind(&prj), SysKind::DockerCompose);
+        assert!(prj.join("sys-prj.yml").exists());
+        assert!(prj.join("sys/sys_model.yml").exists());
+        assert!(prj.join("sys/setting/vars.yml").exists());
     }
 
     #[test]

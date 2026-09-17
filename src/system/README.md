@@ -42,11 +42,11 @@ src/system/
 
 ### `conf.rs`
 
-系统配置对象 `SysConf`（序列化到 `sys-prj.yml`）。含 `kind` 部署类型（`gxl` / `docker-compose`，见 `SysKind`）与 `test_envs` 依赖集。`SysOperator::load_kind` 只读 `kind` 字段用于命令分派，缺失时退回默认 `gxl`。
+系统配置对象 `SysConf`（序列化到 `sys-prj.yml`），目前只含 `test_envs` 依赖集。部署类型 `SysKind`（`gxl` / `docker-compose`）也定义在这里。
 
 ### `spec.rs`
 
-系统定义和初始化模板相关逻辑。
+系统定义（`SysDefine`，序列化到 `sys/sys_model.yml`）与初始化模板。`SysDefine` 含 `name` / `model`（可选，纯 compose 无型号）/ `kind` / `vender`；`kind` 决定 `sys` 命令分派到 gflow 还是 docker compose。
 
 ### `mod_list.rs`
 
@@ -76,7 +76,7 @@ gops sys setting
 gops sys download/install/uninstall/start/stop/status/diagnose
 ```
 
-`download/install/uninstall/start/stop/status/diagnose` 按 `sys-prj.yml` 的 `kind` 分派：
+`download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
 
 - `gxl`（默认）：委托给外部 `gflow`（`$HOME/bin/gflow`）。
 - `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`）。
@@ -104,13 +104,13 @@ sys start (compose)      →  orion_sec::load_sec_dict()
 
 ```text
 <system-root>/
-├── sys-prj.yml             # 系统配置（kind + test_envs；kind 决定 sys 命令分派到 gflow 还是 docker compose）
+├── sys-prj.yml             # 系统配置（test_envs 依赖集）
 ├── docker-compose.yml      # 系统级 docker-compose 定义（sys new 默认生成，用 ${VAR} 占位）
 ├── version.txt
 ├── _gal/
 ├── values/                 # 值文件目录（本地化输入；localize 后生成 .env，仅非密钥配置）
 └── sys/
-    ├── sys_model.yml
+    ├── sys_model.yml       # 系统定义（name / model 可选 / kind / vender；kind 决定命令分派）
     ├── mod_list.yml        # 可选，缺失时视为空模块列表
     ├── resolved_vars.yml   # 解析结果（sys update 生成：模块变量 ⊕ 系统变量，gitignore）
     ├── setting/

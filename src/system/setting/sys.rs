@@ -97,10 +97,28 @@ impl SysSetting {
         }
     }
     pub fn save_local(&self, path: &Path) -> MainResult<()> {
+        self.save_local_with(path, true)
+    }
+    /// 只写 system 变量定义（vars.yml），不写按模块的本地化列表（list.yml）。
+    /// 纯 docker-compose 系统没有模块，list.yml 多余。
+    pub fn save_local_vars_only(&self, path: &Path) -> MainResult<()> {
+        self.save_local_with(path, false)
+    }
+    /// 同 `save_local_vars_only`，但已存在的 vars.yml 不覆盖（幂等）。
+    pub fn save_local_vars_only_if_absent(&self, path: &Path) -> MainResult<()> {
+        let vars_file = path.join(VARS_YML);
+        if vars_file.exists() {
+            return Ok(());
+        }
+        self.save_local_with(path, false)
+    }
+    fn save_local_with(&self, path: &Path, with_list: bool) -> MainResult<()> {
         let vars_file_name = path.join(VARS_YML);
-        let list_file_name = path.join("list.yml");
         self.vars.save_yaml(&vars_file_name).source_resource()?;
-        self.list.save_yaml(&list_file_name).source_resource()?;
+        if with_list {
+            let list_file_name = path.join("list.yml");
+            self.list.save_yaml(&list_file_name).source_resource()?;
+        }
         Ok(())
     }
     pub fn load_from(root: &Path) -> MainResult<Self> {
@@ -185,5 +203,34 @@ mod tests {
             loaded.vars().module_vars()[0].mutability(),
             &Mutability::Module
         );
+    }
+
+    #[test]
+    fn test_save_local_vars_only_if_absent_writes_when_missing() {
+        let temp_dir = tempdir().unwrap();
+        let setting = SysSetting::example();
+
+        setting
+            .save_local_vars_only_if_absent(temp_dir.path())
+            .assert();
+
+        // vars.yml 已生成，list.yml 不生成
+        assert!(temp_dir.path().join("vars.yml").exists());
+        assert!(!temp_dir.path().join("list.yml").exists());
+    }
+
+    #[test]
+    fn test_save_local_vars_only_if_absent_preserves_existing() {
+        let temp_dir = tempdir().unwrap();
+        // 预置一个“已存在”的 vars.yml
+        std::fs::write(temp_dir.path().join("vars.yml"), "# user custom\n").unwrap();
+
+        let setting = SysSetting::example();
+        setting
+            .save_local_vars_only_if_absent(temp_dir.path())
+            .assert();
+
+        let content = std::fs::read_to_string(temp_dir.path().join("vars.yml")).unwrap();
+        assert_eq!(content, "# user custom\n");
     }
 }

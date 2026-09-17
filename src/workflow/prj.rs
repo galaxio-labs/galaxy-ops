@@ -67,6 +67,10 @@ impl FilePersist<GxlProject> for GxlProject {
 
     fn load_from(path: &Path) -> SerdeResult<GxlProject> {
         let work_path = path.join("_gal/work.gxl");
+        // 纯 docker-compose 等无 GXL 项目的场景：缺 work.gxl 时退回空项目
+        if !work_path.exists() {
+            return Ok(GxlProject::default());
+        }
         let adm_path = path.join("_gal/project.toml");
         let prj_path = path.join("_gal/project.toml");
         let work = std::fs::read_to_string(work_path).source_resource()?;

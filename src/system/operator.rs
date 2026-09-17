@@ -1,5 +1,6 @@
 use super::prelude::*;
 
+use crate::const_vars::SYS_MODLE_DEF_YML;
 use crate::module::ModelSTD;
 use crate::module::depend::DependencySet;
 use crate::system::spec::SysDefine;
@@ -69,30 +70,28 @@ impl SysOperator {
     }
     /// 读取系统部署类型，用于 `gops sys` 命令分派。
     ///
-    /// 仅解析 `sys-prj.yml`（或旧的 `sys_prj.yml`）里的 `kind` 字段，
+    /// 仅解析 `sys/sys_model.yml` 里的 `kind` 字段，
     /// 缺失或解析失败时退回默认的 GXL 类型，保证向后兼容。
     pub fn load_kind(root_local: &Path) -> SysKind {
         let paths = SysOperatorPath::new(root_local);
-        let conf_file = if paths.conf_file_v2().exists() {
-            paths.conf_file_v2()
-        } else if paths.conf_file_v1().exists() {
-            paths.conf_file_v1()
-        } else {
+        let define_path = paths.sys_dir().join(SYS_MODLE_DEF_YML);
+        if !define_path.exists() {
             return SysKind::default();
-        };
-        SysConf::load_conf(&conf_file)
-            .map(|conf| conf.kind())
+        }
+        SysDefine::load_yaml(&define_path)
+            .map(|d| *d.kind())
             .unwrap_or_default()
     }
     pub fn with_kind(mut self, kind: SysKind) -> Self {
-        self.conf = self.conf.with_kind(kind);
+        let define = self.sys_spec.define().clone().with_kind(kind);
+        *self.sys_spec.define_mut() = define;
         self
     }
     pub fn kind(&self) -> SysKind {
-        self.conf.kind()
+        *self.sys_spec.define().kind()
     }
     pub fn is_docker_compose(&self) -> bool {
-        self.conf.is_docker_compose()
+        self.sys_spec.define().is_docker_compose()
     }
     pub fn save(&self) -> MainResult<()> {
         let mut ctx = OperationContext::want("save sys-prj")
@@ -100,20 +99,29 @@ impl SysOperator {
             .with_mod_path("sys/prj");
         ctx.record("root", self.paths.root().display());
         let conf_file_v2 = self.paths.conf_file_v2();
-        orion_conf::ConfigIO::save_conf(&self.conf, &conf_file_v2)
-            .source_resource()
-            .with(&ctx)?;
-        self.sys_spec.save_local(self.paths.root(), "sys")?;
-        self.project
-            .save_to(self.paths.root(), None)
-            .owe(SysReason::Save.into())
-            .with(&ctx)?;
-
-        // 保存 sys_local 配置
-
-        ensure_path(self.paths.value_dir())
-            .source_logic()
-            .with(&ctx)?;
+        if !conf_file_v2.exists() {
+            orion_conf::ConfigIO::save_conf(&self.conf, &conf_file_v2)
+                .source_resource()
+                .with(&ctx)?;
+        }
+        if self.is_docker_compose() {
+            // 纯 docker-compose 系统：精简结构，不生成 _gal / mod_list / workflows / list / values
+            self.sys_spec.save_local_minimal(self.paths.root(), "sys")?;
+            // version.txt 原本由 GxlProject::save_to 写，纯 compose 系统这里单独补上
+            let version_path = self.paths.root().join("version.txt");
+            if !version_path.exists() {
+                std::fs::write(&version_path, "0.1.0").source_resource()?;
+            }
+        } else {
+            self.sys_spec.save_local(self.paths.root(), "sys")?;
+            self.project
+                .save_to(self.paths.root(), None)
+                .owe(SysReason::Save.into())
+                .with(&ctx)?;
+            ensure_path(self.paths.value_dir())
+                .source_logic()
+                .with(&ctx)?;
+        }
         sys_init_gitignore(self.paths.root()).with(&ctx)?;
         sys_init_docker_compose(self.paths.root()).with(&ctx)?;
         ctx.mark_suc();
@@ -167,6 +175,12 @@ impl SysOperator {
 
     pub fn make_new(prj_path: &Path, name: &str, model: ModelSTD) -> MainResult<Self> {
         let mod_spec = SysModelSpec::make_new(SysDefine::new(name, model))?;
+        let res = DependencySet::default();
+        Ok(SysOperator::new(mod_spec, res, prj_path.to_path_buf()))
+    }
+    /// 纯 docker-compose 系统：无目标型号（型号对 compose 无意义）
+    pub fn make_new_docker(prj_path: &Path, name: &str) -> MainResult<Self> {
+        let mod_spec = SysModelSpec::make_new(SysDefine::new_without_model(name))?;
         let res = DependencySet::default();
         Ok(SysOperator::new(mod_spec, res, prj_path.to_path_buf()))
     }
@@ -278,39 +292,22 @@ pub mod tests {
         test_init();
         let root = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_load_kind");
         make_clean_path(&root).source_logic()?;
-        let conf_file = root.join("sys-prj.yml");
+        let define_dir = root.join("sys");
+        std::fs::create_dir_all(&define_dir).source_resource()?;
+        let define_file = define_dir.join("sys_model.yml");
 
-        // 1. 缺 sys-prj.yml → 默认 Gxl，不报错
+        // 1. 缺 sys_model.yml → 默认 Gxl，不报错
         assert_eq!(SysOperator::load_kind(&root), SysKind::Gxl);
 
-        // 2. 有 sys-prj.yml 但缺 kind → 默认 Gxl（向后兼容，不报错）
-        std::fs::write(&conf_file, "test_envs:\n  dep_root: ''\n  deps: []\n").source_resource()?;
+        // 2. 有 sys_model.yml 但缺 kind → 默认 Gxl（向后兼容，不报错）
+        std::fs::write(&define_file, "name: x\nvender: ''\n").source_resource()?;
         assert_eq!(SysOperator::load_kind(&root), SysKind::Gxl);
 
         // 3. kind: docker-compose → DockerCompose
-        std::fs::write(
-            &conf_file,
-            "kind: docker-compose\ntest_envs:\n  dep_root: ''\n  deps: []\n",
-        )
-        .source_resource()?;
+        std::fs::write(&define_file, "name: x\nvender: ''\nkind: docker-compose\n")
+            .source_resource()?;
         assert_eq!(SysOperator::load_kind(&root), SysKind::DockerCompose);
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_load_kind_legacy_v1_file() -> MainResult<()> {
-        test_init();
-        let root = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_load_kind_v1");
-        make_clean_path(&root).source_logic()?;
-        // 只有旧版 sys_prj.yml（下划线）时也能读取 kind
-        let legacy = root.join("sys_prj.yml");
-        std::fs::write(
-            &legacy,
-            "kind: docker-compose\ntest_envs:\n  dep_root: ''\n  deps: []\n",
-        )
-        .source_resource()?;
-        assert_eq!(SysOperator::load_kind(&root), SysKind::DockerCompose);
         Ok(())
     }
 
@@ -324,12 +321,67 @@ pub mod tests {
                 .with_kind(SysKind::DockerCompose);
         proj.save()?;
 
-        // 保存后 sys-prj.yml 写入 kind，load_kind 能识别
+        // 保存后 sys_model.yml 写入 kind，load_kind 能识别
         assert_eq!(SysOperator::load_kind(&prj_path), SysKind::DockerCompose);
         // 完整 load 也能读回 kind
         let loaded = SysOperator::load(&prj_path)?;
         assert_eq!(loaded.kind(), SysKind::DockerCompose);
         assert!(loaded.is_docker_compose());
+        Ok(())
+    }
+
+    #[test]
+    fn test_docker_compose_minimal_structure() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_compose_minimal");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_compose_minimal")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+
+        let root = &prj_path;
+        // 应生成的文件
+        assert!(root.join("sys-prj.yml").exists());
+        assert!(root.join("docker-compose.yml").exists());
+        assert!(root.join("version.txt").exists());
+        assert!(root.join("sys/sys_model.yml").exists());
+        assert!(root.join("sys/setting/vars.yml").exists());
+        // sys_model.yml 不含无意义的 model 字段（纯 compose 无目标型号），但含 kind
+        let define = std::fs::read_to_string(root.join("sys/sys_model.yml")).unwrap();
+        assert!(!define.contains("model:"));
+        assert!(define.contains("kind: docker-compose"));
+        // 不应生成的 GXL 相关文件/目录（纯 compose 系统多余）
+        assert!(!root.join("sys/mod_list.yml").exists());
+        assert!(!root.join("sys/setting/list.yml").exists());
+        assert!(!root.join("sys/workflows").exists());
+        assert!(!root.join("_gal/work.gxl").exists());
+        assert!(!root.join("values").exists());
+
+        // 完整 load 仍可读回 kind
+        let loaded = SysOperator::load(root)?;
+        assert_eq!(loaded.kind(), SysKind::DockerCompose);
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_docker_compose_preserves_existing_files() -> MainResult<()> {
+        test_init();
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_compose_preserve");
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, "sys_compose_preserve")?
+            .with_kind(SysKind::DockerCompose);
+        proj.save()?;
+
+        // 模拟已有文件（用户自定义内容）
+        let conf = prj_path.join("sys-prj.yml");
+        let define = prj_path.join("sys/sys_model.yml");
+        std::fs::write(&conf, "# user conf\n").unwrap();
+        std::fs::write(&define, "# user define\n").unwrap();
+
+        // 再次 save 不应覆盖已有文件
+        proj.save()?;
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "# user conf\n");
+        assert_eq!(std::fs::read_to_string(&define).unwrap(), "# user define\n");
         Ok(())
     }
 

@@ -7,7 +7,7 @@
 [![Rust 2024 edition](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org)
 [![GitHub stars](https://img.shields.io/github/stars/galaxio-labs/galaxy-ops.svg)](https://github.com/galaxio-labs/galaxy-ops/stargazers)
 
-galaxy-ops 是面向数字业务保障场景的开源运维交付工具，用于组织、配置、组合和交付运维能力，并将项目实施过程沉淀为可复用、可演进的交付资产。
+galaxy-ops 开源运维交付工具，用于组织、配置、组合和交付运维能力，并将项目实施过程沉淀为可复用、可演进的交付资产。
 
 在整体产品分工中：
 - `galaxy-ops` 负责模块、系统和运维项目的组织与交付

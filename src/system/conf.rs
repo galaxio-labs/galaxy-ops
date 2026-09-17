@@ -7,36 +7,29 @@ use crate::module::depend::DependencySet;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SysKind {
-    /// 模块化 GXL 工作流系统（默认，向后兼容旧的 `sys-prj.yml`）
+    /// 模块化 GXL 工作流系统（默认，向后兼容旧的 `sys_model.yml`）
     #[default]
     Gxl,
     /// 纯 docker-compose 声明式系统
     DockerCompose,
 }
+impl SysKind {
+    /// 是否是默认类型（gxl），用于序列化时省略默认值
+    pub fn is_gxl(&self) -> bool {
+        matches!(self, SysKind::Gxl)
+    }
+}
 
 #[derive(Getters, Clone, Debug, Serialize, Deserialize)]
 pub struct SysConf {
-    #[serde(default)]
-    kind: SysKind,
     test_envs: DependencySet,
 }
 
 impl SysConf {
     pub fn new(local_res: DependencySet) -> Self {
         Self {
-            kind: SysKind::default(),
             test_envs: local_res,
         }
-    }
-    pub fn with_kind(mut self, kind: SysKind) -> Self {
-        self.kind = kind;
-        self
-    }
-    pub fn kind(&self) -> SysKind {
-        self.kind
-    }
-    pub fn is_docker_compose(&self) -> bool {
-        self.kind == SysKind::DockerCompose
     }
 }
 #[async_trait]
@@ -79,19 +72,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sys_conf_defaults_to_gxl() {
-        // 旧的 sys-prj.yml 没有 kind 字段时，应退回默认 Gxl（向后兼容）
-        let yaml = "test_envs:\n  dep_root: ''\n  deps: []\n";
-        let conf: SysConf = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(conf.kind(), SysKind::Gxl);
-        assert!(!conf.is_docker_compose());
-    }
-
-    #[test]
-    fn test_sys_conf_docker_compose_kind() {
-        let yaml = "kind: docker-compose\ntest_envs:\n  dep_root: ''\n  deps: []\n";
-        let conf: SysConf = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(conf.kind(), SysKind::DockerCompose);
-        assert!(conf.is_docker_compose());
+    fn test_sys_kind_is_gxl() {
+        assert!(SysKind::Gxl.is_gxl());
+        assert!(!SysKind::DockerCompose.is_gxl());
     }
 }

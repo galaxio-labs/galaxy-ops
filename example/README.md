@@ -97,7 +97,7 @@ cd ..
 │   └── project.toml
 ├── values/                  # 值文件目录（本地化输入）
 └── sys/
-    ├── sys_model.yml        # 系统定义（name / model / vender）
+    ├── sys_model.yml        # 系统定义（name / model 可选 / kind / vender）
     ├── mod_list.yml         # 模块列表（引用外部模块）
     ├── setting/             # 系统设置（vars.yml / list.yml）
     └── workflows/operators.gxl
@@ -169,7 +169,7 @@ gops sys localize                # 生成 .env = 默认 + 客户覆盖（不含�
 cat .env                         # HTTP_PORT=8081 / REPLICAS=5 / ...（无密钥明文）
 ```
 
-该系统的 `sys-prj.yml` 已标记 `kind: docker-compose`，因此 `gops sys` 的部署命令会自动映射到 `docker compose`，无需安装 gflow：
+该系统的 `sys/sys_model.yml` 已标记 `kind: docker-compose`，因此 `gops sys` 的部署命令会自动映射到 `docker compose`，无需安装 gflow：
 
 ```bash
 gops sys diagnose   # = docker compose config（校验并展示解析后的 compose）
@@ -200,7 +200,7 @@ gops sys uninstall  # = docker compose down
    gops prj import --path ../web-stack-0.1.0.tar.gz
    ```
 
-6. **`gops sys download/install/start/stop/status/diagnose`**：按 `sys-prj.yml` 的 `kind` 字段分派：
+6. **`gops sys download/install/start/stop/status/diagnose`**：按 `sys/sys_model.yml` 的 `kind` 字段分派：
    - `kind: gxl`（默认，兼容旧系统）：委托给外部 `gflow` 二进制执行（`$HOME/bin/gflow`），要求 `gflow >= 0.11.2`。
    - `kind: docker-compose`：直接映射到 `docker compose` 子命令（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`），无需安装 `gflow`。
 

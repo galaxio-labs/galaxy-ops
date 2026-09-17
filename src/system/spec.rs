@@ -1,5 +1,7 @@
 use super::prelude::*;
 
+use crate::system::SysKind;
+
 use crate::{
     const_vars::{MOD_OPERATORS_ROOT, RESOLVED_VARS_YML},
     error::ElementReason,
@@ -21,7 +23,10 @@ use crate::{
 #[getset(get = "pub ")]
 pub struct SysDefine {
     name: String,
-    model: ModelSTD,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<ModelSTD>,
+    #[serde(default, skip_serializing_if = "SysKind::is_gxl")]
+    kind: SysKind,
     #[getset(set_with = "pub ")]
     vender: String,
 }
@@ -30,8 +35,25 @@ impl SysDefine {
         Self {
             name: name.into(),
             vender: String::new(),
-            model,
+            model: Some(model),
+            kind: SysKind::Gxl,
         }
+    }
+    /// 无目标型号的系统（纯 docker-compose 系统，型号无意义）
+    pub fn new_without_model<S: Into<String>>(name: S) -> Self {
+        Self {
+            name: name.into(),
+            vender: String::new(),
+            model: None,
+            kind: SysKind::Gxl,
+        }
+    }
+    pub fn with_kind(mut self, kind: SysKind) -> Self {
+        self.kind = kind;
+        self
+    }
+    pub fn is_docker_compose(&self) -> bool {
+        self.kind == SysKind::DockerCompose
     }
 }
 #[derive(Getters, Clone, Debug, MutGetters)]
@@ -78,6 +100,24 @@ impl SysModelSpec {
             .save_to(paths.workflow_path(), None)
             .source_logic()?;
         flag.mark_suc();
+        Ok(())
+    }
+
+    /// 纯 docker-compose 系统的精简保存：只写 sys_model.yml + setting/vars.yml，
+    /// 不写 mod_list.yml / workflows / setting/list.yml（这些对纯 compose 系统多余）。
+    /// 已存在的文件不覆盖（幂等，用于 `sys new` 支持已存在的目录）。
+    pub fn save_local_minimal(&self, path: &Path, name: &str) -> MainResult<()> {
+        let root = path.join(name);
+        let paths = SysTargetPaths::from(&root);
+        std::fs::create_dir_all(paths.spec_path()).source_conf()?;
+        if !paths.define_path().exists() {
+            self.define
+                .save_yaml(paths.define_path())
+                .source_resource()?;
+        }
+        ensure_path(&paths.setting_path()).source_resource()?;
+        self.setting()
+            .save_local_vars_only_if_absent(paths.setting_path())?;
         Ok(())
     }
 
@@ -255,4 +295,55 @@ pub fn make_sys_spec_test(define: SysDefine, mod_names: Vec<&str>) -> MainResult
     }
 
     Ok(modul_spec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn minimal_spec() -> MainResult<SysModelSpec> {
+        SysModelSpec::make_new(SysDefine::new_without_model("web-stack"))
+    }
+
+    #[test]
+    fn test_save_local_minimal_writes_expected_files() -> MainResult<()> {
+        let temp_dir = tempdir().unwrap();
+        let spec = minimal_spec()?;
+        spec.save_local_minimal(temp_dir.path(), "sys")?;
+
+        let sys = temp_dir.path().join("sys");
+        assert!(sys.join("sys_model.yml").exists());
+        assert!(sys.join("setting/vars.yml").exists());
+        // 纯 compose 不生成 GXL 相关文件
+        assert!(!sys.join("mod_list.yml").exists());
+        assert!(!sys.join("setting/list.yml").exists());
+        assert!(!sys.join("workflows").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_local_minimal_is_idempotent() -> MainResult<()> {
+        let temp_dir = tempdir().unwrap();
+        let spec = minimal_spec()?;
+        spec.save_local_minimal(temp_dir.path(), "sys")?;
+
+        // 模拟用户已有自定义内容
+        let define_path = temp_dir.path().join("sys/sys_model.yml");
+        let vars_path = temp_dir.path().join("sys/setting/vars.yml");
+        std::fs::write(&define_path, "# user-custom define\n").unwrap();
+        std::fs::write(&vars_path, "# user-custom vars\n").unwrap();
+
+        // 再次保存不覆盖已有文件
+        spec.save_local_minimal(temp_dir.path(), "sys")?;
+        assert_eq!(
+            std::fs::read_to_string(&define_path).unwrap(),
+            "# user-custom define\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&vars_path).unwrap(),
+            "# user-custom vars\n"
+        );
+        Ok(())
+    }
 }

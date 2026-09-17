@@ -74,6 +74,9 @@ pub struct SysLocalizeArgs {
 
     #[arg(long = "mod", help = "mod name")]
     pub module: Option<String>,
+
+    #[arg(long, help = "只 localize，跳过 update（不解析/下载模块）")]
+    pub only: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -115,8 +118,8 @@ pub enum SysCmd {
     /// 打包系统 (Package System)
     #[command(
         about = "打包系统 (Package System)",
-        long_about = "先更新系统（解析模块变量并生成 effective_vars.yml），再打包为可交付的 .tar.gz。\n\
-                     Update the system first (resolve module variables and generate effective_vars.yml), then package it into a deliverable .tar.gz."
+        long_about = "先更新系统（解析模块变量并生成 merged_vars.yml），再打包为可交付的 .tar.gz。\n\
+                     Update the system first (resolve module variables and generate merged_vars.yml), then package it into a deliverable .tar.gz."
     )]
     Package(SysPackageArgs),
 
@@ -350,7 +353,7 @@ impl SysCommandHandler {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         galaxy_ops::infra::configure_dfx_logging(&args);
 
-        // 1. 先解析变量（生成 sys/effective_vars.yml），保证交付包可被 prj import 完整导入
+        // 1. 先解析变量（生成 sys/merged_vars.yml），保证交付包可被 prj import 完整导入
         let options = DownloadOptions::from((args.force, ValueDict::default()));
         let operator = SysOperator::load(&current_dir).err_conv()?;
         let accessor = galaxy_ops::accessor::accessor_for_default();
@@ -382,6 +385,18 @@ impl SysCommandHandler {
 
         let spec = SysOperator::load(&current_dir).err_conv()?;
         let val_path = SysValuePaths::from(current_dir.clone()).join(VALUE_DIR);
+
+        // 默认：值文件缺失时先 update（解析变量 + 初始化值），一条 localize 即可。
+        // --only 跳过 update，直接用现有值（值缺失会报错）。
+        if !args.only && !val_path.sys_value_file().exists() {
+            let options = DownloadOptions::from((false, ValueDict::default()));
+            let accessor = galaxy_ops::accessor::accessor_for_default();
+            spec.update_local(accessor, &current_dir, &options)
+                .await
+                .err_conv()?;
+            spec.init_setting_value()?;
+        }
+
         let mut dict =
             OriginDict::from(ValueDict::load_yaml(&val_path.sys_value_file()).source_resource()?);
         dict.set_source("sys-setting");
@@ -783,10 +798,12 @@ mod tests {
                 log: Some("debug".to_string()),
             },
             module: None,
+            only: false,
         };
 
         assert_eq!(args.debug_level(), 1);
         assert_eq!(args.log_setting(), Some("debug".to_string()));
+        assert!(!args.only);
     }
 
     #[test]
@@ -930,5 +947,38 @@ mod tests {
             "SEC_POSTGRES_PASSWORD".to_string(),
             "secretpgpw".to_string()
         )));
+    }
+
+    #[tokio::test]
+    async fn test_sys_localize_auto_updates_when_values_missing() {
+        once_init_log();
+        let temp_dir = tempdir().unwrap();
+
+        // 先在 temp_dir 下创建一个 docker-compose 系统
+        {
+            let _wd = WorkDirWithLock::change(temp_dir.path()).unwrap();
+            let new_args = SysNewArgs {
+                name: "compose_demo".to_string(),
+                kind: Some("docker-compose".to_string()),
+            };
+            SysCommandHandler::handle_new(new_args).await.unwrap();
+        }
+
+        // 进入系统目录，默认 localize：应自动 update 并生成 .env
+        {
+            let _wd = WorkDirWithLock::change(temp_dir.path().join("compose_demo")).unwrap();
+            let localize_args = SysLocalizeArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                module: None,
+                only: false,
+            };
+            SysCommandHandler::handle_localize(localize_args).await.unwrap();
+        }
+
+        assert!(temp_dir.path().join("compose_demo/.env").exists());
+        assert!(temp_dir.path().join("compose_demo/values/sys_value.yml").exists());
     }
 }

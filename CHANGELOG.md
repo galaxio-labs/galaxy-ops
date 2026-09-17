@@ -8,43 +8,28 @@
 ## [1.3.0] - 2026-09-17
 
 ### 新增功能
-- **docker-compose 类型系统**: 新增 `SysKind`（`gxl` / `docker-compose`）与 `sys/sys_model.yml` 的 `kind` 字段，用统一的 `gops sys` 入口同时管理 GXL 模块式系统与纯 docker-compose 系统
-- **`gops sys new --kind docker-compose`**: 支持按类型创建系统；compose 模式无目标型号，且不生成 GXL 相关的 `_gal`/`mod_list`/`workflows`/`list`/`values` 文件
-- **`sys` 部署命令按类型分派**: `download/install/start/stop/uninstall/status/diagnose` 在 `docker-compose` 类型下自动映射到 `docker compose pull/create/up -d/stop/down/ps/config`，无需安装 gflow
-- **`gops prj reimport`**: 按 `ops-prj.yml` 记录的 `sys_models` 重新导入系统，并保留 `values/` 客户值
-- **`.env` 导出与 `${SEC_xxx}` 密钥注入**: `sys localize` 合并系统默认值 + `values/value.yml` 客户覆盖生成 `.env`（仅非密钥配置）；密钥用 `${SEC_xxx}` 占位，`sys start` 运行时从 `~/.galaxy/sec_value.yml` 注入 `docker compose` 子进程环境，不落盘
+- **docker-compose 系统类型**：新增 `SysKind` 与 `sys/sys_model.yml` 的 `kind` 字段，用统一 `gops sys` 入口管理 GXL 与纯 compose 系统；`sys new --kind docker-compose` 生成无型号、无 GXL 骨架的精简系统，部署命令自动分派到 `docker compose`
+- **`gops prj reimport`**：按 `ops-prj.yml` 的 `sys_models` 重新导入系统并保留 `values/`
+- **`${SEC_xxx}` 密钥注入**：`sys localize` 导出 `.env`（仅非密钥），密钥用 `${SEC_xxx}` 占位、运行时从 `~/.galaxy/sec_value.yml` 注入，不落盘
 
 ### 重大变更
-- **`ops-prj.yml` 与 `ops-systems.yml` 合并**: 运维项目 manifest 收敛为单个 `ops-prj.yml`（`name` + `work_envs` + `sys_models`）；加载时向后兼容旧 `ops-systems.yml`，保存后删除旧文件
-- **`sys_vars.yml` 重命名为 `effective_vars.yml`**: 明确其为「生效变量」而非源定义，与 `sys/setting/vars.yml`（源）区分；读取时向后兼容旧名 `sys_vars.yml`（缺失时回退），`sys update` 生成新名并清理旧名
+- **`ops-prj.yml` 与 `ops-systems.yml` 合并**（向后兼容旧文件）
+- **`sys_vars.yml` 重命名为 `merged_vars.yml`**（聚合变量：模块 ⊕ 系统合并；读取向后兼容旧名）
 
 ### 改进优化
-- **系统文件可选化**: `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml` 缺失时降级为空，纯 docker-compose 系统可省略
-- **`.gitignore` 改进**: 忽略派生的值文件但保留客户覆盖 `values/value.yml`；新增 `.env`。`sys/effective_vars.yml` 需要入库（供 `prj import` 读取），不加入 gitignore
-- **`sys new` 默认生成 `docker-compose.yml`**: 内置 `${SERVICE_IMAGE}` / `${SERVICE_PORT}` / `${REPLICAS}` 占位与对应 system 变量段
-- **引入 `orion-sec` 依赖**: 密钥加载走 `orion-sec::load_sec_dict()`（读 `~/.galaxy/sec_value.yml` 或 `./.galaxy/sec_value.yml`），key 归一化为大写 `SEC_*` 前缀后注入 `docker compose` 子进程环境，密钥不落盘
-- **许可证统一为 MIT**
+- 系统文件可选化：`mod_list.yml` / `workflows/` / `setting/list.yml` 缺失时降级为空
+- `.gitignore` 只忽略派生值文件与 `.env`，`merged_vars.yml` 入库
+- `sys new` 支持已存在目录（幂等补齐，不覆盖已有文件）
+- `sys localize` 值文件缺失时自动先 `update`（一条命令即可），`--only` 跳过 update
+- 引入 `orion-sec`；许可证统一为 MIT
 
 ### Bug 修复
-- 修复 `prj import` 时 `values` 符号链接冲突（先移除旧 `values/`）
-- 修复 `convert_addr` / `build_pkg` 对裸目录的 panic，改为返回友好错误
-- 修复 `mod new` 构件地址硬编码 postgresql、`x86_ubt22_host` 误用 `arm_mac14_host` 模型的问题
-- 修复 `sys new` 目标目录已存在时报底层 `path exists` 的问题：改为支持已存在目录，只补齐缺失的骨架文件、不覆盖已有文件（幂等）
-- 修复 `load_sys_opr_value` / `load_mod_opr_value` 写入 `sys_value.yml`/`mod_value.yml` 时用 `Vec<VarDefinition>`（列表）落盘却按 `ValueDict`（map）读回导致反序列化失败的问题，改为统一用 `to_val()` 生成 `ValueDict`
+- 修复 `values` 符号链接冲突、`convert_addr`/`build_pkg` 裸目录 panic、`mod new` 硬编码构件地址
+- 修复 `load_sys_opr_value`/`load_mod_opr_value` 写 `Vec<VarDefinition>` 却按 `ValueDict` 读回的序列化不一致
 
-### 测试
-- 新增 `SysKind` 序列化与 `SysDefine` 缺失 `kind` 向后兼容测试
-- 新增 `load_kind` 兼容测试（无 `sys/sys_model.yml` / 缺 `kind` / `docker-compose`）
-- 新增 `with_kind` 保存回读、`parse_kind`、`compose_subcommand`、`sys new` 写入 `kind` 测试
-- 新增 `sec_env_pairs`（secret dict → 环境变量对）与 `load_sec_dict` 密钥键归一化测试
-- 新增 `sys new` 已存在目录的幂等回归测试（保留已有 `docker-compose.yml`，补齐骨架文件）
-- 新增 `save_local_minimal` / `save_local_vars_only_if_absent` 幂等测试与 `save` 保留已有 `sys-prj.yml`/`sys_model.yml` 测试
-- 新增 `resolve_effective_vars_file` 优先级/回退/默认三例、`load_sys_opr_value` 旧名回退与缺失报错、`update_local` 迁移旧名 `sys_vars.yml` 测试
-
-### 文档更新
-- 重写 `PROJECT_OVERVIEW.md`、`src/artifact/README.md`、`src/workflow/README.md` 以对齐真实代码
-- 更新 `example/README.md`、`src/system/README.md`，补充 docker-compose 类型分派与命令映射说明
-- 新增 `example/knowlege/docker-compose/`、`example/knowlege/customer-a/` 示例与演示脚本
+### 测试与文档
+- 补充 docker-compose 分派、幂等保存、旧名兼容、密钥注入等测试
+- 更新各模块 README 与 `example/knowlege/` 示例
 
 ## [1.2.0] - 2026-05-04
 

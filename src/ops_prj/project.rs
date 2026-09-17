@@ -127,7 +127,7 @@ impl OpsProject {
 mod tests {
     use super::*;
     use crate::{
-        const_vars::{EFFECTIVE_VARS_YML, SYS_VALUE_FILE},
+        const_vars::{MERGED_VARS_YML, SYS_VALUE_FILE},
         ops_prj::project::OpsProject,
     };
     use orion_error::dev::testing::TestAssert;
@@ -143,7 +143,7 @@ mod tests {
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys/effective_vars.yml");
+        let vars_path = root.join("sys/merged_vars.yml");
         let value_path = root.join("values/test");
         let value_file = root.join("values/test/").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -184,7 +184,7 @@ system:
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(EFFECTIVE_VARS_YML);
+        let vars_path = root.join("sys").join(MERGED_VARS_YML);
         let value_path = root.join("values/test");
         let value_file = root.join("values/test").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -240,7 +240,7 @@ system:
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(EFFECTIVE_VARS_YML);
+        let vars_path = root.join("sys").join(MERGED_VARS_YML);
         let value_path = root.join("values/test");
         let value_file = root.join("values/test/").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -300,7 +300,7 @@ immutable_var: "existing_immutable"
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(EFFECTIVE_VARS_YML);
+        let vars_path = root.join("sys").join(MERGED_VARS_YML);
         let value_path = root.join("values/test");
         let value_link = root.join("test/values");
 
@@ -326,7 +326,7 @@ immutable_var: "existing_immutable"
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys").join(EFFECTIVE_VARS_YML);
+        let vars_path = root.join("sys").join(MERGED_VARS_YML);
         let value_path = root.join("values/test");
         let value_file = root.join("values/test/").join(SYS_VALUE_FILE);
         let value_link = root.join("test/values");
@@ -367,7 +367,7 @@ system:
         let root = temp_dir.path();
 
         // Create test paths
-        let vars_path = root.join("sys/effective_vars.yml");
+        let vars_path = root.join("sys/merged_vars.yml");
         let value_path = root.join("values/test");
 
         // Create directories but no vars.yml file (this should cause an error)

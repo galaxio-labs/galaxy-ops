@@ -159,13 +159,12 @@ System（共享定义）              Ops Project（客户差异）
 
 ```bash
 cd example/knowlege/docker-compose
-TEST_MODE=1 gops sys update      # 解析变量（生成 effective_vars.yml + values）
 # 密钥写到全局密钥文件（不在项目里）：
 #   ~/.galaxy/sec_value.yml
 #     db_password: "xxx"
 #     postgres_password: "yyy"
 mkdir -p values && printf 'HTTP_PORT: 8081\nREPLICAS: 5\n' > values/value.yml  # 客户覆盖
-gops sys localize                # 生成 .env = 默认 + 客户覆盖（不含密钥）
+gops sys localize                # 自动解析（生成 merged_vars.yml + values）并导出 .env = 默认 + 客户覆盖
 cat .env                         # HTTP_PORT=8081 / REPLICAS=5 / ...（无密钥明文）
 ```
 
@@ -191,7 +190,7 @@ gops sys uninstall  # = docker compose down
 
 3. **`gops mod update` / `sys update`**：负责下载依赖并调用 `init_setting_value` 初始化值文件（`values/<model>/sys_value.yml`、`mod_value.yml` 等）。该步骤**需要网络**（下载 `mod_list.yml` 指向的仓库、`artifact.yml` 指向的构件）。
 
-4. **`gops mod localize` / `sys localize`**：依赖上一步生成的值文件。如果值文件未初始化（未先执行 `update`），会报 `read file .../values/.../sys_value.yml` 错误。即本地化的正确顺序是 **先 `update`，再 `localize`**。
+4. **`gops mod localize` / `sys localize`**：`sys localize` 在值文件缺失时会**自动先 `update`**（解析变量 + 初始化值），再渲染 `.env`；已初始化则直接用现有值（`--only` 可强制跳过 update）。`mod localize` 仍依赖先 `mod update`。
 
 5. **`gops prj import --path <path>`**：`path` 必须是一个**打包产物**（本地 `.tar.gz` 或 git/http 地址），**不是裸目录**。推荐直接用 `gops sys package` 生成（见上），它会先执行 `update` 解析变量再打包：
 
@@ -206,9 +205,9 @@ gops sys uninstall  # = docker compose down
 
 ## 当前已知问题（已知限制）
 
-- **`prj import` 要求系统已解析变量**：导入流程依赖 `sys/effective_vars.yml`（由 `gops sys update` 解析模块并合并变量后生成）。该文件需要入库（不 gitignore），保证源码、交付包与导入期望一致；若导入一个从未 `update` 过、且未提交 `effective_vars.yml` 的系统，会明确报错：`系统变量未解析：缺少 .../sys/effective_vars.yml。请先在该系统上执行 gops sys update 解析变量，再打包导入`。推荐直接使用 `gops sys package`（内部先 update 再打包）。
+- **`prj import` 要求系统已解析变量**：导入流程依赖 `sys/merged_vars.yml`（由 `gops sys update` 解析模块并合并变量后生成）。该文件需要入库（不 gitignore），保证源码、交付包与导入期望一致；若导入一个从未 `update` 过、且未提交 `merged_vars.yml` 的系统，会明确报错：`系统变量未解析：缺少 .../sys/merged_vars.yml。请先在该系统上执行 gops sys update 解析变量，再打包导入`。推荐直接使用 `gops sys package`（内部先 update 再打包）。
 - **执行链依赖外部环境**：工作流模板引用了 `galaxy-operators/*.git` 等外部仓库，`update` / 执行需网络，离线不可用。
-- 已修复的问题：`prj import` 的 `values` 符号链接冲突、`convert_addr` 对裸目录的 panic、`mod new` 硬编码 postgresql 构件地址、`effective_vars.yml` 缺失时的晦涩报错（现改为清晰可操作的提示），并新增 `gops sys package` 固化“先 update 再打包”的交付约束。
+- 已修复的问题：`prj import` 的 `values` 符号链接冲突、`convert_addr` 对裸目录的 panic、`mod new` 硬编码 postgresql 构件地址、`merged_vars.yml` 缺失时的晦涩报错（现改为清晰可操作的提示），并新增 `gops sys package` 固化“先 update 再打包”的交付约束。
 
 ## 参考
 

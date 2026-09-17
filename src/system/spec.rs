@@ -3,7 +3,7 @@ use super::prelude::*;
 use crate::system::SysKind;
 
 use crate::{
-    const_vars::{EFFECTIVE_VARS_YML, MOD_OPERATORS_ROOT, SYS_VARS_YML},
+    const_vars::{MERGED_VARS_YML, MOD_OPERATORS_ROOT, SYS_VARS_YML},
     error::ElementReason,
     module::operator::ModOperator,
     system::setting::ModSetting,
@@ -191,7 +191,7 @@ impl RefUpdateable<()> for SysModelSpec {
     ) -> MainResult<()> {
         if let Some(local) = &self.local {
             let value = self.mod_list.update_local(accessor, local, options).await?;
-            let path = local.join(EFFECTIVE_VARS_YML);
+            let path = local.join(MERGED_VARS_YML);
             if path.exists() {
                 std::fs::remove_file(&path).source_sys()?;
             }

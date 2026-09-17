@@ -4,7 +4,7 @@ use orion_vars::vars::{ValueType, VarToValue};
 
 use crate::{
     const_vars::{
-        EFFECTIVE_VARS_YML, MOD_VALUE_FILE, SYS_VALUE_FILE, SYS_VARS_YML, USER_VALUE_FILE, VALUE_DIR,
+        MERGED_VARS_YML, MOD_VALUE_FILE, SYS_VALUE_FILE, SYS_VARS_YML, USER_VALUE_FILE, VALUE_DIR,
     },
     types::LocalizeOptions,
 };
@@ -43,8 +43,8 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
     let sys_v_file = value_root.join(SYS_VALUE_FILE);
     if !sys_v_file.exists() {
         let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
-        // 兼容旧名：effective_vars.yml 优先，缺失时回退 sys_vars.yml
-        let new_vars_file = prj_root.join("sys").join(EFFECTIVE_VARS_YML);
+        // 兼容旧名：merged_vars.yml 优先，缺失时回退 sys_vars.yml
+        let new_vars_file = prj_root.join("sys").join(MERGED_VARS_YML);
         let legacy_vars_file = prj_root.join("sys").join(SYS_VARS_YML);
         let vars_file = if new_vars_file.exists() {
             new_vars_file
@@ -447,7 +447,9 @@ mod tests {
         let dict = load_sys_opr_value(temp_dir.path()).unwrap();
 
         assert_eq!(
-            dict.get("SERVICE_IMAGE").map(|v| v.value().to_string()).as_deref(),
+            dict.get("SERVICE_IMAGE")
+                .map(|v| v.value().to_string())
+                .as_deref(),
             Some("legacy-image")
         );
         // 应生成 values/sys_value.yml

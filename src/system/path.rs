@@ -1,5 +1,5 @@
 use crate::const_vars::{
-    EFFECTIVE_VARS_YML, MOD_VALUE_FILE, SYS_MODLE_DEF_YML, SYS_VARS_YML, SYS_VALUE_FILE,
+    MERGED_VARS_YML, MOD_VALUE_FILE, SYS_MODLE_DEF_YML, SYS_VALUE_FILE, SYS_VARS_YML,
     USED_READABLE_FILE,
 };
 use std::path::{Path, PathBuf};
@@ -67,8 +67,8 @@ impl SysOperatorPath {
     pub fn sys_dir(&self) -> PathBuf {
         self.root.join("sys")
     }
-    pub fn effective_vars_file(&self) -> PathBuf {
-        self.root.join("sys").join(EFFECTIVE_VARS_YML)
+    pub fn merged_vars_file(&self) -> PathBuf {
+        self.root.join("sys").join(MERGED_VARS_YML)
     }
 
     /// 旧名路径（`sys_vars.yml`，1.2.0 及更早版本）
@@ -76,10 +76,10 @@ impl SysOperatorPath {
         self.root.join("sys").join(SYS_VARS_YML)
     }
 
-    /// 解析生效变量文件：`effective_vars.yml` 优先，缺失时回退旧名 `sys_vars.yml`。
+    /// 解析生效变量文件：`merged_vars.yml` 优先，缺失时回退旧名 `sys_vars.yml`。
     /// 两者都不存在时返回新名路径（供报错信息显示）。
-    pub fn resolve_effective_vars_file(&self) -> PathBuf {
-        let new_path = self.effective_vars_file();
+    pub fn resolve_merged_vars_file(&self) -> PathBuf {
+        let new_path = self.merged_vars_file();
         if new_path.exists() {
             return new_path;
         }
@@ -164,40 +164,40 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_resolve_effective_vars_prefers_new_name() {
+    fn test_resolve_merged_vars_prefers_new_name() {
         let dir = tempdir().unwrap();
         let paths = SysOperatorPath::new(dir.path());
         std::fs::create_dir_all(dir.path().join("sys")).unwrap();
-        std::fs::write(dir.path().join("sys/effective_vars.yml"), "new").unwrap();
+        std::fs::write(dir.path().join("sys/merged_vars.yml"), "new").unwrap();
         std::fs::write(dir.path().join("sys/sys_vars.yml"), "legacy").unwrap();
 
         assert_eq!(
-            paths.resolve_effective_vars_file(),
-            dir.path().join("sys/effective_vars.yml")
+            paths.resolve_merged_vars_file(),
+            dir.path().join("sys/merged_vars.yml")
         );
     }
 
     #[test]
-    fn test_resolve_effective_vars_falls_back_to_legacy_name() {
+    fn test_resolve_merged_vars_falls_back_to_legacy_name() {
         let dir = tempdir().unwrap();
         let paths = SysOperatorPath::new(dir.path());
         std::fs::create_dir_all(dir.path().join("sys")).unwrap();
         std::fs::write(dir.path().join("sys/sys_vars.yml"), "legacy").unwrap();
 
         assert_eq!(
-            paths.resolve_effective_vars_file(),
+            paths.resolve_merged_vars_file(),
             dir.path().join("sys/sys_vars.yml")
         );
     }
 
     #[test]
-    fn test_resolve_effective_vars_defaults_to_new_when_both_missing() {
+    fn test_resolve_merged_vars_defaults_to_new_when_both_missing() {
         let dir = tempdir().unwrap();
         let paths = SysOperatorPath::new(dir.path());
 
         assert_eq!(
-            paths.resolve_effective_vars_file(),
-            dir.path().join("sys/effective_vars.yml")
+            paths.resolve_merged_vars_file(),
+            dir.path().join("sys/merged_vars.yml")
         );
     }
 }

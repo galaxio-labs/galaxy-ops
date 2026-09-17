@@ -221,12 +221,12 @@ impl SysOperator {
                 .source_resource()?;
         }
         if !value_root.sys_value_file().exists() {
-            // 兼容旧名：effective_vars.yml 优先，缺失时回退 sys_vars.yml
-            let vars_file = self.paths.resolve_effective_vars_file();
+            // 兼容旧名：merged_vars.yml 优先，缺失时回退 sys_vars.yml
+            let vars_file = self.paths.resolve_merged_vars_file();
             if !vars_file.exists() {
                 return Err(crate::error::MainReason::logic_detail(format!(
                     "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
-                    self.paths.effective_vars_file().display()
+                    self.paths.merged_vars_file().display()
                 )));
             }
             let sys_vars = VarCollection::load_yaml(&vars_file)
@@ -395,8 +395,8 @@ pub mod tests {
             .with_kind(SysKind::DockerCompose);
         proj.save()?;
 
-        // save() 不生成 effective_vars.yml；模拟旧系统只有 sys_vars.yml（旧名）
-        assert!(!prj_path.join("sys/effective_vars.yml").exists());
+        // save() 不生成 merged_vars.yml；模拟旧系统只有 sys_vars.yml（旧名）
+        assert!(!prj_path.join("sys/merged_vars.yml").exists());
         std::fs::write(
             prj_path.join("sys/sys_vars.yml"),
             "system:\n  - name: SERVICE_IMAGE\n    value: legacy-image\n",
@@ -407,7 +407,10 @@ pub mod tests {
         let value_path = proj.init_setting_value()?;
         let sys_value = ValueDict::load_yaml(&value_path.sys_value_file()).source_resource()?;
         assert_eq!(
-            sys_value.get("SERVICE_IMAGE").map(|v| v.to_string()).as_deref(),
+            sys_value
+                .get("SERVICE_IMAGE")
+                .map(|v| v.to_string())
+                .as_deref(),
             Some("legacy-image")
         );
         Ok(())
@@ -438,7 +441,7 @@ pub mod tests {
 
         // 迁移：旧名被清理，新名生成
         assert!(!prj_path.join("sys/sys_vars.yml").exists());
-        assert!(prj_path.join("sys/effective_vars.yml").exists());
+        assert!(prj_path.join("sys/merged_vars.yml").exists());
         Ok(())
     }
 

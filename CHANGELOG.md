@@ -19,7 +19,8 @@
 ### 改进优化
 - 系统文件可选化：`mod_list.yml` / `workflows/` / `setting/list.yml` 缺失时降级为空
 - `sys localize` 以系统默认值（`sys/merged_vars.yml` 的 `system:` 段）为基线，值文件只需写需要覆盖的项
-- `sys localize` 值文件缺失时自动先 `update`（`--only` 跳过）；`sys new` 支持已存在目录（幂等）
+- `values/sys_value.yml` 不再随 `sys update` 自动生成（避免全量快照覆盖后续默认值变更）；`sys update` 改为打印一份可用变量参考（不落盘）
+- `sys localize` 变量未解析时自动先 `update`（`--only` 跳过）；`sys new` 支持已存在目录（幂等）
 - 引入 `orion-sec`；许可证统一为 MIT
 
 ### Bug 修复

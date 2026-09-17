@@ -189,9 +189,9 @@ gops sys uninstall  # = docker compose down
 
 2. **`gops sys new` 需要交互选择系统型号**（`dialoguer::Select`）。脚本化时可通过环境变量 `TEST_MODE=1` 自动选择第一个支持型号。
 
-3. **`gops mod update` / `sys update`**：负责下载依赖并调用 `init_setting_value` 初始化值文件（`values/<model>/sys_value.yml`、`mod_value.yml` 等）。该步骤**需要网络**（下载 `mod_list.yml` 指向的仓库、`artifact.yml` 指向的构件）。
+3. **`gops mod update` / `sys update`**：负责下载依赖、解析变量（生成 `sys/merged_vars.yml`）并初始化本地化辅助值文件（`values/setting/mod_value.yml` 等）。该步骤**需要网络**（下载 `mod_list.yml` 指向的仓库、`artifact.yml` 指向的构件）。未创建 `values/sys_value.yml` 时会打印一份可用变量参考（不落盘）。
 
-4. **`gops mod localize` / `sys localize`**：`sys localize` 在值文件缺失时会**自动先 `update`**（解析变量 + 初始化值），再渲染 `.env`；已初始化则直接用现有值（`--only` 可强制跳过 update）。`mod localize` 仍依赖先 `mod update`。
+4. **`gops mod localize` / `sys localize`**：`sys localize` 在系统变量未解析时会**自动先 `update`**，再渲染 `.env`（= `sys/merged_vars.yml` 默认值 ⊕ `values/sys_value.yml` ⊕ `values/value.yml`，后两者可选、可只写要覆盖的项）；`--only` 跳过 update。`mod localize` 仍依赖先 `mod update`。
 
 5. **`gops prj import --path <path>`**：`path` 必须是一个**打包产物**（本地 `.tar.gz` 或 git/http 地址），**不是裸目录**。推荐直接用 `gops sys package` 生成（见上），它会先执行 `update` 解析变量再打包：
 

@@ -349,12 +349,25 @@ impl SysCommandHandler {
         let options = DownloadOptions::from((args.force, ValueDict::default()));
         let operator = SysOperator::load(&current_dir).err_conv()?;
         let accessor = galaxy_ops::accessor::accessor_for_default();
+        let val_path = resolve_sys_value_path(&current_dir);
 
         operator
             .update_local(accessor, &current_dir, &options)
             .await
             .err_conv()?;
-        operator.init_setting_value_in(resolve_sys_value_path(&current_dir))?;
+        operator.init_setting_value_in(val_path.clone())?;
+
+        // 值文件不落盘：未创建时打印一份可用变量参考，便于按需覆盖
+        if !val_path.sys_value_file().exists() {
+            let reference = operator.value_reference()?;
+            if !reference.is_empty() {
+                println!("\n{reference}");
+                println!(
+                    "提示：如需覆盖，只把要改的项写入 {}",
+                    val_path.sys_value_file().display()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -395,27 +408,30 @@ impl SysCommandHandler {
         let spec = SysOperator::load(&current_dir).err_conv()?;
         let val_path = resolve_sys_value_path(&current_dir);
 
-        // 默认：值文件缺失时先 update（解析变量 + 初始化值），一条 localize 即可。
-        // --only 跳过 update，直接用现有值（值缺失会报错）。
-        if !args.only && !val_path.sys_value_file().exists() {
+        // 默认：系统变量未解析时先 update（解析变量）。--only 跳过 update，直接用现有数据。
+        if !args.only && !spec.has_resolved_vars() {
             let options = DownloadOptions::from((false, ValueDict::default()));
             let accessor = galaxy_ops::accessor::accessor_for_default();
             spec.update_local(accessor, &current_dir, &options)
                 .await
                 .err_conv()?;
-            spec.init_setting_value_in(val_path.clone())?;
         }
+        // 确保本地化辅助值文件存在（不生成 sys_value.yml）；变量未解析时会报错
+        spec.init_setting_value_in(val_path.clone())?;
 
         // 基线：系统解析出的默认值（sys/merged_vars.yml 的 system 段），
         // 使值文件只需写“需要修改的项”，其余取系统默认值。
         let mut dict = OriginDict::from(spec.system_default_values().err_conv()?);
         dict.set_source("sys-defaults");
 
-        // 叠加系统/项目的值文件（可为部分覆盖）
-        let mut sys_dict =
-            OriginDict::from(ValueDict::load_yaml(&val_path.sys_value_file()).source_resource()?);
-        sys_dict.set_source("sys-setting");
-        dict.merge(&sys_dict);
+        // 叠加值文件（可选，可为部分覆盖）
+        let value_file = val_path.sys_value_file();
+        if value_file.exists() {
+            let mut sys_dict =
+                OriginDict::from(ValueDict::load_yaml(&value_file).source_resource()?);
+            sys_dict.set_source("sys-setting");
+            dict.merge(&sys_dict);
+        }
 
         // 叠加客户覆盖值 values/value.yml（若存在），优先于系统默认与值文件
         let user_value_file = val_path.root().join(USER_VALUE_FILE);
@@ -966,7 +982,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sys_localize_auto_updates_when_values_missing() {
+    async fn test_sys_localize_resolves_vars_when_unresolved() {
         once_init_log();
         let temp_dir = tempdir().unwrap();
 
@@ -996,9 +1012,15 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(temp_dir.path().join("compose_demo/.env").exists());
+        let env = std::fs::read_to_string(temp_dir.path().join("compose_demo/.env")).unwrap();
         assert!(
-            temp_dir
+            env.contains("SERVICE_IMAGE=nginx:alpine"),
+            "unexpected .env: {env}"
+        );
+        assert!(env.contains("REPLICAS=1"), "unexpected .env: {env}");
+        // 值文件不再自动生成：默认值取自 sys/merged_vars.yml，值文件只写要覆盖的项
+        assert!(
+            !temp_dir
                 .path()
                 .join("compose_demo/values/sys_value.yml")
                 .exists()

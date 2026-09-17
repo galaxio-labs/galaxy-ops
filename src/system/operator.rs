@@ -180,6 +180,29 @@ impl SysOperator {
             .system_vars()
             .to_val())
     }
+
+    /// 系统变量是否已解析（`sys/merged_vars.yml`，兼容旧名 `sys_vars.yml`）。
+    pub fn has_resolved_vars(&self) -> bool {
+        self.paths.resolve_merged_vars_file().exists()
+    }
+
+    /// 可用系统变量参考（名称 + 默认值），供写入值文件时按需覆盖；不落盘。
+    ///
+    /// 系统默认值以 `sys/merged_vars.yml` 为准，值文件只需写要覆盖的项。
+    /// 无默认值时返回空字符串。
+    pub fn value_reference(&self) -> MainResult<String> {
+        let defaults = self.system_default_values()?;
+        if defaults.is_empty() {
+            return Ok(String::new());
+        }
+        let body = serde_yaml::to_string(&defaults).map_err(|e| {
+            crate::error::MainReason::logic_detail(format!("序列化变量参考失败: {e}"))
+        })?;
+        Ok(format!(
+            "# 可用系统变量（默认值来自 {}）；值文件只需写要覆盖的项：\n{body}",
+            self.paths.resolve_merged_vars_file().display()
+        ))
+    }
 }
 
 impl SysOperator {
@@ -217,8 +240,18 @@ impl SysOperator {
     ///
     /// 运维项目会为每个系统单独维护 `values/<sys_name>`（客户值）；在项目内执行 `gops sys`
     /// 时应把值落到那里，而不是系统自带的 `<sys>/values`（后者在旧版本导入时可能只是包内的副本）。
+    ///
+    /// 注意：**不会**生成 `values/sys_value.yml`（系统默认值以 `sys/merged_vars.yml` 为准，
+    /// 值文件只写需要覆盖的项）；仅初始化本地化所需的辅助值文件（`mod_value.yml`）。
     pub fn init_setting_value_in(&self, value_root: SysValuePaths) -> MainResult<SysValuePaths> {
         let value_root = value_root.ensure_root().source_resource()?;
+        // 系统变量必须先解析：本地化基线来自 sys/merged_vars.yml
+        if !self.has_resolved_vars() {
+            return Err(crate::error::MainReason::logic_detail(format!(
+                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
+                self.paths.merged_vars_file().display()
+            )));
+        }
         //let mut all_vars = VarCollection::default();
         for x in self.sys_spec().mod_list().iter() {
             if let Some(mmo) = x.get_target_spec()? {
@@ -242,24 +275,6 @@ impl SysOperator {
             let setting_vars = self.sys_spec().setting().vars().module_vars().to_val();
             setting_vars
                 .save_yaml(&setting_val_path.mod_value_file())
-                .source_resource()?;
-        }
-        if !value_root.sys_value_file().exists() {
-            // 兼容旧名：merged_vars.yml 优先，缺失时回退 sys_vars.yml
-            let vars_file = self.paths.resolve_merged_vars_file();
-            if !vars_file.exists() {
-                return Err(crate::error::MainReason::logic_detail(format!(
-                    "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
-                    self.paths.merged_vars_file().display()
-                )));
-            }
-            let sys_vars = VarCollection::load_yaml(&vars_file)
-                .source_resource()?
-                .system_vars()
-                .to_val();
-            //all_vars.system_vars().to_val();
-            sys_vars
-                .save_yaml(&value_root.sys_value_file())
                 .source_resource()?;
         }
         Ok(value_root)
@@ -411,7 +426,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_init_setting_value_falls_back_to_legacy_sys_vars() -> MainResult<()> {
+    fn test_system_default_values_falls_back_to_legacy_sys_vars() -> MainResult<()> {
         test_init();
         let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join("sys_legacy_vars");
         make_clean_path(&prj_path).source_logic()?;
@@ -427,16 +442,25 @@ pub mod tests {
         )
         .unwrap();
 
-        // init_setting_value 应回退读取旧名 sys_vars.yml
-        let value_path = proj.init_setting_value()?;
-        let sys_value = ValueDict::load_yaml(&value_path.sys_value_file()).source_resource()?;
+        // system_default_values 应回退读取旧名 sys_vars.yml
+        let defaults = proj.system_default_values()?;
         assert_eq!(
-            sys_value
+            defaults
                 .get("SERVICE_IMAGE")
                 .map(|v| v.to_string())
                 .as_deref(),
             Some("legacy-image")
         );
+
+        // 参考可直接用于值文件
+        assert!(
+            proj.value_reference()?
+                .contains("SERVICE_IMAGE: legacy-image")
+        );
+
+        // 值文件不再落盘
+        let value_path = proj.init_setting_value()?;
+        assert!(!value_path.sys_value_file().exists());
         Ok(())
     }
 
@@ -565,8 +589,7 @@ pub mod tests {
             .await
             .assert("spec.update_local");
         let value_path = project.init_setting_value()?;
-        let mut dict =
-            OriginDict::from(ValueDict::load_yaml(&value_path.sys_value_file()).source_resource()?);
+        let mut dict = OriginDict::from(project.system_default_values()?);
         dict.set_source("sys-setting");
         setup_prj_root_env_vars(prj_path.clone()).source_sys()?;
         project

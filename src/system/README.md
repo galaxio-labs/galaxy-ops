@@ -108,7 +108,7 @@ sys start (compose)      →  orion_sec::load_sec_dict()
 ├── docker-compose.yml      # 系统级 docker-compose 定义（sys new 默认生成，用 ${VAR} 占位）
 ├── version.txt
 ├── _gal/
-├── values/                 # 值文件目录（本地化输入；localize 后生成 .env，仅非密钥配置）
+├── values/                 # 值文件目录（可选：只写要覆盖的项；localize 后生成 .env，仅非密钥配置）
 └── sys/
     ├── sys_model.yml       # 系统定义（name / model 可选 / kind / vender；kind 决定命令分派）
     ├── mod_list.yml        # 可选，缺失时视为空模块列表

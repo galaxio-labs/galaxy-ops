@@ -1,7 +1,11 @@
 # Galaxy-OPS
+
 [![CI](https://github.com/galaxio-labs/galaxy-ops/workflows/CI/badge.svg)](https://github.com/galaxio-labs/galaxy-ops/actions)
 [![Coverage Status](https://codecov.io/gh/galaxio-labs/galaxy-ops/branch/main/graph/badge.svg)](https://codecov.io/gh/galaxio-labs/galaxy-ops)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/galaxio-labs/galaxy-ops/releases)
+[![Rust 2024 edition](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org)
+[![GitHub stars](https://img.shields.io/github/stars/galaxio-labs/galaxy-ops.svg)](https://github.com/galaxio-labs/galaxy-ops/stargazers)
 
 galaxy-ops 是面向数字业务保障场景的开源运维交付工具，用于组织、配置、组合和交付运维能力，并将项目实施过程沉淀为可复用、可演进的交付资产。
 

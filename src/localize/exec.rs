@@ -58,20 +58,41 @@ impl LocalizeExecPath {
         }
     }
 }
+
+/// 从路径中提取第一个未展开的 `${...}` 变量名（如 `${GXL_PRJ_ROOT}`）。
+fn unexpanded_var(path: &Path) -> Option<String> {
+    let text = path.to_string_lossy();
+    let start = text.find("${")?;
+    let rest = &text[start + 2..];
+    let end = rest.find('}')?;
+    Some(format!("${{{}}}", &rest[..end]))
+}
 #[async_trait]
 impl ModuleLocalizable<PathBuf> for LocalizeExecPath {
     async fn mod_localize(&self, value_file: PathBuf, _options: LocalizeOptions) -> MainResult<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = self.dst.parent() {
-            std::fs::create_dir_all(parent).source_resource()?;
-        }
         let mut ctx = OperationContext::want("sys-path localize").with_auto_log();
         ctx.record("dst", self.dst.display());
         ctx.record("src", self.src.display());
+
+        // 路径中若仍残留未展开的 `${VAR}`（例如未设置 `GXL_PRJ_ROOT`），
+        // 不要把它当成字面量目录创建出来；跳过并告警。
+        if let Some(var) = unexpanded_var(&self.src).or_else(|| unexpanded_var(&self.dst)) {
+            ctx.warn(format!(
+                "unexpanded variable in localize path: {var}; skipped (check sys/setting/list.yml)"
+            ));
+            ctx.mark_cancel();
+            return Ok(());
+        }
+
         if !self.src.exists() {
             ctx.warn("src path miss");
             ctx.mark_cancel();
             return Ok(());
+        }
+
+        // 确认确有内容需要落地后，才创建目标目录（避免留下空目录）
+        if let Some(parent) = self.dst.parent() {
+            std::fs::create_dir_all(parent).source_resource()?;
         }
 
         if !value_file.exists() {
@@ -311,6 +332,66 @@ Date: {{date}}"#;
             !localize_path.dst.exists(),
             "Destination file should not be created"
         );
+    }
+
+    // 回归：源不存在时不得创建目标目录（曾经会留下空目录）
+    #[tokio::test]
+    async fn test_localize_path_src_missing_creates_no_dirs() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        let localize_path = LocalizeExecPath {
+            src: root.join("missing_src.txt"),
+            dst: root.join("out/nested/dest.txt"),
+            setting: None,
+        };
+        let (_values, value_path, _value_temp_dir) = create_test_value_file();
+
+        let result = localize_path
+            .mod_localize(value_path, LocalizeOptions::default())
+            .await;
+
+        assert!(result.is_ok());
+        assert!(
+            !root.join("out").exists(),
+            "no output dirs should be created for a no-op localize"
+        );
+    }
+
+    // 回归：路径里残留未展开的 `${VAR}` 时，不得创建字面量目录
+    #[tokio::test]
+    async fn test_localize_path_skips_unexpanded_variable() {
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path();
+        let localize_path = LocalizeExecPath {
+            src: root.join("${GXL_PRJ_ROOT}/sys/setting/nginx"),
+            dst: root.join("${GXL_PRJ_ROOT}/sys/mods/nginx/v1.0/local/"),
+            setting: None,
+        };
+        let (_values, value_path, _value_temp_dir) = create_test_value_file();
+
+        let result = localize_path
+            .mod_localize(value_path, LocalizeOptions::default())
+            .await;
+
+        assert!(result.is_ok(), "unexpanded path should be skipped");
+        assert!(
+            !root.join("${GXL_PRJ_ROOT}").exists(),
+            "must not create a literal ${{...}} directory"
+        );
+    }
+
+    #[test]
+    fn test_unexpanded_var_detection() {
+        assert_eq!(
+            unexpanded_var(Path::new("${GXL_PRJ_ROOT}/a/b")),
+            Some("${GXL_PRJ_ROOT}".to_string())
+        );
+        assert_eq!(
+            unexpanded_var(Path::new("a/${X}/b")),
+            Some("${X}".to_string())
+        );
+        assert_eq!(unexpanded_var(Path::new("/abs/path/no/var")), None);
+        assert_eq!(unexpanded_var(Path::new("")), None);
     }
 
     // 功能层测试：模板渲染功能（简化版）

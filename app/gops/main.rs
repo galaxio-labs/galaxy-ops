@@ -24,6 +24,9 @@ pub struct GxOps {}
 
 impl GxOps {
     pub async fn run() -> MainResult<()> {
+        // 进程启动时做一次性环境准备：设置 `GXL_OS_SYS` / `GXL_START_ROOT` / `GXL_PRJ_ROOT`。
+        // `sys/setting/list.yml` 等路径模板里的 `${GXL_PRJ_ROOT}` 就依赖它，
+        // 因此只在此处设置一次，各命令实现里不要再重复设置。
         setup_start_env_vars().source_resource()?;
         let cmd = GInsCmd::parse();
         println!("gops: {}", env!("CARGO_PKG_VERSION"));

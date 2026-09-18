@@ -296,6 +296,11 @@ impl SysOperator {
     }
 }
 
+/// 按指定 base 向上探测项目根并设置 `GXL_PRJ_ROOT`。
+///
+/// 用于当前目录不是目标目录的场景（如测试指定临时项目目录）。
+/// CLI 正常路径**无需**调用：`GxOps::run()` 启动时已通过 `setup_start_env_vars()`
+/// 按当前目录设好了 `GXL_PRJ_ROOT`，不要在命令实现里每次重设。
 pub fn setup_prj_root_env_vars(base: PathBuf) -> MainResult<()> {
     let prj_root = find_project_define_base(base).unwrap_or(PathBuf::from("UNDEFIN"));
     unsafe { std::env::set_var("GXL_PRJ_ROOT", format!("{}", prj_root.display())) };

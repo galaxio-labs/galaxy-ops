@@ -14,7 +14,7 @@ use super::{
 };
 use orion_infra::path::{ensure_path, make_clean_path};
 use orion_variate::update::DownloadOptions;
-use orion_vars::vars::{VarCollection, VarToValue, find_project_define_base};
+use orion_vars::vars::{VarCollection, VarToValue};
 
 #[derive(Getters, Clone, Debug)]
 #[getset(get = "pub")]
@@ -296,23 +296,11 @@ impl SysOperator {
     }
 }
 
-/// 按指定 base 向上探测项目根并设置 `GXL_PRJ_ROOT`。
-///
-/// 用于当前目录不是目标目录的场景（如测试指定临时项目目录）。
-/// CLI 正常路径**无需**调用：`GxOps::run()` 启动时已通过 `setup_start_env_vars()`
-/// 按当前目录设好了 `GXL_PRJ_ROOT`，不要在命令实现里每次重设。
-pub fn setup_prj_root_env_vars(base: PathBuf) -> MainResult<()> {
-    let prj_root = find_project_define_base(base).unwrap_or(PathBuf::from("UNDEFIN"));
-    unsafe { std::env::set_var("GXL_PRJ_ROOT", format!("{}", prj_root.display())) };
-    Ok(())
-}
-
 #[cfg(test)]
 pub mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::prelude::ErrorOwe;
-    use orion_conf::YamlIO;
     use orion_error::dev::testing::TestAssertWithMsg;
     use orion_infra::path::make_clean_path;
     use orion_variate::{
@@ -320,7 +308,7 @@ pub mod tests {
         tools::test_init,
         update::DownloadOptions,
     };
-    use orion_vars::vars::{OriginDict, ValueDict};
+    use orion_vars::vars::OriginDict;
 
     use crate::{
         accessor::accessor_for_test,
@@ -330,11 +318,7 @@ pub mod tests {
             ModelSTD,
             depend::{Dependency, DependencySet},
         },
-        system::{
-            SysKind,
-            operator::{SysOperator, setup_prj_root_env_vars},
-            spec::SysModelSpec,
-        },
+        system::{SysKind, operator::SysOperator, spec::SysModelSpec},
         types::{LocalizeOptions, RefUpdateable},
     };
     #[tokio::test]
@@ -703,7 +687,8 @@ pub mod tests {
         let value_path = project.init_setting_value()?;
         let mut dict = OriginDict::from(project.system_default_values()?);
         dict.set_source("sys-setting");
-        setup_prj_root_env_vars(prj_path.clone()).source_sys()?;
+        // 注：本用例未设置 GXL_PRJ_ROOT，`${GXL_PRJ_ROOT}` 引用的本地化条目
+        // 因源不存在会被跳过（属预期）。
         project
             .localize(value_path, LocalizeOptions::new(dict))
             .await

@@ -1,7 +1,7 @@
 # Galaxy-OPS
 
 [![CI](https://github.com/galaxio-labs/galaxy-ops/workflows/CI/badge.svg)](https://github.com/galaxio-labs/galaxy-ops/actions)
-[![Coverage Status](https://codecov.io/gh/galaxio-labs/galaxy-ops/branch/main/graph/badge.svg)](https://codecov.io/gh/galaxio-labs/galaxy-ops)
+[![Coverage Status](https://coveralls.io/repos/github/galaxio-labs/galaxy-ops/badge.svg?branch=main)](https://coveralls.io/github/galaxio-labs/galaxy-ops?branch=main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/galaxio-labs/galaxy-ops/releases)
 [![Rust 2024 edition](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org)

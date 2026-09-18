@@ -205,7 +205,7 @@ mod tests {
             VarDefinition::from(("TEST_KEY", "default_value"))
                 .with_mutability(Mutability::Immutable),
             VarDefinition::from(("PRJ_SPACE", "${HOME}")),
-            VarDefinition::from(("SVR_NAME", "gflow")),
+            VarDefinition::from(("SVR_NAME", "example")),
             VarDefinition::from(("MOD_SPACE", "${PRJ_SPACE}/${SVR_NAME}")),
             VarDefinition::from(("SVR_SPACE", "/home/${SVR_NAME}")),
         ]);
@@ -213,7 +213,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let mod_value_path = temp_dir.path().join(MOD_VALUE_FILE);
         // 创建只包含SVR_NAME的mod_value.yml文件，不包含PRJ_SPACE，让PRJ_SPACE来自全局设置
-        std::fs::write(&mod_value_path, "SVR_NAME: gflow").unwrap();
+        std::fs::write(&mod_value_path, "SVR_NAME: example").unwrap();
 
         let result = mix_used_value(options, &vars, &mod_value_path).assert();
         assert_eq!(
@@ -230,11 +230,11 @@ mod tests {
         );
         assert_eq!(
             result.get("SVR_SPACE"),
-            Some(&OriginValue::from("/home/gflow").with_origin("mod-default"))
+            Some(&OriginValue::from("/home/example").with_origin("mod-default"))
         );
         assert_eq!(
             result.get("MOD_SPACE"),
-            Some(&OriginValue::from("galaxy/gflow").with_origin("mod-default"))
+            Some(&OriginValue::from("galaxy/example").with_origin("mod-default"))
         );
     }
 

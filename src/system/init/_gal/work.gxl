@@ -8,8 +8,8 @@ mod envs {
     env _common {
         FORCE_FLAG = "";
         LOG_LEVEL = "" ;
-        SYS_BIN =  "gsys" ;
-        MOD_BIN =  "gmod" ;
+        SYS_BIN =  "gops sys" ;
+        MOD_BIN =  "gops mod" ;
         SYS     =  "sys" ;
         MODULE_ENV =  "default";
         gx.read_file( file : "sys/sys_model.yml" ,name : "DEFINE" ) ;

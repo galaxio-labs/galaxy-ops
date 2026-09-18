@@ -46,7 +46,7 @@ impl LocalizeDict {
         let mut dicts = IndexMap::new();
         dicts.insert(
             "example".to_string(),
-            ModSetting::disaple_new("gflow", ModelSTD::x86_ubt22_host().to_string().as_str()),
+            ModSetting::disaple_new("example", ModelSTD::x86_ubt22_host().to_string().as_str()),
         );
 
         Self { dicts }

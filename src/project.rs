@@ -85,7 +85,7 @@ pub fn load_value_file(path: &Path) -> MainResult<ValueDict> {
     if !has_content {
         return Ok(ValueDict::default());
     }
-    Ok(ValueDict::load_yaml(path).source_resource()?)
+    ValueDict::load_yaml(path).source_resource()
 }
 
 pub fn mix_used_value(

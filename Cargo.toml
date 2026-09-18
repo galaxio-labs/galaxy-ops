@@ -100,7 +100,7 @@ walkdir = "~2.5"
 wildmatch = "~2.4"
 
 [dev-dependencies]
-criterion = "~0.7"
-mockall = "~0.13"
+criterion = "0.8"
+mockall = "0.15"
 mockito = "1.7"
 tempfile = "3.3"

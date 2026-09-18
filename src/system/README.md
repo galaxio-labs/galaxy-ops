@@ -46,7 +46,7 @@ src/system/
 
 ### `spec.rs`
 
-系统定义（`SysDefine`，序列化到 `sys/sys_model.yml`）与初始化模板。`SysDefine` 含 `name` / `model`（可选，纯 compose 无型号）/ `kind` / `vender`；`kind` 决定 `sys` 命令分派到 gflow 还是 docker compose。
+系统定义（`SysDefine`，序列化到 `sys/sys_model.yml`）与初始化模板。`SysDefine` 含 `name` / `model`（可选，纯 compose 无型号）/ `kind` / `vender`；`kind` 决定 `sys` 命令分派到 gx 还是 docker compose。
 
 ### `mod_list.rs`
 
@@ -78,7 +78,7 @@ gops sys download/install/uninstall/start/stop/status/diagnose
 
 `download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
 
-- `gxl`（默认）：委托给外部 `gflow`（`$HOME/bin/gflow`）。
+- `gxl`（默认）：委托给外部 `gx`（`$HOME/bin/gx`，即 `gx run <cmd>`）。
 - `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`）。
 
 ## 密钥处理

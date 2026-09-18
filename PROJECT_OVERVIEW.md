@@ -74,7 +74,7 @@ galaxy-ops/
 系统对象层，把多个模块组织成可操作、可本地化、可交付的系统对象，并提供系统级操作入口。
 
 - `operator.rs`：系统对象入口
-- `conf.rs`：`SysConf`（`test_envs`）与 `SysKind`（`gxl` / `docker-compose`）；`kind` 在 `SysDefine`（`sys_model.yml`）里，决定 `sys` 命令分派到 gflow 还是 docker compose
+- `conf.rs`：`SysConf`（`test_envs`）与 `SysKind`（`gxl` / `docker-compose`）；`kind` 在 `SysDefine`（`sys_model.yml`）里，决定 `sys` 命令分派到 gx 还是 docker compose
 - `spec.rs` / `mod_list.rs`：系统定义与模块列表
 - `path.rs`：系统路径组织（`sys-prj.yml` / `sys_model.yml` / `mod_list.yml` / `setting/`）
 - `setting/`：系统设置、本地化与模板化（`export` / `localize` / `sys` / `templatize`）
@@ -138,7 +138,7 @@ gops sys
   ├── localize    生成系统本地化结果（并导出 .env 供 docker-compose 使用）
   ├── setting     初始化系统设置
   └── download / install / uninstall / start / stop / status / diagnose
-                  （按 sys/sys_model.yml 的 kind 分派：gxl → 外部 gflow；docker-compose → docker compose）
+                  （按 sys/sys_model.yml 的 kind 分派：gxl → 外部 gx（`gx run <cmd>`）；docker-compose → docker compose）
 
 gops prj
   ├── new         创建运维工程

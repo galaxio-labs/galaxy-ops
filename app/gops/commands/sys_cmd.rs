@@ -449,33 +449,41 @@ impl SysCommandHandler {
         Ok(())
     }
 
-    fn check_gflow_version() -> MainResult<()> {
-        // 检查 gflow 版本
-        let gflow_path = format!(
-            "{}/bin/gflow",
+    /// 外部执行器 `gx`（galaxy-flow）的最低版本要求。
+    const GX_MIN_VERSION: (u32, u32, u32) = (0, 13, 0);
+
+    /// `gx` 可执行文件路径（`$HOME/bin/gx`）。
+    fn gx_bin_path() -> String {
+        format!(
+            "{}/bin/gx",
             std::env::var("HOME").unwrap_or_else(|_| "".to_string())
-        );
-        let output = Command::new(&gflow_path)
+        )
+    }
+
+    fn check_gx_version() -> MainResult<()> {
+        // 检查 gx 版本
+        let gx_path = Self::gx_bin_path();
+        let output = Command::new(&gx_path)
             .arg("-V")
             .output()
-            .map_err(|e| format!("无法执行 gflow 命令: {}", e))
+            .map_err(|e| format!("无法执行 gx 命令 ({gx_path}): {e}"))
             .source_resource()?;
 
         if !output.status.success() {
-            return Err("gflow 命令执行失败").source_resource()?;
+            return Err("gx 命令执行失败").source_resource()?;
         }
 
         let version_str = String::from_utf8_lossy(&output.stdout);
-        // 解析版本号，假设输出格式为 "gflow x.y.z"
+        // 解析版本号，假设输出格式为 "gx x.y.z"
         let version_parts: Vec<&str> = version_str.split_whitespace().collect();
         if version_parts.len() < 2 {
-            return Err(format!("无法解析 gflow 版本: {}", version_str)).source_resource()?;
+            return Err(format!("无法解析 gx 版本: {version_str}")).source_resource()?;
         }
 
         let version = version_parts[1];
         let version_parts: Vec<&str> = version.split('.').collect();
         if version_parts.len() < 3 {
-            return Err(format!("无效的 gflow 版本格式: {}", version)).source_resource()?;
+            return Err(format!("无效的 gx 版本格式: {version}")).source_resource()?;
         }
 
         // 解析主版本、次版本和修订版本
@@ -492,13 +500,13 @@ impl SysCommandHandler {
             .map_err(|_| format!("无效的修订版本号: {}", version_parts[2]))
             .source_resource()?;
 
-        // 检查版本是否 >= 0.11.2
-        if major > 0 || (major == 0 && minor > 11) || (major == 0 && minor == 11 && patch >= 2) {
+        // 检查版本是否 >= GX_MIN_VERSION
+        let (min_major, min_minor, min_patch) = Self::GX_MIN_VERSION;
+        if (major, minor, patch) >= (min_major, min_minor, min_patch) {
             Ok(())
         } else {
             Err(format!(
-                "gflow 版本过低，需要 >= 0.11.2，当前版本: {}",
-                version
+                "gx 版本过低，需要 >= {min_major}.{min_minor}.{min_patch}，当前版本: {version}"
             ))
             .source_resource()?
         }
@@ -510,32 +518,50 @@ impl SysCommandHandler {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         match SysOperator::load_kind(&current_dir) {
             SysKind::DockerCompose => Self::run_compose_cmd(cmd_name, &args).await,
-            SysKind::Gxl => Self::run_gflow_cmd(cmd_name, &args).await,
+            SysKind::Gxl => Self::run_gx_cmd(cmd_name, &args).await,
         }
     }
 
-    async fn run_gflow_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
-        // 检查 gflow 版本
-        Self::check_gflow_version()?;
+    /// 构造 `gx run` 的参数（不含可执行文件路径）。
+    ///
+    /// 映射：`gops sys <cmd> [-e ENV] [-d N] [--mod M]` -> `gx run -e ENV -d N [--cmd-arg M] <cmd>`
+    fn gx_run_args(cmd_name: &str, env: &str, debug: usize, module: Option<&str>) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "-e".to_string(),
+            env.to_string(),
+            "-d".to_string(),
+            debug.to_string(),
+        ];
+        if let Some(module) = module {
+            args.push("--cmd-arg".to_string());
+            args.push(module.to_string());
+        }
+        args.push(cmd_name.to_string());
+        args
+    }
 
-        // 构建并执行命令
-        let gflow_path = format!(
-            "{}/bin/gflow",
-            std::env::var("HOME").unwrap_or_else(|_| "".to_string())
-        );
+    /// `kind: gxl` 的系统：把 `gops sys <cmd>` 映射为 `gx run <cmd>`。
+    ///
+    /// 系统的 `start` / `stop` / `status` / `diagnose` 等即工作流里的同名流程
+    /// （定义在 `_gal/work.gxl` 或其引用的模块中）。
+    async fn run_gx_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
+        Self::check_gx_version()?;
 
-        // 直接执行 gflow 命令
-        let mut cmd = TokioCommand::new(&gflow_path);
-        cmd.arg("-e").arg(args.env());
-        cmd.arg(cmd_name);
-        cmd.arg("-d").arg(args.debug_level().to_string());
-
-        if let Some(module) = args.module() {
+        let gx_path = Self::gx_bin_path();
+        let module = args.module();
+        let mut cmd = TokioCommand::new(&gx_path);
+        cmd.args(Self::gx_run_args(
+            cmd_name,
+            args.env(),
+            args.debug_level(),
+            module.as_deref(),
+        ));
+        if let Some(module) = module {
             println!("use module :{module}");
-            cmd.arg("--").arg(module);
         }
 
-        Self::run_and_stream(cmd, "gflow").await
+        Self::run_and_stream(cmd, "gx").await
     }
 
     async fn run_compose_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
@@ -806,6 +832,40 @@ mod tests {
         assert_eq!(args.log_setting(), None);
         assert!(!args.force);
         assert!(args.output.is_none());
+    }
+
+    #[test]
+    fn test_gx_run_args_basic() {
+        // gops sys start  ->  gx run -e default -d 0 start
+        let args = SysCommandHandler::gx_run_args("start", "default", 0, None);
+        assert_eq!(args.join(" "), "run -e default -d 0 start");
+    }
+
+    #[test]
+    fn test_gx_run_args_with_module_and_debug() {
+        // gops sys stop --mod nginx -e prod -d 2
+        //   ->  gx run -e prod -d 2 --cmd-arg nginx stop
+        let args = SysCommandHandler::gx_run_args("stop", "prod", 2, Some("nginx"));
+        assert_eq!(args.join(" "), "run -e prod -d 2 --cmd-arg nginx stop");
+        // 流程名始终在末尾
+        assert_eq!(args.last().map(String::as_str), Some("stop"));
+    }
+
+    #[test]
+    fn test_gx_run_args_covers_all_dispatch_commands() {
+        for cmd in [
+            "download",
+            "install",
+            "uninstall",
+            "start",
+            "stop",
+            "status",
+            "diagnose",
+        ] {
+            let args = SysCommandHandler::gx_run_args(cmd, "default", 0, None);
+            assert_eq!(args.first().map(String::as_str), Some("run"));
+            assert_eq!(args.last().map(String::as_str), Some(cmd));
+        }
     }
 
     #[test]

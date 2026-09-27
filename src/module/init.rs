@@ -92,3 +92,126 @@ pub fn mod_init_gitignore(path: &Path) -> MainResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn chart_dir(root: &Path) -> PathBuf {
+        root.join(crate::const_vars::SPEC_DIR).join("confs")
+    }
+
+    fn chart_files(root: &Path) -> Vec<PathBuf> {
+        let confs = chart_dir(root);
+        vec![
+            confs.join("Chart.yaml"),
+            confs.join("values.yaml"),
+            confs.join("templates").join("deployment.yaml"),
+            confs.join("templates").join("service.yaml"),
+        ]
+    }
+
+    #[test]
+    fn test_mod_k8s_confs_init_creates_full_chart() -> MainResult<()> {
+        let tmp = TempDir::new().source_resource()?;
+        let root = tmp.path().join("x86-ubt22-k8s");
+        mod_k8s_confs_init(&root)?;
+        for file in chart_files(&root) {
+            assert!(file.exists(), "missing chart file: {}", file.display());
+            assert!(
+                !std::fs::read_to_string(&file).source_resource()?.is_empty(),
+                "empty chart file: {}",
+                file.display()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_mod_k8s_confs_init_keeps_user_edits() -> MainResult<()> {
+        let tmp = TempDir::new().source_resource()?;
+        let root = tmp.path().join("x86-ubt22-k8s");
+        mod_k8s_confs_init(&root)?;
+        let values = chart_dir(&root).join("values.yaml");
+        std::fs::write(&values, "image: \"user-edited\"\n").source_resource()?;
+
+        // 再次初始化（对应重复 save / mod update）不应覆盖用户修改
+        mod_k8s_confs_init(&root)?;
+        assert_eq!(
+            std::fs::read_to_string(&values).source_resource()?,
+            "image: \"user-edited\"\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_mod_k8s_confs_init_is_idempotent() -> MainResult<()> {
+        let tmp = TempDir::new().source_resource()?;
+        let root = tmp.path().join("x86-ubt22-k8s");
+        mod_k8s_confs_init(&root)?;
+        let first: Vec<String> = chart_files(&root)
+            .iter()
+            .map(|f| std::fs::read_to_string(f).unwrap())
+            .collect();
+        mod_k8s_confs_init(&root)?;
+        let second: Vec<String> = chart_files(&root)
+            .iter()
+            .map(|f| std::fs::read_to_string(f).unwrap())
+            .collect();
+        assert_eq!(first, second);
+        Ok(())
+    }
+
+    // ---- 模板内容不变量：防止 gops 与 Helm / ops-gxl 的约定悄悄漂移 ----
+
+    #[test]
+    fn test_k8s_operators_use_helm_ops() {
+        assert!(K8S_K8S_OPS_GXL.contains("mod operators : helm_ops"));
+        assert!(K8S_K8S_OPS_GXL.contains("galaxio-hub/ops-gxl"));
+        assert!(K8S_K8S_OPS_GXL.contains("${GXL_CHANNEL:main}"));
+        // helm_ops.download 依赖 SPEC_DIR 环境变量定位 artifact.yml
+        assert!(MOD_K8S_WORK_GXL.contains("SPEC_DIR"));
+    }
+
+    #[test]
+    fn test_host_operators_scaffold_invariants() {
+        assert!(MOD_HOST_OPS_GXL.contains("galaxio-hub/ops-gxl"));
+        // 统一使用 GXL_CHANNEL（旧模板用过 GXL_CHANNEL_OPS）
+        assert!(MOD_HOST_OPS_GXL.contains("${GXL_CHANNEL:main}"));
+        assert!(!MOD_HOST_OPS_GXL.contains("GXL_CHANNEL_OPS"));
+        // git（repo[/tag]）与 http（url）双形态
+        assert!(MOD_HOST_OPS_GXL.contains("${ITEM.ORIGIN_ADDR.REPO}"));
+        assert!(MOD_HOST_OPS_GXL.contains("${ITEM.ORIGIN_ADDR.URL}"));
+        // 下载前清理缓存目录，保证重复下载幂等
+        assert!(MOD_HOST_OPS_GXL.contains("rm -rf"));
+        assert!(MOD_HOST_OPS_GXL.contains("--branch"));
+        // 不再残留未使用的 _used.json 读取与空的 __into 入口
+        assert!(!MOD_HOST_OPS_GXL.contains("_used.json"));
+        assert!(!MOD_HOST_OPS_GXL.contains("__into"));
+    }
+
+    #[test]
+    fn test_k8s_chart_label_contract() {
+        // values.yaml 由 gops 用 [[ ]] 渲染
+        assert!(K8S_CONFS_VALUES_YAML.contains("[[IMAGE_REGISTRY]]"));
+        assert!(K8S_CONFS_VALUES_YAML.contains("[[IMAGE_REPOSITORY]]"));
+        assert!(K8S_CONFS_VALUES_YAML.contains("[[IMAGE_TAG]]"));
+        assert!(K8S_CONFS_VALUES_YAML.contains("[[IMAGE_PULL_SECRET]]"));
+        assert!(K8S_CONFS_VALUES_YAML.contains("[[REPLICA_COUNT]]"));
+
+        // templates 交给 Helm 的 {{ }}，且不得混入 gops 的 [[ ]]
+        assert!(K8S_CONFS_TPL_DEPLOYMENT.contains("{{ .Release.Name }}"));
+        assert!(K8S_CONFS_TPL_DEPLOYMENT.contains("{{- if .Values.imagePullSecret }}"));
+        assert!(K8S_CONFS_TPL_DEPLOYMENT.contains("imagePullSecrets:"));
+        assert!(K8S_CONFS_TPL_SERVICE.contains("{{ .Values.service.type }}"));
+        assert!(!K8S_CONFS_TPL_DEPLOYMENT.contains("[["));
+        assert!(!K8S_CONFS_TPL_SERVICE.contains("[["));
+    }
+
+    #[test]
+    fn test_prj_work_declares_k8s_model() {
+        assert!(MOD_PRJ_WORK_GXL.contains("x86-ubt22-k8s"));
+        assert!(MOD_PRJ_WORK_GXL.contains("galaxio-hub/ops-gxl"));
+    }
+}

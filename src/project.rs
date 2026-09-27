@@ -116,11 +116,10 @@ pub fn mix_used_value(
     Ok(used)
 }
 
-/// 把值字典导出为 dotenv 格式（`KEY=VALUE`），供 docker-compose 等使用 `${VAR}` 的工具消费。
+/// 把值字典渲染为 dotenv 文本（`KEY=VALUE` 行，键保持大写）。
 ///
-/// - 键保持大写（与 `UpperKey` 一致）；
-/// - 简单标量（字母数字 + `_.:/@+-`）原样输出，其余（含空格、引号、`#`、`$`、嵌套对象/列表）用双引号包裹并转义。
-pub fn export_env_file(dict: &OriginDict, out_path: &Path) -> MainResult<()> {
+/// 与 [`export_env_file`] 同源，供漂移比对复用（无需写盘）。
+pub fn render_env(dict: &OriginDict) -> String {
     let mut content = String::new();
     for (key, value) in dict.iter() {
         content.push_str(key.as_str());
@@ -128,7 +127,15 @@ pub fn export_env_file(dict: &OriginDict, out_path: &Path) -> MainResult<()> {
         content.push_str(&format_env_value(value.value()));
         content.push('\n');
     }
-    std::fs::write(out_path, content).source_resource()?;
+    content
+}
+
+/// 把值字典导出为 dotenv 格式（`KEY=VALUE`），供 docker-compose 等使用 `${VAR}` 的工具消费。
+///
+/// - 键保持大写（与 `UpperKey` 一致）；
+/// - 简单标量（字母数字 + `_.:/@+-`）原样输出，其余（含空格、引号、`#`、`$`、嵌套对象/列表）用双引号包裹并转义。
+pub fn export_env_file(dict: &OriginDict, out_path: &Path) -> MainResult<()> {
+    std::fs::write(out_path, render_env(dict)).source_resource()?;
     Ok(())
 }
 

@@ -2,6 +2,7 @@ use clap::{Args, Parser};
 use derive_getters::Getters;
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
+use galaxy_ops::ops_prj::doctor::{CheckLevel, DoctorRequest, project_doctor};
 use galaxy_ops::ops_prj::project::OpsProject;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::types::InsUpdateable;
@@ -45,6 +46,14 @@ pub struct PrjReimportArgs {
     pub force: ForceArgs,
 }
 
+#[derive(Debug, Args, Getters)]
+pub struct PrjDoctorArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+    #[arg(long, help = "将警告视为错误（用于 CI 卡口）")]
+    pub strict: bool,
+}
+
 #[derive(Debug, Parser)]
 pub enum PrjCmd {
     #[command(about = "创建维护工程 (Create Maintenance Project)")]
@@ -59,6 +68,14 @@ pub enum PrjCmd {
                      Reimport recorded systems from ops-prj.yml, preserving values/. Use when the imported system dir is removed but values/ + ops-prj.yml are kept."
     )]
     Reimport(PrjReimportArgs),
+    #[command(
+        about = "体检工程客户值 (Doctor Project Values)",
+        long_about = "检查运维项目的客户值（values/）是否已被版本控制纳管：目录是否存在、\
+                     每个已导入系统是否有值目录、values/ 是否被 .gitignore 忽略、是否有未提交改动。\
+                     把'靠 git 纪律'变成'靠工具提醒'。\n\
+                     Check that the project's customer values (values/) are tracked by version control."
+    )]
+    Doctor(PrjDoctorArgs),
 }
 
 impl DfxArgsGetter for PrjNewArgs {
@@ -89,6 +106,15 @@ impl DfxArgsGetter for PrjUpdateArgs {
 }
 
 impl DfxArgsGetter for PrjReimportArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
+impl DfxArgsGetter for PrjDoctorArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -149,12 +175,40 @@ impl PrjCommandHandler {
         Ok(())
     }
 
+    pub async fn handle_doctor(args: PrjDoctorArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().source_resource()?;
+
+        let report =
+            project_doctor(&current_dir, &DoctorRequest::new(*args.strict())).err_conv()?;
+        for item in report.items() {
+            let tag = match item.level() {
+                CheckLevel::Info => "INFO",
+                CheckLevel::Warn => "WARN",
+                CheckLevel::Error => "ERROR",
+            };
+            println!("[{tag}] {}", item.message());
+        }
+
+        if report.is_ok() {
+            println!(
+                "prj doctor: OK ({} 项提示, {} 项警告)",
+                report.count(CheckLevel::Info),
+                report.warnings()
+            );
+            Ok(())
+        } else {
+            Err(format!("prj doctor: {} error(s)", report.errors())).source_resource()?
+        }
+    }
+
     pub async fn execute(cmd: PrjCmd) -> MainResult<()> {
         match cmd {
             PrjCmd::New(args) => Self::handle_new(args).await,
             PrjCmd::Import(args) => Self::handle_import(args).await,
             PrjCmd::Update(args) => Self::handle_update(args).await,
             PrjCmd::Reimport(args) => Self::handle_reimport(args).await,
+            PrjCmd::Doctor(args) => Self::handle_doctor(args).await,
         }
     }
 }

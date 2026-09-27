@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.2] - 2026-09-27
+
+### 新增功能
+- **交付锁 `deliver.lock`**：`gops sys package` 生成（置于系统根目录并随交付包分发），记录 `name`/`version`/`kind`/`model`、模块引用（名称/模型/来源地址/是否启用）与值指纹（`sha256:` 覆盖 `sys/merged_vars.yml` 与整个 `values/` 目录树），回答"部署的是哪一版、用了什么值"，为复现与回滚留依据
+- **`gops sys check`（轻量漂移报告）**：只读比对"当前合并值 vs 已生成的 `.env`"，报告"值已变更但未重新 localize"（不写盘、不做完整 reconcile；存在漂移时非零退出，可用于 CI 卡口）
+- **`gops prj doctor`**：只读体检客户值 `values/` 是否被版本控制纳管——目录是否存在、`ops-prj.yml` 导入的每个系统是否有值目录、是否被 `.gitignore` 忽略、是否有未提交改动；`--strict` 将警告升级为错误
+- 新增直接依赖 `sha2`（交付锁的内容指纹）
+
+### 改进优化
+- 抽出 `project::render_env`（与 `export_env_file` 同源），供漂移比对复用，避免"生成"与"比对"两套逻辑漂移
+- 为 k8s Helm 脚手架补齐回归测试：chart 生成/不覆盖用户修改/幂等、模板内容不变量、`ModelSTD::is_k8s`、`k8s_var_init` 作用域、仅 k8s 模型生成 chart、example 模型可 localize
+
+### Bug 修复
+- 修复 `gops mod example` / `mod 4test` 的 k8s 模型构件形态：应为容器镜像（`local: docker_image`），与 `helm_ops` 对齐，而非二进制归档
+- 修复 `workflow/act.rs` 模板测试中 `matches!(...)` 被当作语句丢弃、断言实际无效的问题
+- 修复 `gops prj doctor` 汇总行把条目总数当作"提示"数打印（有警告时重复计数）
+- 修正 `render_env` / `export_env_file` 的文档注释被错误拼接的问题
+
 ## [1.3.1] - 2026-09-27
 
 ### 新增功能

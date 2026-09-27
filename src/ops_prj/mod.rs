@@ -1,4 +1,5 @@
 pub mod conf;
+pub mod doctor;
 pub mod import;
 pub mod init;
 mod install;

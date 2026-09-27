@@ -13,6 +13,8 @@ use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::ModelSTD;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::project::load_value_file;
+use galaxy_ops::system::drift::{DriftStatus, detect_drift};
+use galaxy_ops::system::lock::DeliverLock;
 use galaxy_ops::system::operator::SysOperator;
 use galaxy_ops::system::setting::SysSetting;
 use galaxy_ops::system::{SysKind, SysValuePaths};
@@ -92,6 +94,12 @@ pub struct SysLocalizeArgs {
 pub struct SysSettingArgs {
     #[arg(long, help = "init sys setting")]
     pub init: bool,
+}
+
+#[derive(Debug, Args, Getters)]
+pub struct SysCheckArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -217,6 +225,16 @@ pub enum SysCmd {
                      modules and environments, generating detailed diagnostic reports and suggested solutions."
     )]
     Diagnose(SysOpsArgs),
+
+    /// 检查系统配置漂移 (Check Configuration Drift)
+    #[command(
+        about = "检查系统配置漂移 (Check Configuration Drift)",
+        long_about = "只读比对：重新计算本地化会产出的值与已生成的 .env，报告“值已变更但未重新 localize”。\
+                     不做完整 reconcile；存在漂移时返回非零退出码，可用于 CI 卡口。\n\
+                     Read-only: report values changed but not re-localized (drift).\n\
+                     Usage: gops sys check"
+    )]
+    Check(SysCheckArgs),
 }
 
 // === DfxArgsGetter 实现 ===
@@ -257,6 +275,14 @@ impl DfxArgsGetter for SysLocalizeArgs {
     }
 }
 impl DfxArgsGetter for SysOpsArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+impl DfxArgsGetter for SysCheckArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -372,6 +398,14 @@ impl SysCommandHandler {
             .update_local(accessor, &current_dir, &options)
             .await
             .err_conv()?;
+
+        // 生成交付锁：记录系统版本、模块引用与值指纹（随交付包分发，可复现、可回滚）
+        let lock = DeliverLock::build(&current_dir).err_conv()?;
+        lock.save(&current_dir).err_conv()?;
+        println!(
+            "交付锁已生成: {}",
+            DeliverLock::path(&current_dir).display()
+        );
 
         // 2. 确定输出路径与版本
         let name = operator.sys_spec().define().name().clone();
@@ -645,6 +679,41 @@ impl SysCommandHandler {
         Ok(())
     }
 
+    pub async fn handle_check(args: SysCheckArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().source_resource()?;
+
+        let op = SysOperator::load(&current_dir).err_conv()?;
+        let report = detect_drift(&op, &current_dir).err_conv()?;
+
+        match report.status() {
+            DriftStatus::NoBaseline => {
+                println!("[INFO] 尚无 .env 基线（未 localize）；跳过漂移检查");
+                Ok(())
+            }
+            DriftStatus::Clean => {
+                println!("[OK] 值与 {} 一致，无漂移", report.env_path().display());
+                Ok(())
+            }
+            DriftStatus::Drifted => {
+                println!(
+                    "[DRIFT] 检测到 {} 处值变更，但 {} 未更新：",
+                    report.changes().len(),
+                    report.env_path().display()
+                );
+                for change in report.changes() {
+                    println!("  {}", change.describe());
+                }
+                println!("提示：运行 `gops sys localize` 重新生成本地化配置。");
+                Err(format!(
+                    "sys check: 检测到 {} 处漂移",
+                    report.changes().len()
+                ))
+                .source_resource()?
+            }
+        }
+    }
+
     pub async fn execute(cmd: SysCmd) -> MainResult<()> {
         match cmd {
             SysCmd::New(args) => Self::handle_new(args).await,
@@ -661,6 +730,7 @@ impl SysCommandHandler {
             }
             SysCmd::Status(sys_ops_args) => Self::handle_ops_cmd("status", sys_ops_args).await,
             SysCmd::Diagnose(sys_ops_args) => Self::handle_ops_cmd("diagnose", sys_ops_args).await,
+            SysCmd::Check(args) => Self::handle_check(args).await,
         }
     }
 }

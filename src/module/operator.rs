@@ -291,6 +291,23 @@ pub mod tests {
         make_clean_path(&prj_path).source_logic()?;
         let proj = ModOperator::make_new(&prj_path, "mod_new")?;
         proj.save()?;
+
+        // 集成校验：k8s 模型保存后应生成 Helm chart，host 模型不生成
+        let chart = prj_path
+            .join("mod")
+            .join("x86-ubt22-k8s")
+            .join("spec")
+            .join("confs")
+            .join("Chart.yaml");
+        assert!(chart.exists(), "k8s chart missing: {}", chart.display());
+        assert!(
+            !prj_path
+                .join("mod")
+                .join("x86-ubt22-host")
+                .join("spec")
+                .join("confs")
+                .exists()
+        );
         Ok(())
     }
 

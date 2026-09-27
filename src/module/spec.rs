@@ -184,11 +184,12 @@ impl ModuleSpec {
         let name = "postgresql";
         let k8s = MMOperator::init(
             ModelSTD::new(CpuArch::X86, OsCPE::UBT22, RunSPC::K8S),
+            // k8s 构件是容器镜像（helm_ops 只处理 local == docker_image 的条目）
             ArtifactPackage::from(vec![Artifact::new(
                 name,
                 "0.1.0",
-                HttpResource::from(POSTGRESQL_URL),
-                POSTGRESQL_ARCHIVE,
+                HttpResource::from("your-registry.example.com"),
+                "docker_image",
             )]),
             ModWorkflows::mod_k8s_tpl_init(),
             GxlProject::spec_k8s_tpl(),
@@ -291,11 +292,12 @@ pub fn make_mod_spec_4test() -> MainResult<ModuleSpec> {
     let name = "postgresql";
     let k8s = MMOperator::init(
         ModelSTD::new(CpuArch::X86, OsCPE::UBT22, RunSPC::K8S),
+        // k8s 构件是容器镜像（helm_ops 只处理 local == docker_image 的条目）
         ArtifactPackage::from(vec![Artifact::new(
             name,
             "0.1.0",
-            HttpResource::from(POSTGRESQL_URL),
-            POSTGRESQL_ARCHIVE,
+            HttpResource::from("your-registry.example.com"),
+            "docker_image",
         )]),
         ModWorkflows::mod_k8s_tpl_init(),
         GxlProject::spec_k8s_tpl(),
@@ -321,4 +323,134 @@ pub fn make_mod_spec_4test() -> MainResult<ModuleSpec> {
     )
     .with_depends(DependencySet::for_test());
     Ok(ModuleSpec::init("postgresql", vec![k8s, host]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_k8s_var_init_scopes_and_values() {
+        let vars = k8s_var_init("demo", "1.2.3");
+
+        let immutable: Vec<String> = vars
+            .immutable_vars()
+            .iter()
+            .map(|v| v.name().to_string())
+            .collect();
+        assert_eq!(immutable, vec!["IMAGE_REPOSITORY".to_string()]);
+
+        let system: Vec<String> = vars
+            .system_vars()
+            .iter()
+            .map(|v| v.name().to_string())
+            .collect();
+        for key in ["RUNTIME", "AIR_GAPPED", "KUBECONFIG"] {
+            assert!(
+                system.contains(&key.to_string()),
+                "system var {key} missing"
+            );
+        }
+
+        let dict = vars.value_dict();
+        assert_eq!(dict.get("IMAGE_REPOSITORY"), Some(&ValueType::from("demo")));
+        assert_eq!(dict.get("IMAGE_TAG"), Some(&ValueType::from("1.2.3")));
+        assert_eq!(dict.get("APP_NAME"), Some(&ValueType::from("demo")));
+        assert_eq!(dict.get("NAMESPACE"), Some(&ValueType::from("demo")));
+
+        // IMAGE_TAG 必须在模块层可变，否则客户无法升级镜像 tag
+        let module: Vec<String> = vars
+            .module_vars()
+            .iter()
+            .map(|v| v.name().to_string())
+            .collect();
+        assert!(module.contains(&"IMAGE_TAG".to_string()));
+    }
+
+    #[test]
+    fn test_make_new_k8s_model_shape() -> MainResult<()> {
+        let spec = ModuleSpec::make_new("demo")?;
+
+        let k8s = spec
+            .targets()
+            .get(&ModelSTD::x86_ubt22_k8s())
+            .expect("k8s target missing");
+        assert!(k8s.model().is_k8s());
+        // 构件是容器镜像，而非二进制归档
+        assert!(k8s.artifact().iter().any(|a| a.local() == "docker_image"));
+
+        let setting = k8s.setting().as_ref().expect("k8s setting missing");
+        let localize = setting.localize().as_ref().expect("localize missing");
+        let paths = localize
+            .templatize_path()
+            .as_ref()
+            .expect("templatize_path missing");
+        assert!(
+            paths.excludes().iter().any(|e| e == "spec/confs/templates"),
+            "templates/ must be excluded from gops localize"
+        );
+        let cust = localize
+            .templatize_cust()
+            .as_ref()
+            .expect("templatize_cust missing");
+        assert_eq!(cust.label_beg(), "[[");
+        assert_eq!(cust.label_end(), "]]");
+
+        // host 模型没有 k8s 专属 setting
+        let host = spec
+            .targets()
+            .get(&ModelSTD::x86_ubt22_host())
+            .expect("host target missing");
+        assert!(!host.model().is_k8s());
+        assert!(host.setting().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_writes_chart_for_k8s_only() -> MainResult<()> {
+        let spec = ModuleSpec::make_new("demo")?;
+        let tmp = TempDir::new().source_resource()?;
+        spec.save_to(tmp.path(), None).source_logic()?;
+
+        let mod_root = tmp.path().join("demo").join(MOD_DIR);
+        let k8s_confs = mod_root.join("x86-ubt22-k8s").join(SPEC_DIR).join("confs");
+        assert!(
+            k8s_confs.join("Chart.yaml").exists(),
+            "k8s chart missing: {}",
+            k8s_confs.display()
+        );
+        assert!(k8s_confs.join("templates").join("deployment.yaml").exists());
+
+        // host 模型不应生成 chart
+        assert!(
+            !mod_root
+                .join("x86-ubt22-host")
+                .join(SPEC_DIR)
+                .join("confs")
+                .exists(),
+            "host model must not get a Helm chart"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_example_k8s_model_is_localizable() -> MainResult<()> {
+        // 回归：example / 4test 的 k8s 模型必须带 k8s 变量 + k8s_module setting，
+        // 否则 mod localize 会因缺少 IMAGE_REGISTRY 等变量而失败。
+        for spec in [ModuleSpec::for_example(), make_mod_spec_4test()?] {
+            let k8s = spec
+                .targets()
+                .get(&ModelSTD::x86_ubt22_k8s())
+                .expect("k8s target missing");
+            let dict = k8s.vars().value_dict();
+            for key in ["IMAGE_REGISTRY", "IMAGE_REPOSITORY", "IMAGE_TAG"] {
+                assert!(dict.get(key).is_some(), "k8s var {key} missing");
+            }
+            assert!(k8s.artifact().iter().any(|a| a.local() == "docker_image"));
+            let setting = k8s.setting().as_ref().expect("k8s setting missing");
+            assert!(setting.localize().is_some());
+        }
+        Ok(())
+    }
 }

@@ -192,3 +192,16 @@ impl FromStr for ModelSTD {
         Ok(ModelSTD { arch, os, spc })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_k8s_only_for_k8s_runspace() {
+        assert!(ModelSTD::x86_ubt22_k8s().is_k8s());
+        assert!(!ModelSTD::x86_ubt22_host().is_k8s());
+        assert!(!ModelSTD::arm_mac14_host().is_k8s());
+        assert!(ModelSTD::new(CpuArch::Arm, OsCPE::UBT22, RunSPC::K8S).is_k8s());
+    }
+}

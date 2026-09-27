@@ -14,6 +14,7 @@ use crate::{
 };
 use std::{fs::read_to_string, str::FromStr};
 
+use super::init::mod_k8s_confs_init;
 use super::{ModelSTD, depend::DependencySet};
 
 #[derive(Getters, Clone, Debug, Serialize)]
@@ -162,6 +163,10 @@ impl FilePersist<MMOperator> for MMOperator {
             .source_logic()
             .with(&ctx)?;
         self.gxl_prj.save_to(&paths.target_root, None).with(&ctx)?;
+        // k8s 模型：随节点保存生成 Helm chart 脚手架（spec/confs），仅在文件缺失时写入
+        if self.model().is_k8s() {
+            mod_k8s_confs_init(&target_path).source_resource()?;
+        }
         //flag.mark_suc();
         ctx.mark_suc();
         Ok(())

@@ -1,0 +1,19 @@
+# 由 gops 用 [[VAR]] 渲染（见模块 setting.yml），值来自模块 vars.yml。
+image: "[[IMAGE_REGISTRY]]/[[IMAGE_REPOSITORY]]:[[IMAGE_TAG]]"
+imagePullPolicy: IfNotPresent
+# 私有仓库拉取凭证 Secret 名称；留空则不注入 imagePullSecrets
+imagePullSecret: "[[IMAGE_PULL_SECRET]]"
+
+replicaCount: [[REPLICA_COUNT]]
+
+service:
+  type: [[SERVICE_TYPE]]
+  port: [[SERVICE_PORT]]
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"

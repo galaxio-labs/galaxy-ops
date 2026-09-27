@@ -2,7 +2,7 @@ use crate::internal_prelude::*;
 
 use orion_vars::vars::EnvEvalable;
 
-use super::LocalizeConf;
+use super::{LocalizeConf, TemplateCustom, TemplateTargets};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Getters, Default)]
 #[getset(get = "pub")]
@@ -15,6 +15,19 @@ impl Setting {
     pub fn example() -> Self {
         Self {
             localize: Some(LocalizeConf::example()),
+        }
+    }
+    /// k8s 模型脚手架：gops 用 `[[ ]]` 渲染 `values.yaml` 等，
+    /// 但排除 chart 的 `spec/confs/templates`（交给 Helm 的 `{{ }}`）。
+    pub fn k8s_module() -> Self {
+        Self {
+            localize: Some(LocalizeConf::new(
+                Some(TemplateTargets::new(
+                    vec![],
+                    vec!["spec/confs/templates".to_string()],
+                )),
+                Some(TemplateCustom::new("[[", "]]")),
+            )),
         }
     }
 }

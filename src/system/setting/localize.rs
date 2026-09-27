@@ -14,6 +14,15 @@ pub struct LocalizeConf {
 }
 
 impl LocalizeConf {
+    pub fn new(
+        templatize_path: Option<TemplateTargets>,
+        templatize_cust: Option<TemplateCustom>,
+    ) -> Self {
+        Self {
+            templatize_path,
+            templatize_cust,
+        }
+    }
     pub fn example() -> Self {
         Self {
             templatize_path: Some(TemplateTargets::example()),

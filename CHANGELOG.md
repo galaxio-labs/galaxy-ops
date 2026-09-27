@@ -5,6 +5,23 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.1] - 2026-09-27
+
+### 新增功能
+- **k8s 模型 Helm 脚手架**：`gops mod new` 为 `x86-ubt22-k8s` 自动生成 Helm chart（`spec/confs/{Chart.yaml,values.yaml,templates/{deployment,service}.yaml}`），并写入 k8s 约定变量（`APP_NAME`/`NAMESPACE`/`IMAGE_*`/`REPLICA_COUNT`/`SERVICE_*` 及系统 `KUBECONFIG`/`AIR_GAPPED`/`RUNTIME`）与 `setting.yml`（用 `[[ ]]` 渲染标签并排除 `spec/confs/templates`，避免与 Helm 的 `{{ }}` 冲突）
+- k8s 模型默认算子改用 `helm_ops`（`mod operators : helm_ops { }`），开箱支持 `install`/`uninstall`/`update`/`status`/`download`
+
+### 改进优化
+- host 模型 `download` 脚手架同时支持 git 仓库（`origin_addr.repo[/tag]`）与 http(s) 归档（`origin_addr.url`）；下载前清理缓存目录，重复下载幂等
+- chart 脚手架仅在文件缺失时写入，重复 `save`/`mod update` 不会覆盖用户对 `spec/confs` 的修改
+- 统一 host / k8s 模板的 `extern` 指向 `galaxio-hub/ops-gxl` 与 `${GXL_CHANNEL:main}`
+- 抽取 k8s 约定变量为 `k8s_var_init`，供 `gops mod new` / `gops mod example` 复用；`IMAGE_TAG` 允许模块级修改
+- chart `values.yaml` 暴露 `imagePullSecret`，Deployment 仅在其非空时注入 `imagePullSecrets`
+
+### Bug 修复
+- 修复 `gops mod example` 生成的 k8s 模型缺少 Helm chart 与 k8s 变量、导致 `mod localize` 报 `Failed to access variable ... IMAGE_REGISTRY` 的问题
+- 移除 host 算子模板中未使用的 `__into` / `_used.json` 读取
+
 ## [1.3.0] - 2026-09-17
 
 ### 新增功能

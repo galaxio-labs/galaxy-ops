@@ -161,6 +161,24 @@ fn pg_var_init() -> VarCollection {
         VarDefinition::from(("mem", 1048)).with_mut_module(),
     ])
 }
+
+/// k8s 模型的约定变量：供 Helm chart（`spec/confs`）与 `helm_ops` 流程共同使用。
+pub fn k8s_var_init(name: &str, version: &str) -> VarCollection {
+    VarCollection::define(vec![
+        VarDefinition::from(("IMAGE_REPOSITORY", name)).with_mut_immutable(),
+        VarDefinition::from(("IMAGE_TAG", version)).with_mut_module(),
+        VarDefinition::from(("APP_NAME", name)).with_mut_module(),
+        VarDefinition::from(("NAMESPACE", name)).with_mut_module(),
+        VarDefinition::from(("IMAGE_REGISTRY", "your-registry.example.com")).with_mut_module(),
+        VarDefinition::from(("IMAGE_PULL_SECRET", "")).with_mut_module(),
+        VarDefinition::from(("REPLICA_COUNT", 1)).with_mut_module(),
+        VarDefinition::from(("SERVICE_TYPE", "ClusterIP")).with_mut_module(),
+        VarDefinition::from(("SERVICE_PORT", 8080)).with_mut_module(),
+        VarDefinition::from(("RUNTIME", "containerd")).with_mut_system(),
+        VarDefinition::from(("AIR_GAPPED", "false")).with_mut_system(),
+        VarDefinition::from(("KUBECONFIG", "~/.kube/config")).with_mut_system(),
+    ])
+}
 impl ModuleSpec {
     pub fn for_example() -> Self {
         let name = "postgresql";
@@ -175,8 +193,8 @@ impl ModuleSpec {
             ModWorkflows::mod_k8s_tpl_init(),
             GxlProject::spec_k8s_tpl(),
             //conf.clone(),
-            pg_var_init(),
-            Some(Setting::example()),
+            k8s_var_init(name, "0.1.0"),
+            Some(Setting::k8s_module()),
         )
         .with_depends(DependencySet::example());
 
@@ -224,13 +242,22 @@ impl ModuleSpec {
             "{{ART_CACHE_REPO}}",
         ))));
 
+        // k8s 模型：构件是容器镜像 + 约定变量 + 带 Helm 支持的 setting
+        let k8s_vars = k8s_var_init(name, artifact_version);
+        let k8s_image_artifact = Artifact::new(
+            name,
+            artifact_version,
+            HttpResource::from("your-registry.example.com"),
+            "docker_image",
+        );
+
         let x86_ubu22_k8s = MMOperator::init(
             ModelSTD::x86_ubt22_k8s(),
-            ArtifactPackage::from(vec![artifact.clone()]),
+            ArtifactPackage::from(vec![k8s_image_artifact]),
             ModWorkflows::mod_k8s_tpl_init(),
             GxlProject::spec_k8s_tpl(),
-            vars.clone(),
-            None,
+            k8s_vars,
+            Some(Setting::k8s_module()),
         );
 
         let arm_mac_host = MMOperator::init(
@@ -273,8 +300,8 @@ pub fn make_mod_spec_4test() -> MainResult<ModuleSpec> {
         ModWorkflows::mod_k8s_tpl_init(),
         GxlProject::spec_k8s_tpl(),
         //conf.clone(),
-        pg_var_init(),
-        Some(Setting::example()),
+        k8s_var_init(name, "0.1.0"),
+        Some(Setting::k8s_module()),
     )
     .with_depends(DependencySet::for_test());
 

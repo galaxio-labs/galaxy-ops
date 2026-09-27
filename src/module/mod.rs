@@ -108,6 +108,10 @@ impl ModelSTD {
             Self::x86_ubt22_k8s(),
         ]
     }
+    /// 是否运行在 k8s（用于 `gops mod new` 生成 Helm chart 脚手架等 k8s 专属内容）。
+    pub fn is_k8s(&self) -> bool {
+        self.spc == RunSPC::K8S
+    }
     pub fn from_cur_sys() -> Self {
         let info = os_info::get();
 

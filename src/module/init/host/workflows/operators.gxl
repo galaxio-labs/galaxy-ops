@@ -1,24 +1,32 @@
-extern mod mod_ops { git =  "https://github.com/galaxy-operators/ops-gxl.git", channel = "${GXL_CHANNEL_OPS:main}" }
+extern mod mod_ops { git =  "https://github.com/galaxio-hub/ops-gxl.git", channel = "${GXL_CHANNEL:main}" }
 mod operators : empty_operators {
 
-    #[auto_load(entry)]
-    flow __into {
-      gx.read_file( file : "./values/_used.json" ,  name : "SETTING" ) ;
-    }
-    #[task(name="gops@install")]
-    flow install {
-    }
+    // 下载构件到 local/cache：支持 http(s) 归档（url）与 git 仓库（repo[/tag]）
     #[task(name="gops@download")]
     flow download {
-          mod_local = "./local";
-          art_local = "${SETTING.ART_PATH}";
-          gx.echo ("mod-local: ${mod_local}");
-          gx.read_file( file : "${mod_local}/artifact.yml" ,  name : "ART" ) ;
-          gx.cmd ( "mkdir -p ${ART_LOCAL}/temp");
-          for ${ITEM} in ${ART} {
-              gx.echo ("art: ${ITEM.LOCAL}  URL:${ITEM.ADDR.URL}");
-              gx.download ( url : "${ITEM.ADDR.URL}" , local_file : "${ART_LOCAL}/${ITEM.LOCAL}" );
-              //gx.untar ( file : "${ART_LOCAL}/${ITEM.LOCAL}" , dst : "${ART_LOCAL}/temp");
+      local_dir = "./local";
+      cache_dir = "${local_dir}/cache";
+      gx.cmd ( "mkdir -p ${cache_dir}" );
+      gx.read_file ( file : "${local_dir}/artifact.yml" , name : "ART" ) ;
+      for ${ITEM} in ${ART} {
+        if defined(${ITEM.ORIGIN_ADDR.REPO}) {
+          gx.cmd ( "rm -rf ${cache_dir}/${ITEM.NAME}" );
+          if defined(${ITEM.ORIGIN_ADDR.TAG}) {
+            gx.echo ( "git clone ${ITEM.ORIGIN_ADDR.REPO} @ ${ITEM.ORIGIN_ADDR.TAG}" );
+            gx.cmd ( "git clone --depth 1 --branch ${ITEM.ORIGIN_ADDR.TAG} ${ITEM.ORIGIN_ADDR.REPO} ${cache_dir}/${ITEM.NAME}" );
+          } else {
+            gx.echo ( "git clone ${ITEM.ORIGIN_ADDR.REPO}" );
+            gx.cmd ( "git clone --depth 1 ${ITEM.ORIGIN_ADDR.REPO} ${cache_dir}/${ITEM.NAME}" );
           }
+        } else {
+          gx.echo ( "download ${ITEM.LOCAL} <- ${ITEM.ORIGIN_ADDR.URL}" );
+          gx.download ( url : "${ITEM.ORIGIN_ADDR.URL}" , local_file : "${cache_dir}/${ITEM.LOCAL}" );
+        }
+      }
+    }
+
+    // 安装：脚手架默认空实现，按模块补全（例如构建/安装二进制）
+    #[task(name="gops@install")]
+    flow install {
     }
 }

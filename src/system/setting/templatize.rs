@@ -38,6 +38,9 @@ impl TemplateTargets {
 }
 
 impl TemplateTargets {
+    pub fn new(includes: Vec<String>, excludes: Vec<String>) -> Self {
+        Self { includes, excludes }
+    }
     pub fn example() -> Self {
         Self {
             includes: vec![],
@@ -64,6 +67,12 @@ impl EnvEvalable<TemplateTargets> for TemplateTargets {
 }
 
 impl TemplateCustom {
+    pub fn new<B: Into<String>, E: Into<String>>(label_beg: B, label_end: E) -> Self {
+        Self {
+            label_beg: label_beg.into(),
+            label_end: label_end.into(),
+        }
+    }
     pub fn example() -> Self {
         Self {
             label_beg: "[[".into(),

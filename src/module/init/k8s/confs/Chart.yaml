@@ -1,0 +1,7 @@
+# Helm chart 脚手架（由 gops mod new 生成；请按模块需要修改 name 等）
+apiVersion: v2
+name: app
+description: Helm chart for the module k8s deployment
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

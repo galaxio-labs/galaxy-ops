@@ -1,0 +1,21 @@
+// 可选阶段扩展点（galaxy-ops >= 1.3.4 / galaxy-flow >= 0.14）：
+//
+// gops sys localize 写完系统根的 .env 之后，若项目在这里定义了同名 gx 流程，
+// 就执行它（gx run localize）；否则跳过。合并后的配置会作为环境变量注入该子进程，
+// 所以流程里能读到刚合并的值（如 HTTP_PORT）。
+//
+// 本示例演示「写一个 web.conf，且幂等（存在即跳过）」；真实项目可在此生成配置模板、
+// 证书、密钥等必须由项目自己产出的东西——证书/密钥要生成一次即稳定，
+// 用 test -f ... || 这类存在即跳过，避免重生成。
+//
+// HTTP_PORT 来自刚合并的值：sys 默认 8080，被 values/value.yml 覆盖为 8081。
+//
+// 注意：GXL 的行注释是 //（# 是注解语法 #[...]，不是注释，写成 # 会解析失败）。
+mod envs { env default {} }
+
+mod main {
+  flow localize {
+    gx.echo ( value : "stage localize: write web.conf (skip if exists)" );
+    gx.cmd ( "test -f web.conf || printf 'server { listen %s; }' $(printenv HTTP_PORT) > web.conf" ) ;
+  }
+}

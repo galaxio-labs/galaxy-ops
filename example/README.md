@@ -157,6 +157,8 @@ System（共享定义）              Ops Project（客户差异）
 knowlege/docker-compose/
 ├── sys-prj.yml              # 系统根配置（test_envs）
 ├── version.txt
+├── _gal/
+│   └── work.gxl             # 可选：定义 localize 阶段流程（扩展点），见下
 ├── sys/
 │   ├── sys_model.yml        # name: web-stack / kind: docker-compose
 │   ├── docker-compose.yaml  # 共享定义，用 ${NGINX_TAG}/${HTTP_PORT}/${SEC_DB_PASSWORD} 占位
@@ -167,7 +169,8 @@ knowlege/docker-compose/
 ```
 
 - `~/.galaxy/sec_value.yml`：全局密钥文件（`db_password` / `postgres_password` 等，运行时注入为 `${SEC_*}`），不随项目提交
-- **没有 `_gal/`、`sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml`**：纯 docker-compose 系统不依赖 GXL / gx，这些缺失时分别按空处理
+- `_gal/work.gxl`：**可选**。这里定义了一个 `localize` 流程做**阶段扩展点**验证（见下）；不定义也行，缺了它纯 compose 系统照样跑
+- **没有 `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml`**：纯 docker-compose 系统不依赖 GXL / gx（`_gal/work.gxl` 只用于可选的阶段流程），这些缺失时分别按空处理
 - `sys_model.yml` 的 `name`（`web-stack`）是 gops 的**系统名**（决定交付包名 `web-stack-0.1.0.tar.gz`）；docker 的项目名则取自**系统根目录名**（`docker-compose`）——两者用途不同，不必一致
 
 直接体验（含客户化；`values/value.yml` 已内置一份只写差异的覆盖样例）：
@@ -175,9 +178,24 @@ knowlege/docker-compose/
 ```bash
 cd example/knowlege/docker-compose
 # 可选：把全局密钥写到 ~/.galaxy/sec_value.yml（不在项目里）
-gops sys localize                # 合并系统默认值 + values/value.yml（客户覆盖），导出系统根的 .env
+gops sys localize                # 合并系统默认值 + values/value.yml（客户覆盖）→ 系统根的 .env
+                                 # 随后若定义了同名 gx 流程 localize，则顺带执行它（本示例有）
 cat .env                         # NGINX_TAG=1.27-alpine / HTTP_PORT=8081 / ...（无密钥明文）
+cat web.conf                     # server { listen 8081; }：阶段流程读到刚合并的 HTTP_PORT（幂等，重复 localize 不重写）
 ```
+
+## 可选阶段流程（`localize` 扩展点）
+
+`gops sys localize` 写完 `.env` 后，**若项目在 `_gal/work.gxl` 定义了同名 gx 流程 `localize` 就执行它**，否则跳过——compose 系统由此获得「本地化后自定义动作」（渲染配置模板、生成证书/密钥…）的扩展点，与 gxl 系统统一。要点：
+
+- **声明只有一处**：流程写在 `_gal/work.gxl`，不在 `sys_model.yml` 里再声明；
+- **执行命令**：`gx run -e default -d <debug> localize`（故流程需能用 `env default` 运行；本示例的 `_gal/work.gxl` 有 `env default`）；
+- **值传递**：合并后的配置（与 `.env` **完全一致**，含 `${}` 展开）作为**环境变量注入** gx 子进程，流程里可直接读 `${DOMAIN}` 等；
+- **可选依赖**：需要 gx（galaxy-flow）≥ 0.14；gx 缺失 / 版本过旧 / 没有该流程 → **静默跳过**（保持「compose 无需 gx」；`-d 1` 会打印跳过原因）；
+- **失败即失败**：流程非零退出 → `gops sys localize` 整体失败；`gops sys localize --no-flow` 可跳过该阶段；
+- 机制与阶段名无关（当前只接 `localize`、只对 docker-compose 生效）。
+
+本示例的 `_gal/work.gxl` 就用它**幂等地**写了一份 `web.conf`（`test -f web.conf || …`，存在即跳过）——这正是「证书/密钥必须生成一次即稳定」的写法。详见 [`../src/system/README.md`](../src/system/README.md)。
 
 该系统的 `sys/sys_model.yml` 已标记 `kind: docker-compose`，因此 `gops sys` 的部署命令会自动映射到 `docker compose`，无需安装 gx：
 

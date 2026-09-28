@@ -81,6 +81,21 @@ gops sys download/install/uninstall/start/stop/status/diagnose
 - `gxl`（默认）：委托给外部 `gx`（`$HOME/bin/gx`，即 `gx run <cmd>`）。
 - `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`）。
 
+## 可选阶段流程（`localize` 扩展点）
+
+`kind: docker-compose` 的系统在 `gops sys localize` 写完 `.env` 之后，**若项目定义了同名 gx 流程 `localize` 则执行它**（`gx run localize`）；否则跳过。这样 compose 系统也有了「本地化后自定义动作」的扩展点（渲染配置模板、生成证书/密钥等），与 `gxl` 系统的扩展点统一。
+
+- **声明只有一处**：流程写在 `_gal/work.gxl`，不在 `sys_model.yml` 里再声明。
+- **判定确定**：用 `gx run --exists localize`（galaxy-flow ≥ 0.14）判定存在性，不靠试跑猜退出码。
+- **执行命令**：`gx run -e default -d <debug> localize`——因此流程需能用 `env default` 运行（conf 里声明 `env default`；脚手架生成的 `_gal/work.gxl` 已包含）。
+- **可选依赖**：gx 未安装 / 版本过旧 / 项目没有该流程 → **静默跳过**（compose 系统照常可用）；`-d 1` 会打印**跳过原因**（如 conf 解析错误、gx 过旧），便于排障。
+- **顺序**：gops 先写完 `.env`，再跑流程。
+- **值传递**：合并后的配置（与 `.env` **完全一致**——同一批键、同样做过 `${}` 展开）会作为**环境变量注入** gx 子进程，流程里可直接读 `${DOMAIN}` 等；注入时会**保留** `PATH`/`HOME`/`SHELL`/`LD_*`/`DYLD_*`/`GX*`/`GXL_*` 等关键变量不被覆盖（避免破坏 gx 自身或其 shell）。
+- **失败即失败**：流程非零退出 → `sys localize` 整体失败。
+- **跳过开关**：`gops sys localize --no-flow`。
+
+> 机制与阶段名无关（当前只接 `localize`、且只对 `docker-compose` 生效）；后续要对 `install`/`start`/… 或 `gxl` 放开，只需在 `SysCommandHandler::run_stage_flow` 的调用点接入。
+
 ## 密钥处理
 
 纯 docker-compose 系统的密钥**不落盘、不进 `.env`**，用 `${SEC_xxx}` 占位 + 运行时注入：

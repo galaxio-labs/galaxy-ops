@@ -139,6 +139,24 @@ pub fn export_env_file(dict: &OriginDict, out_path: &Path) -> MainResult<()> {
     Ok(())
 }
 
+/// 把值字典导出为**进程环境变量对**（原始值，不做 dotenv 引号处理），键与 `.env` 同源（大写）。
+///
+/// 用于把合并后的配置注入子进程（如可选的阶段 gx 流程）。
+pub fn env_pairs(dict: &OriginDict) -> Vec<(String, String)> {
+    dict.iter()
+        .map(|(key, value)| (key.as_str().to_string(), env_raw_value(value.value())))
+        .collect()
+}
+
+fn env_raw_value(v: &ValueType) -> String {
+    match v {
+        ValueType::String(s) => s.clone(),
+        ValueType::Obj(o) => serde_json::to_string(o).unwrap_or_default(),
+        ValueType::List(l) => serde_json::to_string(l).unwrap_or_default(),
+        other => other.to_string(),
+    }
+}
+
 fn format_env_value(v: &ValueType) -> String {
     match v {
         ValueType::String(s) => {
@@ -183,6 +201,26 @@ mod tests {
 
     fn test_init() {
         let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    #[test]
+    fn test_env_pairs_are_raw_not_dotenv_quoted() {
+        test_init();
+        let mut dict = OriginDict::new();
+        dict.insert("DOMAIN".to_string(), ValueType::from("example.com"));
+        dict.insert("MSG".to_string(), ValueType::from("hello world"));
+
+        let mut pairs = env_pairs(&dict);
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("DOMAIN".to_string(), "example.com".to_string()),
+                ("MSG".to_string(), "hello world".to_string()),
+            ]
+        );
+        // 对照：`.env` 会对含空格的值加引号，注入子进程时则用原始值
+        assert!(render_env(&dict).contains("MSG=\"hello world\""));
     }
 
     #[test]

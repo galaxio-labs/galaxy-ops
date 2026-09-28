@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.4] - 2026-09-28
+
+### 新增功能
+- **`localize` 阶段扩展点（docker-compose）**：`gops sys localize` 写完 `.env` 后，若项目在 `_gal/work.gxl` 定义了同名 gx 流程 `localize` 则执行它（`gx run localize`），否则跳过——给 compose 系统补上「本地化后自定义动作」（渲染配置模板、生成证书/密钥等）的扩展点，与 gxl 系统统一。存在性判定用 `gx run --exists`（依赖 galaxy-flow ≥ 0.14），gx 缺失 / 版本过旧 / 无该流程时**静默跳过**，保持 compose「无需 gx」的默认；流程非零退出则 localize 整体失败。新增 `--no-flow` 跳过该阶段。
+
+### 改进优化
+- 合并后的配置（与 `.env` **完全一致**——同一份 evaled 字典、同样做过 `${}` 展开）作为**环境变量注入** gx 子进程，流程里可直接读 `${DOMAIN}` 等；注入时**保留** `PATH`/`HOME`/`LD_*`/`DYLD_*`/`GX*`/`GXL_*` 等关键变量不被覆盖；`-d 1` 会打印跳过原因（默认静默）。抽出 `project::env_pairs` 供注入复用；`gxl` 分派与阶段流程统一走同一 `gx` 调用入口（`run_gx_flow`）
+- 示例 `knowlege/docker-compose` 增加 `_gal/work.gxl` 的 `localize` 流程做**验证**（幂等写 `web.conf`），并补 `tests/sys_localize_stage_test.rs` 端到端（真实 `gops` 二进制 + 假 `$HOME/bin/gx`）
+
 ## [1.3.3] - 2026-09-28
 
 ### 新增功能

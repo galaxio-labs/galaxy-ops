@@ -25,3 +25,6 @@ values/*
 # .env 由 gops sys localize 生成，含非密钥配置。
 # 密钥不落盘：compose 里用 ${SEC_xxx} 占位，运行时从 ~/.galaxy/sec_value.yml 注入。
 .env
+
+# 示例 localize 阶段流程的产出（见 _gal/work.gxl）
+web.conf

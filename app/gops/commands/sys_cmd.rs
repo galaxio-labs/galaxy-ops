@@ -89,6 +89,12 @@ pub struct SysLocalizeArgs {
 
     #[arg(long, help = "只 localize，跳过 update（不解析/下载模块）")]
     pub only: bool,
+
+    #[arg(
+        long = "no-flow",
+        help = "跳过可选的阶段 gx 流程（如 localize）；默认在 docker-compose 系统里按需执行"
+    )]
+    pub no_flow: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -464,12 +470,28 @@ impl SysCommandHandler {
             dict.merge(&user_dict);
         }
 
-        spec.localize(
-            val_path,
-            LocalizeOptions::new(dict).with_only_mod(args.module),
-        )
-        .await
-        .err_conv()?;
+        let no_flow = args.no_flow;
+        let debug = args.debug_level();
+
+        // 与写 `.env` **完全一致**的值（同一份 evaled 字典，含 `${VAR}` 展开）：先算好，
+        // 供随后的阶段流程注入子进程。
+        let options = LocalizeOptions::new(dict).with_only_mod(args.module);
+        let stage_env = galaxy_ops::project::env_pairs(options.evaled_value());
+
+        spec.localize(val_path, options).await.err_conv()?;
+
+        // 可选阶段扩展点：内置 localize（写 .env）完成后，若项目定义了同名 gx 流程则执行。
+        // 当前只对 docker-compose 生效；机制与阶段名无关，见 `run_stage_flow`。
+        if !no_flow {
+            Self::run_stage_flow(
+                spec.kind(),
+                &Self::gx_bin_path(),
+                "localize",
+                debug,
+                &stage_env,
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -576,6 +598,89 @@ impl SysCommandHandler {
         args
     }
 
+    /// 统一的 gx 流程执行入口：`gx run -e <env> -d <n> [--cmd-arg <mod>] <flow>`，
+    /// 并可按需把 `inject_env` 注入子进程环境。
+    ///
+    /// `gxl` 的分派（`gops sys start` 等）与 `docker-compose` 的可选阶段流程都走这里，
+    /// 保证「如何调 gx」只有一处。（GXL 内部的 `gx.run` 是另一种东西，gops 不直接使用。）
+    async fn run_gx_flow(
+        gx_path: &str,
+        env: &str,
+        debug: usize,
+        module: Option<&str>,
+        flow: &str,
+        inject_env: &[(String, String)],
+    ) -> MainResult<()> {
+        let mut cmd = TokioCommand::new(gx_path);
+        cmd.args(Self::gx_run_args(flow, env, debug, module));
+        for (key, value) in inject_env {
+            // 保留变量不被合并配置覆盖，否则可能破坏 gx 自身或其 shell（如 PATH/HOME）。
+            if is_reserved_env(key) {
+                continue;
+            }
+            cmd.env(key, value);
+        }
+        Self::run_and_stream(cmd, "gx").await
+    }
+
+    /// 阶段扩展点：内置动作完成后，若项目定义了**同名 gx 流程**则执行。
+    ///
+    /// 机制与阶段名无关（`flow_name` 由调用方给出，如 `localize`）；当前**只对
+    /// `kind: docker-compose` 开放**——策略集中在此处，后续要对 `install`/`start`/…
+    /// 或 gxl 放开，只改这里的判断与调用点即可。
+    ///
+    /// 判定依赖 galaxy-flow `>= 0.14` 的 `gx run --exists`（**确定性**，不靠试跑猜
+    /// 退出码）：存在则 `gx run <flow>`；不存在/不可判定则**跳过**（零行为变化、gx 可选）。
+    /// `env_pairs` 里是合并后的配置，作为进程环境变量注入子进程，使流程能读到刚合并的值。
+    async fn run_stage_flow(
+        kind: SysKind,
+        gx_path: &str,
+        flow_name: &str,
+        debug: usize,
+        env_pairs: &[(String, String)],
+    ) -> MainResult<()> {
+        if !matches!(kind, SysKind::DockerCompose) {
+            return Ok(());
+        }
+        match Self::gx_flow_probe(gx_path, flow_name) {
+            StageProbe::Exists => {}
+            StageProbe::Skipped(reason) => {
+                // 默认静默（保持「compose 无需 gx」）；`-d 1` 给出跳过原因，避免
+                // “写了流程却未跑”时完全不可发现（conf 解析错 / gx 过旧 等）。
+                if debug >= 1 {
+                    eprintln!("skip stage flow '{flow_name}': {reason}");
+                }
+                return Ok(());
+            }
+        }
+        println!("run stage flow: gx run {flow_name}");
+        // 与 gxl 分派共用同一入口（`-e default`，因为 compose 系统没有可选的 env）。
+        Self::run_gx_flow(gx_path, "default", debug, None, flow_name, env_pairs).await
+    }
+
+    /// `gx run --exists <flow>`：退出 `0` = 存在；其余（不存在 / conf 不可加载 /
+    /// gx 缺失或过旧）一律视为不可用，并保留原因供 `-d 1` 提示。
+    ///
+    /// 捕获并丢弃输出：探测不应污染 gops 输出（例如 compose 项目没有 `_gal/work.gxl`
+    /// 时 gx 会往 stderr 打 `conf not exists`）。
+    fn gx_flow_probe(gx_path: &str, flow_name: &str) -> StageProbe {
+        match Command::new(gx_path)
+            .args(["run", "--exists", flow_name])
+            .output()
+        {
+            Ok(out) if out.status.success() => StageProbe::Exists,
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                StageProbe::Skipped(if stderr.is_empty() {
+                    format!("gx --exists 退出码 {:?}", out.status.code())
+                } else {
+                    stderr
+                })
+            }
+            Err(e) => StageProbe::Skipped(format!("无法执行 gx: {e}")),
+        }
+    }
+
     /// `kind: gxl` 的系统：把 `gops sys <cmd>` 映射为 `gx run <cmd>`。
     ///
     /// 系统的 `start` / `stop` / `status` / `diagnose` 等即工作流里的同名流程
@@ -585,18 +690,20 @@ impl SysCommandHandler {
 
         let gx_path = Self::gx_bin_path();
         let module = args.module();
-        let mut cmd = TokioCommand::new(&gx_path);
-        cmd.args(Self::gx_run_args(
-            cmd_name,
-            args.env(),
-            args.debug_level(),
-            module.as_deref(),
-        ));
         if let Some(module) = module {
             println!("use module :{module}");
         }
 
-        Self::run_and_stream(cmd, "gx").await
+        // 与 compose 的可选阶段流程共用同一入口 `run_gx_flow`。
+        Self::run_gx_flow(
+            &gx_path,
+            args.env(),
+            args.debug_level(),
+            module.as_deref(),
+            cmd_name,
+            &[],
+        )
+        .await
     }
 
     async fn run_compose_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
@@ -767,6 +874,24 @@ fn read_version(root: &Path) -> String {
     } else {
         version
     }
+}
+
+/// `gx run --exists` 的探测结果。
+enum StageProbe {
+    /// 存在（退出 0）。
+    Exists,
+    /// 不可用 / 不存在；带原因（供 `-d 1` 提示）。
+    Skipped(String),
+}
+
+/// 注入 gx 子进程时**保留**的环境变量：不被合并配置覆盖，否则可能破坏 gx 自身
+/// （`~/.galaxy` 解析、动态库加载、`gx.*` 内部变量）或其 shell 的 `PATH`。
+fn is_reserved_env(key: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "PATH", "HOME", "PWD", "OLDPWD", "SHELL", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL",
+    ];
+    const RESERVED_PREFIXES: &[&str] = &["LD_", "DYLD_", "GX_", "GXL_"];
+    RESERVED.contains(&key) || RESERVED_PREFIXES.iter().any(|p| key.starts_with(p))
 }
 
 /// 把 `--kind` 的字符串解析为系统类型，未知值默认 Gxl。
@@ -1013,11 +1138,119 @@ mod tests {
             },
             module: None,
             only: false,
+            no_flow: false,
         };
 
         assert_eq!(args.debug_level(), 1);
         assert_eq!(args.log_setting(), Some("debug".to_string()));
         assert!(!args.only);
+    }
+
+    #[test]
+    fn test_parse_no_flow_flag() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: SysLocalizeArgs,
+        }
+        let cli = Cli::try_parse_from(["x", "--no-flow"]).unwrap();
+        assert!(cli.args.no_flow);
+        let cli = Cli::try_parse_from(["x"]).unwrap();
+        assert!(!cli.args.no_flow);
+    }
+
+    #[test]
+    fn test_gx_flow_probe() {
+        // `true` 忽略参数退出 0（视为存在）；`false` 退出 1；不存在路径 → 不可用
+        assert!(matches!(
+            SysCommandHandler::gx_flow_probe("true", "localize"),
+            StageProbe::Exists
+        ));
+        assert!(matches!(
+            SysCommandHandler::gx_flow_probe("false", "localize"),
+            StageProbe::Skipped(_)
+        ));
+        assert!(matches!(
+            SysCommandHandler::gx_flow_probe("/nonexistent/gx-xyz", "localize"),
+            StageProbe::Skipped(_)
+        ));
+    }
+
+    #[test]
+    fn test_reserved_env_filter() {
+        // 关键系统变量/内部前缀不得被合并配置覆盖
+        for k in [
+            "PATH",
+            "HOME",
+            "PWD",
+            "LD_PRELOAD",
+            "DYLD_LIBRARY_PATH",
+            "GX_FOO",
+            "GXL_PRJ_ROOT",
+        ] {
+            assert!(is_reserved_env(k), "{k} should be reserved");
+        }
+        for k in ["DOMAIN", "HTTP_PORT", "NGINX_TAG"] {
+            assert!(!is_reserved_env(k), "{k} should not be reserved");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_stage_flow_gates_on_kind() {
+        // 非 docker-compose 是 no-op：即使 gx 路径不存在也不报错
+        SysCommandHandler::run_stage_flow(SysKind::Gxl, "/nonexistent/gx", "localize", 0, &[])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_stage_flow_skips_when_flow_absent() {
+        let dir = tempdir().unwrap();
+        let out = dir.path().join("ran.txt");
+        let pairs = vec![("OUT".to_string(), out.display().to_string())];
+        // 探测失败（`false`）→ 跳过，不执行流程
+        SysCommandHandler::run_stage_flow(SysKind::DockerCompose, "false", "localize", 0, &pairs)
+            .await
+            .unwrap();
+        assert!(!out.exists(), "absent flow must be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_run_stage_flow_runs_and_injects_env() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let gx = dir.path().join("fake-gx");
+        std::fs::write(
+            &gx,
+            r#"#!/bin/sh
+case " $* " in
+  *" --exists "*) exit 0 ;;
+esac
+printf '%s' "$DOMAIN" > "$OUT"
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&gx, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let out = dir.path().join("ran.txt");
+        let pairs = vec![
+            ("DOMAIN".to_string(), "example.com".to_string()),
+            ("OUT".to_string(), out.display().to_string()),
+        ];
+        SysCommandHandler::run_stage_flow(
+            SysKind::DockerCompose,
+            gx.to_str().unwrap(),
+            "localize",
+            0,
+            &pairs,
+        )
+        .await
+        .unwrap();
+
+        // 流程被执行，且合并后的配置（DOMAIN）作为环境变量注入子进程
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "example.com");
     }
 
     #[test]
@@ -1245,6 +1478,7 @@ mod tests {
                 },
                 module: None,
                 only: false,
+                no_flow: false,
             };
             SysCommandHandler::handle_localize(localize_args)
                 .await
@@ -1325,6 +1559,7 @@ mod tests {
                 },
                 module: None,
                 only: false,
+                no_flow: false,
             })
             .await
             .unwrap();
@@ -1372,6 +1607,7 @@ mod tests {
                 },
                 module: None,
                 only: false,
+                no_flow: false,
             })
             .await
             .unwrap();
@@ -1421,6 +1657,7 @@ mod tests {
                 },
                 module: None,
                 only: true,
+                no_flow: false,
             })
             .await;
             assert!(result.is_err(), "--only should fail without resolved vars");

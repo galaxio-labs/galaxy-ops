@@ -151,23 +151,31 @@ System（共享定义）              Ops Project（客户差异）
 
 **文件位置可声明**：compose 属于「系统定义」，默认放在 `sys/docker-compose.yaml`；`gops sys` 按 `sys/{compose,docker-compose}.{yaml,yml}` → `<root>/{compose,docker-compose}.{yaml,yml}` 查找（`sys/` 优先）。无论放在哪，compose 的**项目目录都锚定在系统根**——项目名 = 系统根目录名、相对挂载与 `.env` 都相对系统根，`${VAR}` 的相对挂载写法不需要改。旧仓（compose 在根）不改动也能继续跑。
 
-完整示例见 [knowlege/docker-compose](./knowlege/docker-compose/)——它是一个**可直接运行的完整系统**（nginx + postgres + 卷 + 密钥占位）：
+完整示例见 [knowlege/docker-compose](./knowlege/docker-compose/)——它是一个**可直接运行的完整系统**（nginx + postgres + 卷 + 密钥占位），也是「纯 docker-compose 系统」的最小形态：
 
-- `sys/docker-compose.yaml`：共享定义，用 `${NGINX_TAG}`、`${HTTP_PORT}`、`${SEC_DB_PASSWORD}` 等占位
-- `sys/setting/vars.yml`：非密钥配置的 `system:` 变量段
+```text
+knowlege/docker-compose/
+├── sys-prj.yml              # 系统根配置（test_envs）
+├── version.txt
+├── sys/
+│   ├── sys_model.yml        # name: web-stack / kind: docker-compose
+│   ├── docker-compose.yaml  # 共享定义，用 ${NGINX_TAG}/${HTTP_PORT}/${SEC_DB_PASSWORD} 占位
+│   ├── setting/vars.yml     # 非密钥系统变量（system 段）
+│   └── merged_vars.yml      # 聚合变量（sys update 生成，需入库）
+└── values/
+    └── value.yml            # 客户覆盖（版本化）：只写要覆盖的项
+```
+
 - `~/.galaxy/sec_value.yml`：全局密钥文件（`db_password` / `postgres_password` 等，运行时注入为 `${SEC_*}`），不随项目提交
-- **没有 `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml`**：这是纯 docker-compose 系统（三者缺失时分别按空处理）
+- **没有 `_gal/`、`sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml`**：纯 docker-compose 系统不依赖 GXL / gx，这些缺失时分别按空处理
+- `sys_model.yml` 的 `name`（`web-stack`）是 gops 的**系统名**（决定交付包名 `web-stack-0.1.0.tar.gz`）；docker 的项目名则取自**系统根目录名**（`docker-compose`）——两者用途不同，不必一致
 
-直接体验（含客户化）：
+直接体验（含客户化；`values/value.yml` 已内置一份只写差异的覆盖样例）：
 
 ```bash
 cd example/knowlege/docker-compose
-# 密钥写到全局密钥文件（不在项目里）：
-#   ~/.galaxy/sec_value.yml
-#     db_password: "xxx"
-#     postgres_password: "yyy"
-mkdir -p values && printf 'HTTP_PORT: 8081\nREPLICAS: 5\n' > values/value.yml  # 客户覆盖
-gops sys localize                # 自动解析（生成 merged_vars.yml + values）并导出 .env = 默认 + 客户覆盖
+# 可选：把全局密钥写到 ~/.galaxy/sec_value.yml（不在项目里）
+gops sys localize                # 合并系统默认值 + values/value.yml（客户覆盖），导出系统根的 .env
 cat .env                         # HTTP_PORT=8081 / REPLICAS=5 / ...（无密钥明文）
 ```
 

@@ -12,6 +12,7 @@
 
 ### 改进优化
 - compose 项目目录始终锚定系统根（项目名 = 根目录名，相对挂载与 `.env` 相对根）：`sys/` 布局显式 `-f` + `--project-directory` 并合并同目录 `<stem>.override.{yaml,yml}`（显式 `-f` 会关闭 docker 的 override 自动合并）；旧布局（compose 在根）不传全局参数，保留 override 自动合并与 `COMPOSE_FILE` 语义
+- 示例 `knowlege/docker-compose` 精简为纯 compose 最小形态：移除对纯 compose 系统无用的 `_gal/`，新增可版本化的 `values/value.yml` 客户覆盖样例
 
 ### 重大变更
 - `kind: gxl` 系统脚手架示例 compose 迁到 `sys/docker-compose.yaml`（原根目录），旧布局仍兼容

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
@@ -17,7 +18,7 @@ use galaxy_ops::system::drift::{DriftStatus, detect_drift};
 use galaxy_ops::system::lock::DeliverLock;
 use galaxy_ops::system::operator::SysOperator;
 use galaxy_ops::system::setting::SysSetting;
-use galaxy_ops::system::{SysKind, SysValuePaths};
+use galaxy_ops::system::{SysKind, SysOperatorPath, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_infra::path::ensure_path;
 use orion_variate::archive::compress;
@@ -611,7 +612,28 @@ impl SysCommandHandler {
         }
 
         let mut cmd = TokioCommand::new("docker");
-        cmd.arg("compose").arg(subcommand).args(extra);
+        // compose 文件位置可变（默认 `sys/docker-compose.yaml`），但项目目录始终锚定到系统根，
+        // 使相对挂载与 .env 的基准保持不变。
+        let sys_paths = SysOperatorPath::new(&current_dir);
+        let candidates = sys_paths.compose_candidates();
+        let compose_file = candidates.first().cloned();
+        if let Some(file) = &compose_file {
+            if candidates.len() > 1 {
+                eprintln!(
+                    "warn: 检测到 {} 个 compose 文件，使用 {}（其余忽略）",
+                    candidates.len(),
+                    file.display()
+                );
+            }
+        } else {
+            eprintln!(
+                "warn: 未找到 compose 文件（已按 sys/ 与系统根的 {{compose,docker-compose}}.{{yaml,yml}} 查找），交由 docker compose 自行发现"
+            );
+        }
+        cmd.arg("compose")
+            .args(compose_global_args(compose_file.as_deref(), &current_dir))
+            .arg(subcommand)
+            .args(extra);
         cmd.current_dir(&current_dir);
 
         // 运行时注入密钥：从 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）读取 SEC_* 变量，
@@ -767,6 +789,49 @@ fn compose_subcommand(cmd_name: &str) -> (&str, &'static [&'static str]) {
         "diagnose" => ("config", &[]),
         other => (other, &[]),
     }
+}
+
+/// 构造 `docker compose` 的全局参数（必须位于子命令之前）。
+///
+/// 分两种布局：
+/// - **内收布局**（compose 在 `sys/` 下）：显式 `-f <file> --project-directory <系统根>`，
+///   把项目目录锚回系统根，避免项目名与相对挂载基准漂到 `sys/`。显式 `-f` 会关闭 docker
+///   对 override 的自动合并，因此这里同时显式合并同目录的 `*.override.{yaml,yml}`。
+/// - **旧布局**（compose 就在系统根）：**不传任何全局参数**，退回 docker 自动发现。
+///   这样能完整保留 docker 的 override 自动合并与 `COMPOSE_FILE` 环境变量语义，
+///   保证旧仓不加改动照样跑。此时项目目录本就等于系统根，语义与内收布局一致。
+///
+/// 未找到 compose 文件时同样返回空参数，交由 docker 自行发现。
+fn compose_global_args(compose_file: Option<&Path>, project_dir: &Path) -> Vec<OsString> {
+    let Some(file) = compose_file else {
+        return Vec::new();
+    };
+    // 旧布局：文件就在系统根，交给 docker 自动发现（保留 override 合并 / COMPOSE_FILE）。
+    if file.parent() == Some(project_dir) {
+        return Vec::new();
+    }
+
+    let mut args = vec![OsString::from("-f"), file.as_os_str().to_os_string()];
+    for override_file in compose_override_files(file) {
+        args.push(OsString::from("-f"));
+        args.push(override_file.into_os_string());
+    }
+    args.push(OsString::from("--project-directory"));
+    args.push(project_dir.as_os_str().to_os_string());
+    args
+}
+
+/// 与 compose 主文件同目录、按 docker 约定命名的 override 文件（存在者）：
+/// `<stem>.override.yaml` → `<stem>.override.yml`。
+fn compose_override_files(base: &Path) -> Vec<PathBuf> {
+    let (Some(stem), Some(dir)) = (base.file_stem().and_then(|s| s.to_str()), base.parent()) else {
+        return Vec::new();
+    };
+    ["yaml", "yml"]
+        .into_iter()
+        .map(|ext| dir.join(format!("{stem}.override.{ext}")))
+        .filter(|path| path.is_file())
+        .collect()
 }
 
 /// 密钥掩码值，与 `orion-sec` 的 `SECRET_MASK` 保持一致。
@@ -994,6 +1059,61 @@ mod tests {
         check("whatever", "whatever", &[]);
     }
 
+    #[test]
+    fn test_compose_global_args_anchor_to_project_dir() {
+        let root = Path::new("/srv/gateway");
+        let file = root.join("sys/docker-compose.yaml");
+
+        assert_eq!(
+            compose_global_args(Some(&file), root),
+            vec![
+                OsString::from("-f"),
+                OsString::from("/srv/gateway/sys/docker-compose.yaml"),
+                OsString::from("--project-directory"),
+                OsString::from("/srv/gateway"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compose_global_args_empty_for_root_layout() {
+        // 旧布局（compose 就在系统根）：不传 global args，退回 docker 自动发现，
+        // 以保留 docker-compose.override.yml 的自动合并与 COMPOSE_FILE 环境变量语义。
+        let root = Path::new("/srv/gateway");
+        assert!(compose_global_args(Some(&root.join("docker-compose.yml")), root).is_empty());
+        assert!(compose_global_args(Some(&root.join("compose.yaml")), root).is_empty());
+    }
+
+    #[test]
+    fn test_compose_global_args_merges_override_in_sys_layout() {
+        // 显式 -f 会关闭 override 自动合并，因此内收布局要把同目录的 override 显式带上。
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sys")).unwrap();
+        std::fs::write(root.join("sys/docker-compose.yaml"), "base").unwrap();
+        std::fs::write(root.join("sys/docker-compose.override.yaml"), "override").unwrap();
+        let file = root.join("sys/docker-compose.yaml");
+
+        assert_eq!(
+            compose_global_args(Some(&file), root),
+            vec![
+                OsString::from("-f"),
+                root.join("sys/docker-compose.yaml").into_os_string(),
+                OsString::from("-f"),
+                root.join("sys/docker-compose.override.yaml")
+                    .into_os_string(),
+                OsString::from("--project-directory"),
+                root.as_os_str().to_os_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compose_global_args_empty_without_compose_file() {
+        // 未找到 compose 文件时不加全局参数，仍交由 docker 自行发现（兼容旧布局）
+        assert!(compose_global_args(None, Path::new("/srv/gateway")).is_empty());
+    }
+
     #[tokio::test]
     async fn test_sys_new_writes_kind() {
         once_init_log();
@@ -1047,6 +1167,8 @@ mod tests {
         // 不覆盖用户已有的 docker-compose.yml
         let compose = std::fs::read_to_string(prj.join("docker-compose.yml")).unwrap();
         assert_eq!(compose, existing_compose);
+        // 旧布局已存在 compose 时，不再额外生成 sys/ 下的新位置
+        assert!(!prj.join("sys/docker-compose.yaml").exists());
         // 补齐缺失的骨架文件
         assert_eq!(SysOperator::load_kind(&prj), SysKind::DockerCompose);
         assert!(prj.join("sys-prj.yml").exists());

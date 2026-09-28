@@ -129,16 +129,16 @@ System/Module Spec（共享定义）
 - `gops sys localize` / `gops mod localize` 渲染出本地化产物
 - 在项目内的系统目录执行 `gops sys localize` 时，会按上层 `ops-prj.yml` 直接使用 `values/<system>/`，不依赖 `<sys>/values` 符号链接是否完整
 
-## docker-compose.yml 的处理方式
+## docker-compose 的处理方式
 
-推荐**不把 compose 文件当 galaxy-ops 模板**，而是用 Docker Compose 原生 `${VAR}`，让 `gops sys localize` 把系统值导出成同目录的 `.env`：
+推荐**不把 compose 文件当 galaxy-ops 模板**，而是用 Docker Compose 原生 `${VAR}`，让 `gops sys localize` 把系统值导出成系统根目录的 `.env`：
 
 ```text
 System（共享定义）              Ops Project（客户差异）
-  docker-compose.yml 用 ${VAR}（含 ${SEC_xxx} 密钥占位）
+  sys/docker-compose.yaml 用 ${VAR}（含 ${SEC_xxx} 密钥占位）
   sys/setting/vars.yml（默认）    values/value.yml（客户覆盖，版本化）
                                     ↓  gops sys localize
-                                    .env（仅非密钥配置，供 compose 消费）
+                                    .env（仅非密钥配置，供 compose 消费，位于系统根）
 
 密钥（密码/token）→ 运行时由 gops sys start 从 ~/.galaxy/sec_value.yml 注入子进程环境，不落盘
 ```
@@ -147,11 +147,13 @@ System（共享定义）              Ops Project（客户差异）
 
 理由：compose 文件保持“合法”，可随时 `docker compose config` 校验；**版本化的是值文件（配置），`.env` 只是非密钥配置的生成产物**；密钥走 `~/.galaxy/sec_value.yml`（`orion-sec` 运行时注入），不进版本库、不落盘。
 
-`gops sys new` 现在**默认生成**一个最小 `docker-compose.yml`（单 `app` 服务 + `${SERVICE_IMAGE}`/`${SERVICE_PORT}`/`${REPLICAS}`）和对应的 `sys/setting/vars.yml` 变量段，新系统开箱即带 compose 能力。
+`gops sys new` 现在**默认生成**一个最小 `sys/docker-compose.yaml`（单 `app` 服务 + `${SERVICE_IMAGE}`/`${SERVICE_PORT}`/`${REPLICAS}`）和对应的 `sys/setting/vars.yml` 变量段，新系统开箱即带 compose 能力。
+
+**文件位置可声明**：compose 属于「系统定义」，默认放在 `sys/docker-compose.yaml`；`gops sys` 按 `sys/{compose,docker-compose}.{yaml,yml}` → `<root>/{compose,docker-compose}.{yaml,yml}` 查找（`sys/` 优先）。无论放在哪，compose 的**项目目录都锚定在系统根**——项目名 = 系统根目录名、相对挂载与 `.env` 都相对系统根，`${VAR}` 的相对挂载写法不需要改。旧仓（compose 在根）不改动也能继续跑。
 
 完整示例见 [knowlege/docker-compose](./knowlege/docker-compose/)——它是一个**可直接运行的完整系统**（nginx + postgres + 卷 + 密钥占位）：
 
-- `docker-compose.yml`：共享定义，用 `${NGINX_TAG}`、`${HTTP_PORT}`、`${SEC_DB_PASSWORD}` 等占位
+- `sys/docker-compose.yaml`：共享定义，用 `${NGINX_TAG}`、`${HTTP_PORT}`、`${SEC_DB_PASSWORD}` 等占位
 - `sys/setting/vars.yml`：非密钥配置的 `system:` 变量段
 - `~/.galaxy/sec_value.yml`：全局密钥文件（`db_password` / `postgres_password` 等，运行时注入为 `${SEC_*}`），不随项目提交
 - **没有 `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml`**：这是纯 docker-compose 系统（三者缺失时分别按空处理）

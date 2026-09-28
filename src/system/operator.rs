@@ -386,7 +386,7 @@ pub mod tests {
         let root = &prj_path;
         // 应生成的文件
         assert!(root.join("sys-prj.yml").exists());
-        assert!(root.join("docker-compose.yml").exists());
+        assert!(root.join("sys/docker-compose.yaml").exists());
         assert!(root.join("version.txt").exists());
         assert!(root.join("sys/sys_model.yml").exists());
         assert!(root.join("sys/setting/vars.yml").exists());

@@ -1,7 +1,7 @@
 # 系统级变量定义（system 段，仅非密钥配置）
 #
 # `gops sys localize` 会把这些 system 变量合并后导出为 `.env`（KEY=VALUE），
-# 供同目录的 docker-compose.yml 里的 `${VAR}` 消费。
+# 供 compose 文件（默认 `sys/docker-compose.yaml`）里的 `${VAR}` 消费；`.env` 位于系统根。
 #
 # 说明：
 #   - 只有 `system:` 段的变量会进入 merged_vars.yml 并最终导出到 .env；

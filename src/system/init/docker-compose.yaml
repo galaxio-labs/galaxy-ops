@@ -1,7 +1,8 @@
 # 系统级 docker-compose 定义（由 `gops sys new` 生成，可按需修改）
 #
 # 约定：
-#   - 用 Docker Compose 原生 ${VAR} 占位，运行时由同目录 .env 提供值
+#   - 用 Docker Compose 原生 ${VAR} 占位，运行时由系统根目录的 .env 提供值
+#     （文件在 sys/ 下，但 compose 以系统根作为项目目录，所以 .env / 相对挂载都相对系统根）
 #   - .env 由 `gops sys localize` 从 sys/setting/vars.yml 的 system 段生成
 #   - 密钥（密码/token）用 ${SEC_xxx} 占位，运行时由 gops sys start 从 ~/.galaxy/sec_value.yml 注入，不落盘
 services:

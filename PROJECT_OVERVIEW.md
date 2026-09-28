@@ -76,7 +76,7 @@ galaxy-ops/
 - `operator.rs`：系统对象入口
 - `conf.rs`：`SysConf`（`test_envs`）与 `SysKind`（`gxl` / `docker-compose`）；`kind` 在 `SysDefine`（`sys_model.yml`）里，决定 `sys` 命令分派到 gx 还是 docker compose
 - `spec.rs` / `mod_list.rs`：系统定义与模块列表
-- `path.rs`：系统路径组织（`sys-prj.yml` / `sys_model.yml` / `mod_list.yml` / `setting/`）
+- `path.rs`：系统路径组织（`sys-prj.yml` / `sys_model.yml` / `mod_list.yml` / `setting/`）；含 compose 文件查找链 `sys/{compose,docker-compose}.{yaml,yml}` → `<root>/…`（内收布局优先）
 - `setting/`：系统设置、本地化与模板化（`export` / `localize` / `sys` / `templatize`）
 - `init/`：系统初始化模板（`_gal` / `workflows`）
 

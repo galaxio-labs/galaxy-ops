@@ -11,6 +11,19 @@ use crate::types::ValuePath;
 use getset::Getters;
 use orion_infra::path::{PathResult, ensure_path};
 
+/// `gops sys new` 脚手架默认产出的 compose 文件名。
+const DEFAULT_COMPOSE_FILE_NAME: &str = "docker-compose.yaml";
+
+/// compose 文件候选名，按 **docker compose 的发现优先级** 排列（同一目录内）：
+/// `compose.yaml` → `compose.yml` → `docker-compose.yaml` → `docker-compose.yml`。
+/// 与 docker 保持一致，避免 gops 选中的文件与 docker 自动发现的不是同一个。
+const COMPOSE_FILE_NAMES: [&str; 4] = [
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+];
+
 #[derive(Getters, Clone, Debug)]
 #[getset(get = "pub ")]
 pub struct SysTargetPaths {
@@ -66,6 +79,30 @@ impl SysOperatorPath {
     /// 获取系统目录路径 (sys/)
     pub fn sys_dir(&self) -> PathBuf {
         self.root.join("sys")
+    }
+
+    /// 脚手架生成的 compose 文件路径（`sys/docker-compose.yaml`）。
+    pub fn sys_compose_file(&self) -> PathBuf {
+        self.sys_dir().join(DEFAULT_COMPOSE_FILE_NAME)
+    }
+
+    /// 按优先级列出实际存在的 compose 文件：
+    /// `sys/{compose,docker-compose}.{yaml,yml}` → `<root>/{compose,docker-compose}.{yaml,yml}`。
+    ///
+    /// 结果非空时，第一项即为生效文件；多于一项说明 `sys/` 与根目录同时存在 compose
+    /// （内收布局优先），调用方应据此提示用户。
+    pub fn compose_candidates(&self) -> Vec<PathBuf> {
+        [self.sys_dir(), self.root.clone()]
+            .into_iter()
+            .flat_map(|dir| COMPOSE_FILE_NAMES.map(|name| dir.join(name)))
+            .filter(|path| path.is_file())
+            .collect()
+    }
+
+    /// 解析系统实际使用的 compose 文件（`compose_candidates` 的首项）。
+    /// 都不存在时返回 `None`，由调用方决定如何报错。
+    pub fn compose_file(&self) -> Option<PathBuf> {
+        self.compose_candidates().into_iter().next()
     }
     pub fn merged_vars_file(&self) -> PathBuf {
         self.root.join("sys").join(MERGED_VARS_YML)
@@ -204,6 +241,100 @@ mod tests {
         assert_eq!(
             paths.resolve_merged_vars_file(),
             dir.path().join("sys/merged_vars.yml")
+        );
+    }
+
+    #[test]
+    fn test_sys_compose_file_is_under_sys() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+
+        assert_eq!(
+            paths.sys_compose_file(),
+            dir.path().join("sys/docker-compose.yaml")
+        );
+    }
+
+    #[test]
+    fn test_compose_file_prefers_sys_dir_over_root() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("sys")).unwrap();
+        std::fs::write(dir.path().join("sys/docker-compose.yml"), "sys").unwrap();
+        std::fs::write(dir.path().join("docker-compose.yaml"), "root").unwrap();
+
+        assert_eq!(
+            paths.compose_file(),
+            Some(dir.path().join("sys/docker-compose.yml"))
+        );
+    }
+
+    #[test]
+    fn test_compose_file_prefers_yaml_over_yml_within_a_dir() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("sys")).unwrap();
+        std::fs::write(dir.path().join("sys/docker-compose.yml"), "yml").unwrap();
+        std::fs::write(dir.path().join("sys/docker-compose.yaml"), "yaml").unwrap();
+
+        assert_eq!(
+            paths.compose_file(),
+            Some(dir.path().join("sys/docker-compose.yaml"))
+        );
+    }
+
+    #[test]
+    fn test_compose_file_falls_back_to_legacy_root_layout() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+        std::fs::write(dir.path().join("docker-compose.yml"), "legacy").unwrap();
+
+        assert_eq!(
+            paths.compose_file(),
+            Some(dir.path().join("docker-compose.yml"))
+        );
+    }
+
+    #[test]
+    fn test_compose_file_none_when_absent() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+
+        assert_eq!(paths.compose_file(), None);
+        assert!(paths.compose_candidates().is_empty());
+    }
+
+    #[test]
+    fn test_compose_file_prefers_modern_compose_yaml_over_docker_compose() {
+        // 同一目录内按 docker 的发现优先级：compose.yaml > docker-compose.yaml，
+        // 保证 gops 选中的文件与 docker 自动发现的保持一致。
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+        std::fs::write(dir.path().join("docker-compose.yaml"), "legacy").unwrap();
+        std::fs::write(dir.path().join("compose.yaml"), "modern").unwrap();
+
+        assert_eq!(paths.compose_file(), Some(dir.path().join("compose.yaml")));
+    }
+
+    #[test]
+    fn test_compose_candidates_lists_sys_then_root() {
+        let dir = tempdir().unwrap();
+        let paths = SysOperatorPath::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("sys")).unwrap();
+        std::fs::write(dir.path().join("sys/docker-compose.yaml"), "sys").unwrap();
+        std::fs::write(dir.path().join("docker-compose.yml"), "root").unwrap();
+
+        assert_eq!(
+            paths.compose_candidates(),
+            vec![
+                dir.path().join("sys/docker-compose.yaml"),
+                dir.path().join("docker-compose.yml"),
+            ]
+        );
+        // 生效文件是内收布局那一份
+        assert_eq!(
+            paths.compose_file(),
+            Some(dir.path().join("sys/docker-compose.yaml"))
         );
     }
 }

@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.3] - 2026-09-28
+
+### 新增功能
+- **docker-compose 定义内收**：`gops sys new --kind docker-compose` 默认生成 `sys/docker-compose.yaml`；`gops sys` 按 `sys/{compose,docker-compose}.{yaml,yml}` → `<root>/…` 查找（`sys/` 优先）
+
+### 改进优化
+- compose 项目目录始终锚定系统根（项目名 = 根目录名，相对挂载与 `.env` 相对根）：`sys/` 布局显式 `-f` + `--project-directory` 并合并同目录 `<stem>.override.{yaml,yml}`（显式 `-f` 会关闭 docker 的 override 自动合并）；旧布局（compose 在根）不传全局参数，保留 override 自动合并与 `COMPOSE_FILE` 语义
+
+### 重大变更
+- `kind: gxl` 系统脚手架示例 compose 迁到 `sys/docker-compose.yaml`（原根目录），旧布局仍兼容
+
 ## [1.3.2] - 2026-09-27
 
 ### 新增功能

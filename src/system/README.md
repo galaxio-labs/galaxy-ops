@@ -86,7 +86,7 @@ gops sys download/install/uninstall/start/stop/status/diagnose
 纯 docker-compose 系统的密钥**不落盘、不进 `.env`**，用 `${SEC_xxx}` 占位 + 运行时注入：
 
 ```text
-docker-compose.yml        →  ${SEC_DB_PASSWORD}（原生占位）
+sys/docker-compose.yaml   →  ${SEC_DB_PASSWORD}（原生占位；位于 sys/ 或旧布局的系统根）
 sys localize             →  .env = 系统默认值（merged_vars.yml）+ values/sys_value.yml + values/value.yml 覆盖（仅非密钥，后两者可只写要覆盖的项）
 sys start (compose)      →  orion_sec::load_sec_dict()
                             读 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）
@@ -105,12 +105,12 @@ sys start (compose)      →  orion_sec::load_sec_dict()
 ```text
 <system-root>/
 ├── sys-prj.yml             # 系统配置（test_envs 依赖集）
-├── docker-compose.yml      # 系统级 docker-compose 定义（sys new 默认生成，用 ${VAR} 占位）
 ├── version.txt
 ├── _gal/
 ├── values/                 # 值文件目录（sys_value.yml 为注释模板：取消注释要覆盖的项即可；localize 后生成 .env，仅非密钥配置）
 └── sys/
     ├── sys_model.yml       # 系统定义（name / model 可选 / kind / vender；kind 决定命令分派）
+    ├── docker-compose.yaml # 纯 docker-compose 系统的 compose 定义（sys new 默认生成，用 ${VAR} 占位）
     ├── mod_list.yml        # 可选，缺失时视为空模块列表
     ├── merged_vars.yml    # 聚合变量（sys update 生成：模块变量 ⊕ 系统变量，需入库）
     ├── setting/
@@ -118,6 +118,12 @@ sys start (compose)      →  orion_sec::load_sec_dict()
     │   └── list.yml        # 可选，按模块的本地化列表；纯 docker-compose 系统可省略
     └── workflows/          # 可选，GXL 运维流；纯 docker-compose 系统可省略
 ```
+
+compose 属于「系统定义」，默认随 `sys/` 一起内收。`gops sys` 按
+`sys/{compose,docker-compose}.{yaml,yml}` → `<root>/{compose,docker-compose}.{yaml,yml}`
+查找（`sys/` 优先，`compose.*` 与 docker 自身的发现优先级一致）。**无论文件放在哪，
+项目目录都锚定在系统根**：项目名 = 系统根目录名，相对挂载与 `.env` 都相对系统根，
+所以 compose 里的相对挂载写法不需要改。旧布局（compose 放在系统根）不改动也能继续跑。
 
 ## 关系
 

@@ -1,12 +1,16 @@
-# 共享的 docker-compose 定义（System 层）
+# 共享的 docker-compose 定义（System 层，放在 sys/ 下）
+#
+# 文件位置可声明：`gops sys` 默认在 sys/ 查找（sys/docker-compose.yaml），
+# 也兼容旧布局（compose 放在系统根）。无论放在哪，项目目录都锚定在系统根，
+# 因此项目名与相对挂载基准不变。
 #
 # 这是一个"合法"的 docker-compose 文件：始终可用 `docker compose config` 校验。
 # 所有随客户/环境变化的量都用 Compose 原生 `${VAR}` 占位，
-# 运行时由同目录下的 `.env` 提供值。
+# 运行时由系统根目录下的 `.env` 提供值。
 #
 # 值来源：
 #   - 配置（镜像 tag、端口、副本数、DB host）→ sys/setting/vars.yml（默认）+ values/value.yml（客户覆盖）
-#     └─ gops sys localize 生成 .env
+#     └─ gops sys localize 生成系统根目录的 .env
 #   - 密钥（密码/token）→ 用 ${SEC_xxx} 占位，运行时由 gops sys start 从 ~/.galaxy/sec_value.yml 注入，不落盘
 services:
   web:

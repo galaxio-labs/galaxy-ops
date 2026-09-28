@@ -2,6 +2,18 @@
 
 本文档面向从旧版 `galaxy-ops` 升级到当前版本的调用方，重点说明这次依赖升级带来的 API 迁移点，以及推荐的落地方式。
 
+## docker-compose 文件位置变更（1.3.3）
+
+docker-compose 系统的 compose 文件从系统**根目录**改为默认放在 **`sys/docker-compose.yaml`**（compose 属于「系统定义」，与 `sys/` 下其它定义同源）。
+
+- `gops sys new --kind docker-compose` 现在生成到 `sys/docker-compose.yaml`。
+- `gops sys` 的查找链：`sys/{compose,docker-compose}.{yaml,yml}` → `<root>/{compose,docker-compose}.{yaml,yml}`（`sys/` 优先；`compose.*` 与 docker 自身发现优先级一致）。
+- **语义不变**：无论文件放在哪，项目目录都锚定在系统根——项目名 = 系统根目录名，相对挂载与 `.env` 都相对系统根。
+- **向后兼容**：旧系统的 compose 保持放在根目录即可继续运行，无需改动；如需内收，直接 `git mv docker-compose.yml sys/docker-compose.yaml`。
+- **`.env` 位置不变**：仍在系统根。
+
+行为变更提醒：`kind: gxl` 系统的脚手架也会在 `sys/docker-compose.yaml` 生成一份示例 compose（旧版写 `<root>/docker-compose.yml`）。
+
 ## 迁移原则
 
 - 不回退到旧版 `orion_*` 依赖。

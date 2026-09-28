@@ -176,7 +176,7 @@ knowlege/docker-compose/
 cd example/knowlege/docker-compose
 # 可选：把全局密钥写到 ~/.galaxy/sec_value.yml（不在项目里）
 gops sys localize                # 合并系统默认值 + values/value.yml（客户覆盖），导出系统根的 .env
-cat .env                         # HTTP_PORT=8081 / REPLICAS=5 / ...（无密钥明文）
+cat .env                         # NGINX_TAG=1.27-alpine / HTTP_PORT=8081 / ...（无密钥明文）
 ```
 
 该系统的 `sys/sys_model.yml` 已标记 `kind: docker-compose`，因此 `gops sys` 的部署命令会自动映射到 `docker compose`，无需安装 gx：

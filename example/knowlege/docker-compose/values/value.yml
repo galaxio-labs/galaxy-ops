@@ -4,6 +4,6 @@
 #   sys/merged_vars.yml 的系统默认值 → values/sys_value.yml → values/value.yml → 系统根的 .env
 # 所以这里只写出与默认值不同的差异项即可。
 #
-# 下面用 web 的对外端口与副本数演示一次客户化（系统默认 8080 / 3）：
+# 下面演示两处客户化（系统默认 1.25-alpine / 8080）：
+NGINX_TAG: 1.27-alpine
 HTTP_PORT: 8081
-REPLICAS: 5

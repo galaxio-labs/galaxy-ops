@@ -10,5 +10,7 @@ services:
     image: ${SERVICE_IMAGE}
     ports:
       - "${SERVICE_PORT}:80"
+    # 注意：固定端口映射 + 多副本会端口冲突（同一宿主端口只能绑一次）。
+    # 如需 replicas>1，请去掉上面的 ports 固定映射，或改用端口区间（如 "8080-8083:80"）。
     deploy:
       replicas: ${REPLICAS}

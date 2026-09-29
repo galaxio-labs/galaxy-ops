@@ -527,7 +527,8 @@ fn join_row(
             }
         }
     }
-    line.trim_end().to_string()
+    // 不裁剪行尾：整表按列宽补齐，表头 / 分隔线 / 数据行等宽才能对齐。
+    line
 }
 
 #[cfg(test)]
@@ -868,5 +869,209 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&render_files_json(&rows)).unwrap();
         assert_eq!(parsed[0]["path"], "local/a.yml");
         assert_eq!(parsed[0]["state"], "created");
+    }
+
+    // ---- 对齐回归：整表（表头 / 分隔线 / 各数据行）必须等宽 ----
+
+    /// 断言表格每一行（含表头与分隔线）按字符计的宽度都等于首行。
+    fn assert_lines_same_char_width(table: &str) {
+        let mut lines = table.lines();
+        let first = lines
+            .next()
+            .expect("table has at least a header")
+            .chars()
+            .count();
+        for (i, line) in table.lines().enumerate() {
+            assert_eq!(
+                line.chars().count(),
+                first,
+                "第 {i} 行宽度与首行不一致: {line:?}"
+            );
+        }
+    }
+
+    /// 去掉 SGR（`ESC [ ... m`）转义序列，用于校验上色不改变显示宽度。
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\x1b' && it.peek() == Some(&'[') {
+                it.next();
+                for c in it.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// 覆盖四种状态、且最长单元格落在中间列（ORIGIN）与末列（STATE）的行。
+    fn sample_value_rows() -> Vec<ValueRow> {
+        vec![
+            ValueRow {
+                key: "CPU".into(),
+                initial: Some("1000".into()),
+                effective: Some("2000".into()),
+                origin: Some("mod-setting".into()),
+                mutability: Some("module".into()),
+                state: ValueState::Changed,
+            },
+            ValueRow {
+                key: "NEW".into(),
+                initial: None,
+                effective: Some("on".into()),
+                origin: Some("customer".into()),
+                mutability: Some("module".into()),
+                state: ValueState::Added,
+            },
+            ValueRow {
+                key: "GONE".into(),
+                initial: Some("x".into()),
+                effective: None,
+                origin: Some("customer".into()),
+                mutability: Some("system".into()),
+                state: ValueState::Removed,
+            },
+            ValueRow {
+                key: "SAME".into(),
+                initial: Some("1".into()),
+                effective: Some("1".into()),
+                origin: Some("customer".into()),
+                mutability: Some("immutable".into()),
+                state: ValueState::Same,
+            },
+        ]
+    }
+
+    #[test]
+    fn value_table_header_separator_and_rows_are_equal_width() {
+        // 回归（v2.0.9）：表头最后一格 `STATE` 比列宽短时，join_row 的 trim_end
+        // 会把补位一起裁掉，导致表头比分隔线 / 数据行短、列右边缘对不齐。
+        let table = render_table(&sample_value_rows(), false);
+        assert_lines_same_char_width(&table);
+
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(lines[1].chars().all(|c| c == '-'), "第二行应为分隔线");
+        assert_eq!(
+            lines[0].chars().count(),
+            lines[1].chars().count(),
+            "表头与分隔线必须等宽"
+        );
+    }
+
+    #[test]
+    fn file_table_header_separator_and_rows_are_equal_width() {
+        // STATE 列宽由最长的 `replaced`(8) 决定，而表头只有 5 —— 正是易错场景。
+        let rows = vec![
+            FileRow {
+                path: "local/a.yml".into(),
+                state: FileState::Created,
+            },
+            FileRow {
+                path: "topology/sinks/business.d/nginx.toml".into(),
+                state: FileState::Replaced,
+            },
+        ];
+        assert_lines_same_char_width(&render_file_table(&rows, false));
+    }
+
+    #[test]
+    fn empty_tables_are_still_aligned() {
+        assert_lines_same_char_width(&render_table(&[], false));
+        assert_lines_same_char_width(&render_file_table(&[], false));
+    }
+
+    #[test]
+    fn coloring_does_not_change_display_width() {
+        // 上色只插入 ANSI 转义；剥掉后应与无色版本逐字符一致，且仍等宽。
+        let vrows = sample_value_rows();
+        let plain = render_table(&vrows, false);
+        let colored = render_table(&vrows, true);
+        assert!(colored.contains('\x1b'), "上色输出应含 ANSI 转义");
+        assert_eq!(strip_ansi(&colored), plain);
+        assert_lines_same_char_width(&strip_ansi(&colored));
+
+        let frows = vec![FileRow {
+            path: "local/a.yml".into(),
+            state: FileState::Created,
+        }];
+        assert_eq!(
+            strip_ansi(&render_file_table(&frows, true)),
+            render_file_table(&frows, false)
+        );
+    }
+
+    #[test]
+    fn truncate_boundary_keeps_max_cell_and_marks_overflow() {
+        let exact = "x".repeat(MAX_CELL);
+        assert_eq!(truncate(&exact), exact);
+        assert_eq!(truncate(&exact).chars().count(), MAX_CELL);
+
+        let cut = truncate(&"x".repeat(MAX_CELL + 10));
+        assert_eq!(cut.chars().count(), MAX_CELL);
+        assert!(cut.ends_with('…'));
+
+        // 超长键被截断后仍不撑破表格。
+        let rows = vec![ValueRow {
+            key: "x".repeat(MAX_CELL + 10),
+            initial: Some("1".into()),
+            effective: Some("2".into()),
+            origin: Some("customer".into()),
+            mutability: Some("module".into()),
+            state: ValueState::Changed,
+        }];
+        assert_lines_same_char_width(&render_table(&rows, false));
+    }
+
+    #[test]
+    fn missing_side_renders_dash_placeholder() {
+        let rows = vec![
+            ValueRow {
+                key: "ADD".into(),
+                initial: None,
+                effective: Some("v".into()),
+                origin: Some("customer".into()),
+                mutability: Some("module".into()),
+                state: ValueState::Added,
+            },
+            ValueRow {
+                key: "GONE".into(),
+                initial: Some("v".into()),
+                effective: None,
+                origin: Some("customer".into()),
+                mutability: Some("system".into()),
+                state: ValueState::Removed,
+            },
+        ];
+        let table = render_table(&rows, false);
+        let add = table
+            .lines()
+            .find(|l| l.starts_with("ADD"))
+            .expect("ADD 行");
+        let gone = table
+            .lines()
+            .find(|l| l.starts_with("GONE"))
+            .expect("GONE 行");
+        assert_eq!(add.matches('-').count(), 1, "Added 行：INITIAL 列为 -");
+        assert_eq!(gone.matches('-').count(), 1, "Removed 行：EFFECTIVE 列为 -");
+    }
+
+    #[test]
+    fn json_of_empty_rows_is_empty_array() {
+        assert_eq!(render_json(&[]), "[]");
+        assert_eq!(render_files_json(&[]), "[]");
+    }
+
+    #[test]
+    fn sys_diff_json_with_empty_inputs_has_all_buckets() {
+        let v: serde_json::Value =
+            serde_json::from_str(&render_sys_diff_json(&[], &[], &[])).unwrap();
+        assert_eq!(v["system"].as_array().unwrap().len(), 0);
+        assert_eq!(v["modules"].as_array().unwrap().len(), 0);
+        assert_eq!(v["files"].as_array().unwrap().len(), 0);
     }
 }

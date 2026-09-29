@@ -218,10 +218,14 @@ pub fn render_json_models(changes: &[(String, Vec<ValueRow>)]) -> String {
     serde_json::to_string_pretty(&arr).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// `gops sys diff --json`：`{ "system": [...], "modules": [{ "module": ..., "changes": [...] }] }`。
+/// `gops sys diff --json`：`{ "system": [...], "modules": [...], "files": [{ "target": …, "changes": [...] }] }`。
 ///
-/// 系统层与各模块分组分开，便于脚本按范围消费。
-pub fn render_sys_diff_json(system: &[ValueRow], modules: &[(String, Vec<ValueRow>)]) -> String {
+/// 系统层、各模块分组与文件覆盖分组分开，便于脚本按范围消费；均**只含有变更的项**。
+pub fn render_sys_diff_json(
+    system: &[ValueRow],
+    modules: &[(String, Vec<ValueRow>)],
+    files: &[(String, Vec<FileRow>)],
+) -> String {
     let modules_json: Vec<serde_json::Value> = modules
         .iter()
         .filter(|(_, rows)| !rows.is_empty())
@@ -232,9 +236,20 @@ pub fn render_sys_diff_json(system: &[ValueRow], modules: &[(String, Vec<ValueRo
             })
         })
         .collect();
+    let files_json: Vec<serde_json::Value> = files
+        .iter()
+        .filter(|(_, rows)| !rows.is_empty())
+        .map(|(target, rows)| {
+            serde_json::json!({
+                "target": target,
+                "changes": rows.iter().map(FileRow::to_json).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     let out = serde_json::json!({
         "system": system.iter().map(ValueRow::to_json).collect::<Vec<_>>(),
         "modules": modules_json,
+        "files": files_json,
     });
     serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
 }
@@ -314,6 +329,15 @@ impl FileRow {
 ///
 /// 根不存在或不是目录时返回空。用于 localize 前后比对，得知哪些文件**新增/替换**。
 pub fn snapshot_tree(root: &Path) -> BTreeMap<String, String> {
+    snapshot_tree_filtered(root, &|_| true)
+}
+
+/// 目录快照（带过滤）：与 [`snapshot_tree`] 相同，但只收录 `keep` 为真的文件
+/// （如按模板的 include/exclude 过滤真正的渲染源）。
+pub fn snapshot_tree_filtered(
+    root: &Path,
+    keep: &dyn Fn(&Path) -> bool,
+) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     if !root.is_dir() {
         return map;
@@ -326,6 +350,9 @@ pub fn snapshot_tree(root: &Path) -> BTreeMap<String, String> {
             continue;
         }
         let path = entry.path();
+        if !keep(path) {
+            continue;
+        }
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
@@ -410,6 +437,11 @@ pub fn print_file_changes(
     after: &BTreeMap<String, String>,
 ) -> usize {
     let rows = diff_files(before, after);
+    print_file_rows(label, &rows)
+}
+
+/// 打印已算好的文件变更表（`rows` 为空时什么都不打）；返回行数。
+pub fn print_file_rows(label: &str, rows: &[FileRow]) -> usize {
     if rows.is_empty() {
         return 0;
     }
@@ -418,7 +450,7 @@ pub fn print_file_changes(
     } else {
         println!("文件变更 ({} 项) @ {label}:", rows.len());
     }
-    print!("{}", render_file_table(&rows, use_color()));
+    print!("{}", render_file_table(rows, use_color()));
     rows.len()
 }
 
@@ -683,14 +715,32 @@ mod tests {
                 }],
             ),
         ];
+        let files = vec![
+            (
+                "…/warp-fusion/local ← sys/setting/warp-fusion".to_string(),
+                vec![FileRow {
+                    path: "models/rules/01-stats/nginx_ip_stats.wfl".into(),
+                    state: FileState::Created,
+                }],
+            ),
+            ("empty".to_string(), Vec::new()),
+        ];
         let parsed: serde_json::Value =
-            serde_json::from_str(&render_sys_diff_json(&system, &modules)).unwrap();
+            serde_json::from_str(&render_sys_diff_json(&system, &modules, &files)).unwrap();
         assert_eq!(parsed["system"][0]["key"], "A");
         // 空分组被过滤，只留 warp-parse
         let mods = parsed["modules"].as_array().unwrap();
         assert_eq!(mods.len(), 1);
         assert_eq!(mods[0]["module"], "warp-parse");
         assert_eq!(mods[0]["changes"][0]["key"], "CPU");
+        // 文件覆盖分组：空分组同样被过滤
+        let fs = parsed["files"].as_array().unwrap();
+        assert_eq!(fs.len(), 1);
+        assert_eq!(
+            fs[0]["target"],
+            "…/warp-fusion/local ← sys/setting/warp-fusion"
+        );
+        assert_eq!(fs[0]["changes"][0]["state"], "created");
     }
 
     #[test]
@@ -743,6 +793,45 @@ mod tests {
         let before = snapshot_tree(tmp.path());
         let after = snapshot_tree(tmp.path());
         assert!(diff_files(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn filtered_snapshot_honours_keep() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("data")).unwrap();
+        std::fs::write(tmp.path().join("keep.toml"), "k").unwrap();
+        std::fs::write(tmp.path().join("data/drop.toml"), "d").unwrap();
+        // 过滤掉 data/ 下的文件（模拟 spec/data 被 exclude）
+        let snap = snapshot_tree_filtered(tmp.path(), &|p: &Path| {
+            !p.components().any(|c| c.as_os_str() == "data")
+        });
+        assert!(snap.contains_key("keep.toml"));
+        assert!(!snap.contains_key("data/drop.toml"));
+        assert_eq!(snap.len(), 1);
+    }
+
+    #[test]
+    fn override_diff_classifies_created_and_replaced() {
+        // 覆盖层（setting）相对默认层（模块 spec）
+        let base = snapshot_of(&[("schemas/windows.toml", "spec"), ("conf/a.toml", "spec")]);
+        let overlay = snapshot_of(&[
+            ("schemas/windows.toml", "setting"),
+            ("rules/new.wfl", "new"),
+        ]);
+        let rows = diff_files(&base, &overlay);
+        let by: std::collections::BTreeMap<&str, FileState> =
+            rows.iter().map(|r| (r.path(), r.state())).collect();
+        assert_eq!(by.get("schemas/windows.toml"), Some(&FileState::Replaced));
+        assert_eq!(by.get("rules/new.wfl"), Some(&FileState::Created));
+        // 仅默认层有（模块自带）的文件不算覆盖
+        assert!(!by.contains_key("conf/a.toml"));
+    }
+
+    fn snapshot_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(p, c)| (p.to_string(), hash_bytes(c.as_bytes())))
+            .collect()
     }
 
     #[test]

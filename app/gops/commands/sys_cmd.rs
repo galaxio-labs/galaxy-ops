@@ -4,10 +4,11 @@ use std::process::Command;
 use clap::{Args, Parser};
 use derive_getters::Getters;
 use dialoguer::Select;
-use galaxy_ops::const_vars::{SETTING_DIR, USER_VALUE_FILE, VALUE_DIR};
+use galaxy_ops::const_vars::{SETTING_DIR, SPEC_DIR, USER_VALUE_FILE, VALUE_DIR};
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::ModelSTD;
+use galaxy_ops::module::model::MMOperator;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::project::load_value_file;
 use galaxy_ops::report;
@@ -20,7 +21,7 @@ use galaxy_ops::system::{SysKind, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_infra::path::ensure_path;
 use orion_variate::update::DownloadOptions;
-use orion_vars::vars::{OriginDict, ValueDict};
+use orion_vars::vars::{EnvDict, EnvEvalable, OriginDict, ValueDict};
 
 use crate::commands::common::DebugLogArgs;
 use crate::commands::gx_dispatch;
@@ -32,6 +33,19 @@ fn resolve_sys_value_path(sys_dir: &Path) -> SysValuePaths {
         Some(dir) => SysValuePaths::from(dir),
         None => SysValuePaths::from(sys_dir.to_path_buf()).join(VALUE_DIR),
     }
+}
+
+/// 已加载的模块视图：值比对与文件比对共用**一次**加载。
+struct SysModuleView {
+    name: String,
+    /// 模块内容目录（`sys/<model>/mods/<mod>`，或旧布局）。
+    root: PathBuf,
+    mm: MMOperator,
+}
+
+/// 路径比较：忽略重复分隔符/尾随分隔符（`components()` 归一化）。
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.components().eq(b.components())
 }
 
 // === 参数定义 ===
@@ -400,7 +414,8 @@ impl SysCommandHandler {
         let (initial, dict) = Self::sys_value_layers(&spec, &val_path)?;
         // 系统层 + 各模块层（`sys/mod_list.yml`）：localize 会逐模块消费 `values/<mod>/`
         let sys_rows = Self::value_rows(&initial, &dict);
-        let mut module_rows = Self::sys_module_value_changes(&spec, &val_path, &dict)?;
+        let modules = Self::sys_modules(&spec);
+        let mut module_rows = Self::module_value_changes(&modules, &val_path, &dict)?;
         if let Some(only) = &args.module {
             module_rows.retain(|(name, _)| name == only);
         }
@@ -466,13 +481,24 @@ impl SysCommandHandler {
         modules: &[(String, Vec<report::ValueRow>)],
         json: bool,
     ) {
+        Self::print_sys_diff(sys_rows, modules, &[], json);
+    }
+
+    /// 打印值变更（系统层 + 各模块）+ 文件覆盖。
+    fn print_sys_diff(
+        sys_rows: &[report::ValueRow],
+        modules: &[(String, Vec<report::ValueRow>)],
+        files: &[(String, Vec<report::FileRow>)],
+        json: bool,
+    ) {
         if json {
-            println!("{}", report::render_sys_diff_json(sys_rows, modules));
+            println!("{}", report::render_sys_diff_json(sys_rows, modules, files));
             return;
         }
         let color = report::use_color();
         let has_module = modules.iter().any(|(_, rows)| !rows.is_empty());
-        if sys_rows.is_empty() && !has_module {
+        let has_file = files.iter().any(|(_, rows)| !rows.is_empty());
+        if sys_rows.is_empty() && !has_module && !has_file {
             println!("[OK] 值无覆盖（全部取系统默认值）");
             return;
         }
@@ -487,6 +513,9 @@ impl SysCommandHandler {
             println!("[mod: {name}] 值变更 ({} 项):", rows.len());
             print!("{}", report::render_table(rows, color));
         }
+        for (target, rows) in files {
+            report::print_file_rows(target, rows);
+        }
     }
 
     /// 取「非未变更」的值行（供 diff / localize 复用）。
@@ -497,44 +526,108 @@ impl SysCommandHandler {
             .collect()
     }
 
-    /// 系统内各模块（`sys/mod_list.yml`）的值变更。
+    /// 加载系统内各模块（`sys/mod_list.yml`）的内容；值/文件比对共用，避免重复加载。
+    fn sys_modules(spec: &SysOperator) -> Vec<SysModuleView> {
+        let mut out = Vec::new();
+        for mref in spec.sys_spec().mod_list().mods() {
+            if !mref.is_enable() {
+                continue;
+            }
+            let Some(root) = mref.content_dir().cloned() else {
+                eprintln!(
+                    "[WARN] 模块 {} 尚无内容（未下载？先 `gops sys update`）；跳过",
+                    mref.name()
+                );
+                continue;
+            };
+            match mref.get_target_spec() {
+                Ok(Some(mm)) => out.push(SysModuleView {
+                    name: mref.name().clone(),
+                    root,
+                    mm,
+                }),
+                Ok(None) => {}
+                Err(e) => eprintln!("[WARN] 模块 {} 加载失败：{e}；跳过", mref.name()),
+            }
+        }
+        out
+    }
+
+    /// 各模块的值变更。
     ///
     /// 初始层 = 模块默认值（`sys/<model>/mods/<mod>/vars.yml`，`mod-default`）；
     /// 生效层 = 默认值 ⊕ `values/<mod>/value.yml`(`mod-cust`) ⊕ `values/<mod>/mod_value.yml`(`mod-setting`)
     ///          ⊕ 系统层 `sys_dict`（按其自身 origin 并入，只影响同名键）。
     ///
     /// 与 `ModuleSpecRef::sys_localize` 的消费路径一致（见 `src/module/refs.rs`）。
-    fn sys_module_value_changes(
-        spec: &SysOperator,
+    fn module_value_changes(
+        modules: &[SysModuleView],
         val_path: &SysValuePaths,
         sys_dict: &OriginDict,
     ) -> MainResult<Vec<(String, Vec<report::ValueRow>)>> {
         let mut out = Vec::new();
-        for mref in spec.sys_spec().mod_list().mods() {
-            if !mref.is_enable() {
+        for m in modules {
+            let mod_root = val_path.root().join(&m.name);
+            let (initial, effective) =
+                galaxy_ops::project::mod_value_layers(m.mm.vars(), &mod_root, sys_dict.clone())?;
+            out.push((m.name.clone(), Self::value_rows(&initial, &effective)));
+        }
+        Ok(out)
+    }
+
+    /// 文件覆盖层：`sys/setting/<mod>/**` 相对模块 `<mod>/spec/**` 的**新增 / 替换**。
+    ///
+    /// localize 会把 setting 层渲染进模块的 `local/`（模块自身的 `spec/` 也渲染进去），
+    /// 所以「setting 覆盖了模块默认的哪些文件」就是这个系统的**文件级配置差异**。
+    /// 纯路径 + 内容比对：不需要渲染，也不依赖上一次 localize 的磁盘状态。
+    fn sys_file_overrides(
+        modules: &[SysModuleView],
+        spec: &SysOperator,
+        evaled: &ValueDict,
+    ) -> Vec<(String, Vec<report::FileRow>)> {
+        let mut out = Vec::new();
+        for (entry, ms) in spec.sys_spec().setting().list().dicts() {
+            if !*ms.enable() {
                 continue;
             }
-            if mref.content_dir().is_none() {
+            // 路径模板（`${GXL_PRJ_ROOT}` 等）需用展开后的值
+            let lv = ms.localize().clone().env_eval(evaled);
+            let src_dir = PathBuf::from(lv.src());
+            let dst_dir = PathBuf::from(lv.dst());
+            let Some(mod_root) = dst_dir.parent() else {
+                continue;
+            };
+            if !src_dir.is_dir() {
                 eprintln!(
-                    "[WARN] 模块 {} 尚无内容（未下载？先 `gops sys update`）；跳过其值变更",
-                    mref.name()
+                    "[WARN] setting 条目 {entry} 的源目录不存在：{}；跳过其文件覆盖",
+                    src_dir.display()
                 );
                 continue;
             }
-            let mm = match mref.get_target_spec() {
-                Ok(Some(mm)) => mm,
-                Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("[WARN] 模块 {} 加载失败：{e}；跳过其值变更", mref.name());
-                    continue;
-                }
-            };
-            let mod_root = val_path.root().join(mref.name());
-            let (initial, effective) =
-                galaxy_ops::project::mod_value_layers(mm.vars(), &mod_root, sys_dict.clone())?;
-            out.push((mref.name().clone(), Self::value_rows(&initial, &effective)));
+            // 与 localize 一致：只比较模块 `spec/` 中真正会被渲染的文件
+            // （应用模块 `setting.yml` 的 include/exclude）
+            let tpl = modules
+                .iter()
+                .find(|m| same_path(&m.root, mod_root))
+                .and_then(|m| m.mm.setting().as_ref())
+                .and_then(|s| s.localize().clone())
+                .and_then(|x| x.templatize_path().clone())
+                .map(|x| x.export_paths(mod_root))
+                .unwrap_or_default();
+            let keep = |p: &Path| tpl.is_include(p) && !tpl.is_exclude(p);
+            let base = report::snapshot_tree_filtered(&mod_root.join(SPEC_DIR), &keep);
+            let overlay = report::snapshot_tree(&src_dir);
+            let rows = report::diff_files(&base, &overlay);
+            out.push((
+                format!(
+                    "{} ← {}",
+                    report::display_path(&dst_dir),
+                    report::display_path(&src_dir)
+                ),
+                rows,
+            ));
         }
-        Ok(out)
+        out
     }
 
     pub async fn handle_diff(args: SysDiffArgs) -> MainResult<()> {
@@ -545,8 +638,15 @@ impl SysCommandHandler {
         let val_path = resolve_sys_value_path(&current_dir);
         let (initial, effective) = Self::sys_value_layers(&spec, &val_path)?;
         let sys_rows = Self::value_rows(&initial, &effective);
-        let module_rows = Self::sys_module_value_changes(&spec, &val_path, &effective)?;
-        Self::print_value_changes(&sys_rows, &module_rows, args.json);
+        let modules = Self::sys_modules(&spec);
+        let module_rows = Self::module_value_changes(&modules, &val_path, &effective)?;
+        // 文件覆盖的路径模板需展开（`${GXL_PRJ_ROOT}` 等）
+        let evaled = effective
+            .clone()
+            .env_eval(&EnvDict::default())
+            .export_dict();
+        let file_rows = Self::sys_file_overrides(&modules, &spec, &evaled);
+        Self::print_sys_diff(&sys_rows, &module_rows, &file_rows, args.json);
         Ok(())
     }
 

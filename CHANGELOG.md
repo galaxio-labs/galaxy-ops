@@ -5,6 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.9] - 2026-09-30
+
+### 新增功能
+- **`gops sys diff` 呈现文件覆盖层**：对 gxl 系统，除值以外还列出「`sys/setting/<mod>/**` 相对模块 `<mod>/spec/**`」的**新增（`created`）/ 替换（`replaced`）** 文件——即 setting 层覆盖/新增了模块默认的哪些文件（localize 会把两者都渲染进 `local/`）。标头同为 `<输出 ← 源>`。
+  - 纯**路径 + 内容（sha256）**比对：无需渲染，也不依赖上一次 localize 的磁盘状态；模块 `setting.yml` 的 `include/exclude`（如 `spec/data`、`spec/.run`）会与 localize 一致地参与过滤。
+  - `--json` 新增 `files` 字段：`[{ "target": "<输出 ← 源>", "changes": [{ "path", "state" }] }]`（只含有变更的分组）。
+
 ## [2.0.8] - 2026-09-30
 
 ### 变更

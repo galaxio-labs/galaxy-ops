@@ -126,6 +126,23 @@ CPU  1000     2000       mod-setting  module      changed
 - 模块内容未下载（`sys/<model>/mods/<mod>` 缺失）时打 `[WARN]` 并跳过——先 `gops sys update`。
 - 值文件键**大小写不敏感**（加载时归一化为大写）；`sys diff --json` 为 `{ "system": [...], "modules": [{ "module": …, "changes": [...] }] }`，只含有变更的分组。
 
+### 文件覆盖层（`sys diff`）
+
+`sys diff` 还会列出**文件级的覆盖**：`sys/setting/<mod>/**` 相对模块 `<mod>/spec/**` 的**新增 / 替换**（localize 会把 setting 层与模块 `spec/` 都渲染进 `local/`，所以这就是「setting 覆盖了模块默认的哪些文件」）：
+
+```text
+文件变更 (6 项) @ sys/arm-mac14-host/mods/warp-fusion/local ← sys/setting/warp-fusion:
+FILE                                          STATE
+------------------------------------------------------
+models/rules/01-stats/nginx_ip_stats.wfl      created
+models/schemas/nginx.wfs                      created
+models/schemas/windows.toml                   replaced
+topology/sinks/business.d/nginx.toml          created
+```
+
+- 纯**路径 + 内容（sha256）**比对：不需要渲染，也不依赖上一次 localize 的磁盘状态（区别于 `localize` 末尾的表，后者报的是“本次磁盘变动”）。
+- `--json` 的 `files` 字段：`[{ "target": "<输出 ← 源>", "changes": [{ "path", "state" }] }]`。
+
 ## 文件变更表（`localize` 末尾）
 
 `localize` 除写值与 `.env` 外，还会**渲染文件**（sys setting 模板 `src` → `dst`；mod 为 `spec/` → `local/`）。落地后打印本次**新增 / 替换**的文件表：

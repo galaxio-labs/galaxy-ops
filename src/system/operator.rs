@@ -193,6 +193,31 @@ impl SysOperator {
         self.paths.resolve_merged_vars_file().exists()
     }
 
+    /// 变量定义是否比已解析结果更新：`sys/merged_vars.yml` 缺失，或其定义输入
+    /// （`sys/setting/vars.yml` / `sys/mod_list.yml` / `sys/sys_model.yml`）比它更新。
+    /// 供 `gops sys check` 提示「改了定义未重新解析」（定义层陈旧，仅比对 `.env` 看不到）。
+    pub fn vars_need_resolve(&self) -> MainResult<bool> {
+        let merged = self.paths.resolve_merged_vars_file();
+        if !merged.exists() {
+            return Ok(true);
+        }
+        let merged_mtime = fs::metadata(&merged)
+            .source_resource()
+            .with(&merged)?
+            .modified()
+            .source_resource()
+            .with(&merged)?;
+        for input in self.paths.var_input_files() {
+            if let Ok(meta) = fs::metadata(&input)
+                && let Ok(t) = meta.modified()
+                && t > merged_mtime
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// 值文件模板：把可用系统变量以**注释**形式列出（默认值来自 `sys/merged_vars.yml`）。
     ///
     /// 取消注释并改写需要的项即可覆盖；全部保持注释时等价于空覆盖，不会钉住默认值。
@@ -716,5 +741,67 @@ pub mod tests {
             .with_rename("bit-common"),
         );
         Ok(SysOperator::new(mod_spec, res, prj_path.to_path_buf()))
+    }
+
+    fn set_mtime(path: &Path, t: std::time::SystemTime) {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for mtime");
+        f.set_modified(t).expect("set mtime");
+    }
+
+    fn compose_sys(name: &str) -> MainResult<(PathBuf, SysOperator)> {
+        let prj_path = PathBuf::from(SYS_OPERATORS_ROOT).join(name);
+        make_clean_path(&prj_path).source_logic()?;
+        let proj = SysOperator::make_new_docker(&prj_path, name)?.with_kind(SysKind::DockerCompose);
+        proj.save()?;
+        Ok((prj_path, proj))
+    }
+
+    #[test]
+    fn test_vars_need_resolve_by_presence_and_mtime() -> MainResult<()> {
+        test_init();
+        let (prj_path, proj) = compose_sys("sys_vars_stale")?;
+
+        // 未解析 → 需要解析
+        assert!(proj.vars_need_resolve()?);
+
+        let merged = prj_path.join("sys/merged_vars.yml");
+        std::fs::write(&merged, "system: []\n").source_resource()?;
+        let vars = prj_path.join("sys/setting/vars.yml");
+        assert!(vars.exists(), "scaffold should create sys/setting/vars.yml");
+
+        let base =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        // 把所有定义输入都钉到 base，再让 merged 更新
+        for f in proj.paths().var_input_files() {
+            set_mtime(&f, base);
+        }
+        set_mtime(&merged, base + std::time::Duration::from_secs(10));
+        // merged 比所有输入都新 → 不需要重解析
+        assert!(!proj.vars_need_resolve()?);
+
+        // vars.yml 改到比 merged 新 → 需要重解析
+        set_mtime(&vars, base + std::time::Duration::from_secs(20));
+        assert!(proj.vars_need_resolve()?);
+
+        // 重新从磁盘加载仍成立（不依赖内存缓存）
+        let reloaded = SysOperator::load(&prj_path)?;
+        assert!(reloaded.vars_need_resolve()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_var_input_files_only_existing() -> MainResult<()> {
+        test_init();
+        let (_prj_path, proj) = compose_sys("sys_var_inputs")?;
+        let files = proj.paths().var_input_files();
+        // 纯 compose：只有 setting/vars.yml 与 sys_model.yml（无 mod_list / list.yml）
+        assert!(files.iter().any(|p| p.ends_with("sys/setting/vars.yml")));
+        assert!(files.iter().any(|p| p.ends_with("sys/sys_model.yml")));
+        assert!(!files.iter().any(|p| p.ends_with("mod_list.yml")));
+        assert!(!files.iter().any(|p| p.ends_with("setting/list.yml")));
+        Ok(())
     }
 }

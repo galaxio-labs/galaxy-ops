@@ -75,6 +75,9 @@ pub struct DriftReport {
     status: DriftStatus,
     env_path: PathBuf,
     changes: Vec<ValueChange>,
+    /// 变量定义（`sys/setting/vars.yml` 等）比 `sys/merged_vars.yml` 更新：
+    /// 即"改了定义但未重新解析"，仅靠 `.env` 比对看不到。
+    vars_stale: bool,
 }
 
 impl DriftReport {
@@ -90,6 +93,10 @@ impl DriftReport {
     pub fn is_drifted(&self) -> bool {
         self.status == DriftStatus::Drifted
     }
+    /// 变量定义比已解析结果更新（需要重跑解析 / localize）。
+    pub fn vars_stale(&self) -> bool {
+        self.vars_stale
+    }
 }
 
 /// 检测漂移：重新计算本地化会产出的值，与已落盘的 `.env` 比对。
@@ -99,12 +106,15 @@ impl DriftReport {
 pub fn detect_drift(op: &SysOperator, sys_root: &Path) -> MainResult<DriftReport> {
     let env_path = sys_root.join(ENV_FILE);
     let expected = expected_env(op, sys_root)?;
+    // 已解析但定义输入更新 → 变量陈旧（仅在 merged 存在时有意义）
+    let vars_stale = op.has_resolved_vars() && op.vars_need_resolve()?;
 
     if !env_path.exists() {
         return Ok(DriftReport {
             status: DriftStatus::NoBaseline,
             env_path,
             changes: Vec::new(),
+            vars_stale,
         });
     }
 
@@ -122,6 +132,7 @@ pub fn detect_drift(op: &SysOperator, sys_root: &Path) -> MainResult<DriftReport
         status,
         env_path,
         changes,
+        vars_stale,
     })
 }
 
@@ -229,6 +240,38 @@ mod tests {
 
     fn describe(report: &DriftReport) -> Vec<String> {
         report.changes().iter().map(|c| c.describe()).collect()
+    }
+
+    fn set_mtime(path: &Path, t: std::time::SystemTime) {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn test_vars_stale_when_definition_newer_than_merged() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let op = setup(root);
+        std::fs::write(root.join(".env"), "SERVICE_PORT=8080\nREPLICAS=1\n").unwrap();
+
+        // 变量定义比 merged 更新 → 陈旧（仅比对 .env 看不到）
+        let vars = root.join("sys/setting/vars.yml");
+        std::fs::create_dir_all(root.join("sys/setting")).unwrap();
+        std::fs::write(&vars, "system: []\n").unwrap();
+        let base =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        set_mtime(root.join("sys/merged_vars.yml").as_path(), base);
+        set_mtime(&vars, base + std::time::Duration::from_secs(60));
+
+        let report = detect_drift(&op, root).assert();
+        assert!(report.vars_stale(), "definition newer → stale");
+        // .env 本身没变，状态仍是 Clean（漂移只在定义层）
+        assert_eq!(report.status(), DriftStatus::Clean);
+
+        // 定义回退到不新于 merged → 不再陈旧
+        set_mtime(&vars, base);
+        let report = detect_drift(&op, root).assert();
+        assert!(!report.vars_stale());
     }
 
     #[test]

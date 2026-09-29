@@ -78,9 +78,9 @@ pub struct SysPackageArgs {
     )]
     pub output: Option<String>,
 
-    /// 不按 git 入库文件打包，而是打包当前目录全部（默认只打 git 跟踪的入库文件）
-    #[arg(long = "no-git", default_value_t = false)]
-    pub no_git: bool,
+    /// 打当前目录**全部**（含制品与本地化产物，用于隔离网络交付）；默认只打 git 入库文件
+    #[arg(long = "full", alias = "no-git", default_value_t = false)]
+    pub full: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -429,8 +429,14 @@ impl SysCommandHandler {
                 .unwrap_or_else(|| PathBuf::from(format!("{name}-{version}.tar.gz"))),
         };
 
-        // 3. 打包：默认只含 git 入库文件；`--no-git` 打整目录
-        pack_system(&current_dir, &out_path, !args.no_git)?;
+        // 3. 打包：默认只含 git 入库文件（不含制品）；`--full` 打整目录（含制品，用于隔离网络）。
+        //    两种模式都排除 `sys-prj.yml` 的 `ignore:` 节。
+        pack_system(
+            &current_dir,
+            &out_path,
+            !args.full,
+            operator.conf().ignore(),
+        )?;
         println!("系统已打包: {}", out_path.display());
         Ok(())
     }
@@ -442,8 +448,9 @@ impl SysCommandHandler {
         let spec = SysOperator::load(&current_dir).err_conv()?;
         let val_path = resolve_sys_value_path(&current_dir);
 
-        // 默认：系统变量未解析时先 update（解析变量）。--only 跳过 update，直接用现有数据。
-        if !args.only && !spec.has_resolved_vars() {
+        // 默认：无条件先重解析变量（改 `sys/setting/vars.yml` 后一条命令即生效）。
+        // `--only` 跳过解析，直接用现有 `sys/merged_vars.yml`。
+        if !args.only {
             let options = DownloadOptions::from((false, ValueDict::default()));
             let accessor = galaxy_ops::accessor::accessor_for_default();
             spec.update_local(accessor, &current_dir, &options)
@@ -819,6 +826,14 @@ impl SysCommandHandler {
         let op = SysOperator::load(&current_dir).err_conv()?;
         let report = detect_drift(&op, &current_dir).err_conv()?;
 
+        // 变量定义比已解析结果更新（仅比对 `.env` 看不到）：先提醒。
+        if report.vars_stale() {
+            println!(
+                "[WARN] 变量定义（sys/setting/vars.yml 等）比 sys/merged_vars.yml 更新：可能尚未重新解析；\n\
+                 运行 `gops sys localize` 使其生效（或 `gops sys update`）。"
+            );
+        }
+
         match report.status() {
             DriftStatus::NoBaseline => {
                 println!("[INFO] 尚无 .env 基线（未 localize）；跳过漂移检查");
@@ -1090,13 +1105,33 @@ mod tests {
             },
             force: false,
             output: None,
-            no_git: false,
+            full: false,
         };
 
         assert_eq!(args.debug_level(), 1);
         assert_eq!(args.log_setting(), None);
         assert!(!args.force);
         assert!(args.output.is_none());
+        assert!(!args.full);
+    }
+
+    #[test]
+    fn test_sys_package_full_flag_parses() {
+        let cmd = SysCmd::try_parse_from(["gops", "package", "--full"]).unwrap();
+        match cmd {
+            SysCmd::Package(a) => assert!(a.full),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sys_package_legacy_no_git_alias_parses() {
+        // 旧名 `--no-git` 保留为隐藏别名（兼容 2.0.2）
+        let cmd = SysCmd::try_parse_from(["gops", "package", "--no-git"]).unwrap();
+        match cmd {
+            SysCmd::Package(a) => assert!(a.full),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

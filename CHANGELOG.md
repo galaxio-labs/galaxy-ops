@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.3] - 2026-09-29
+
+### 新增功能
+- **`gops sys package` 支持 `sys-prj.yml` 的 `ignore:` 节**：列出打包时排除的路径（glob，相对系统根），**两种模式（默认 / `--full`）都生效**；匹配文件自身或其任一祖先目录（目录级模式如 `sys/*/mods` 排除整棵子树，`*` 不跨 `/`）。`deliver.lock` 不受影响、仍随包分发；空节不写入 `sys-prj.yml`。
+
+### 变更
+- **`gops sys package` 打包模式命名**：`--no-git` 更名 **`--full`**（含义不变：打当前目录全部，**含制品**与本地化产物，用于隔离网络交付）；默认仍只打 git 入库文件（**不含制品**）。旧名 `--no-git` 保留为隐藏别名（兼容）。
+
+### Bug 修复
+- **`gops sys localize` 默认重解析变量（#24）**：此前仅在 `sys/merged_vars.yml` **缺失**时才解析，改完 `sys/setting/vars.yml` 后 `localize` 不生效、`sys check` 还报 `[OK]`（它只比对 `.env` ↔ “已解析值 ⊕ 值文件”）。现在 `localize`（默认）**无条件先解析**（即 `gops sys update` 的解析阶段），改完 `sys/setting/vars.yml` 一条命令即生效；`--only` 语义不变（始终跳过解析，用现有 `merged_vars.yml`）。
+- **`gops sys check` 暴露「定义比已解析结果更新」的陈旧**：输出 `[WARN] 变量定义... 比 sys/merged_vars.yml 更新`，提示运行 `gops sys localize`（仅提示，不改变退出码，避免 mtime 抖动误伤 CI）。
+
 ## [2.0.2] - 2026-09-29
 
 ### 新增功能

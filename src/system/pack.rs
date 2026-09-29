@@ -14,16 +14,24 @@ use crate::system::lock::DELIVER_LOCK_FILE;
 ///
 /// - `use_git = true`（默认）：只含 `git ls-files` 列出的**入库文件**（等价 `git archive` 的
 ///   “只含入库文件”，需在 git 仓库内运行），自然排除 `.gitignore` 忽略的产物；
-/// - `use_git = false`（`--no-git`）：打当前目录**全部**内容（仅跳过 `.git/`）。
+/// - `use_git = false`（`--full`）：打当前目录**全部**内容（含制品与本地化产物，仅跳过 `.git/`）。
 ///
+/// `ignore`（来自 `sys-prj.yml` 的 `ignore:` 节，glob 相对系统根）在**两种模式下都生效**。
 /// 符号链接按 `git archive` 语义**保留为符号链接**（两种模式一致，不解引用）。
-/// `deliver.lock` 作为交付清单始终随包分发。
-pub fn pack_system(root: &Path, out: &Path, use_git: bool) -> MainResult<()> {
+/// `deliver.lock` 作为交付清单始终随包分发（不受 `ignore` 影响）。
+pub fn pack_system(root: &Path, out: &Path, use_git: bool, ignore: &[String]) -> MainResult<()> {
+    let patterns = compile_ignore(ignore)?;
+
     let mut files = if use_git {
         git_tracked_files(root)?
     } else {
-        walk_files(root)?
+        walk_files(root, &patterns)?
     };
+
+    // 两种模式都应用 `sys-prj.yml` 的 ignore（匹配文件自身或其任一祖先目录）
+    if !patterns.is_empty() {
+        files.retain(|rel| !is_ignored(rel, &patterns));
+    }
 
     // 交付清单必须随包分发
     let lock_rel = PathBuf::from(DELIVER_LOCK_FILE);
@@ -37,6 +45,47 @@ pub fn pack_system(root: &Path, out: &Path, use_git: bool) -> MainResult<()> {
     Ok(())
 }
 
+/// 编译 ignore glob（去空白、去前导 `./`、去首尾 `/`；忽略空串）。
+fn compile_ignore(ignore: &[String]) -> MainResult<Vec<glob::Pattern>> {
+    let mut patterns = Vec::new();
+    for raw in ignore {
+        // 归一化常见 gitignore 写法：`/build`、`./artifacts/` 等应等价于 `build`、`artifacts`。
+        // 不归一化的话，glob 会把前导 `/`、`./` 当作字面量，模式静默失效。
+        let trimmed = raw.trim();
+        let no_dot = trimmed.strip_prefix("./").unwrap_or(trimmed);
+        let pat = no_dot.trim_matches('/');
+        if pat.is_empty() {
+            continue;
+        }
+        let pattern = glob::Pattern::new(pat).map_err(|e| {
+            MainReason::logic_detail(format!(
+                "invalid ignore pattern in sys-prj.yml: `{raw}` ({e})"
+            ))
+        })?;
+        patterns.push(pattern);
+    }
+    Ok(patterns)
+}
+
+/// `rel` 是否命中任一 ignore（匹配文件自身**或**其任一祖先目录，类 gitignore 的目录排除）。
+fn is_ignored(rel: &Path, patterns: &[glob::Pattern]) -> bool {
+    let opts = glob::MatchOptions {
+        // `*` 不跨 `/`（需显式用 `**`），贴近 gitignore 直觉
+        require_literal_separator: true,
+        ..Default::default()
+    };
+    let mut cur: Option<&Path> = Some(rel);
+    while let Some(p) = cur {
+        // glob 在 Windows 已把 `\` 当作分隔符，故不做替换（否则会破坏 Unix 上合法的反斜杠名）
+        let text = p.to_string_lossy();
+        if patterns.iter().any(|pat| pat.matches_with(&text, opts)) {
+            return true;
+        }
+        cur = p.parent().filter(|q| !q.as_os_str().is_empty());
+    }
+    false
+}
+
 /// `git ls-files`：列出系统根目录里入库（被跟踪）的相对路径。
 fn git_tracked_files(root: &Path) -> MainResult<Vec<PathBuf>> {
     let out = std::process::Command::new("git")
@@ -46,13 +95,13 @@ fn git_tracked_files(root: &Path) -> MainResult<Vec<PathBuf>> {
         .output()
         .map_err(|e| {
             MainReason::logic_detail(format!(
-                "run `git ls-files` failed: {e}（默认打包需要 git；若要打包整目录请用 `--no-git`）"
+                "run `git ls-files` failed: {e}（默认打包需要 git；若要打包整目录请用 `--full`）"
             ))
         })?;
     if !out.status.success() {
         return Err(MainReason::logic_detail(format!(
             "`git ls-files` 失败：默认打包需要系统根目录（{}）是 git 仓库；\
-             如需打包整目录请用 `--no-git`",
+             如需打包整目录请用 `--full`",
             root.display()
         )));
     }
@@ -64,13 +113,25 @@ fn git_tracked_files(root: &Path) -> MainResult<Vec<PathBuf>> {
         .collect())
 }
 
-/// 遍历目录：打全部内容（仅跳过 `.git/`）；文件与符号链接都收（目录不单独列）。
-fn walk_files(root: &Path) -> MainResult<Vec<PathBuf>> {
+/// 遍历目录：打全部内容（跳过 `.git/`，并**剪枝**被 ignore 的目录）；文件与符号链接都收。
+fn walk_files(root: &Path, patterns: &[glob::Pattern]) -> MainResult<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| e.depth() == 0 || e.file_name() != ".git")
-    {
+    for entry in WalkDir::new(root).into_iter().filter_entry(|e| {
+        if e.depth() == 0 {
+            return true;
+        }
+        if e.file_name() == ".git" {
+            return false;
+        }
+        // 剪枝：被 ignore 的目录不再深入（省 I/O，且忽略子树里的错误不会中断打包）
+        if !patterns.is_empty()
+            && e.file_type().is_dir()
+            && let Ok(rel) = e.path().strip_prefix(root)
+        {
+            return !is_ignored(rel, patterns);
+        }
+        true
+    }) {
         let entry = entry.map_err(|e| MainReason::logic_detail(format!("walk dir failed: {e}")))?;
         let ft = entry.file_type();
         if ft.is_file() || ft.is_symlink() {
@@ -210,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pack_no_git_includes_everything_and_deliver_lock() {
+    fn test_pack_full_includes_everything_and_deliver_lock() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("sys/arm-mac14-host/mods/m1/local")).unwrap();
@@ -220,7 +281,7 @@ mod tests {
         std::fs::write(root.join("deliver.lock"), "lock").unwrap();
 
         let out = dir.path().join("out.tar.gz");
-        pack_system(root, &out, false).unwrap();
+        pack_system(root, &out, false, &[]).unwrap();
 
         let names = tar_names(&out);
         assert!(names.iter().any(|n| n == "sys/merged_vars.yml"));
@@ -231,7 +292,7 @@ mod tests {
         );
         assert!(
             names.iter().any(|n| n == ".env"),
-            "--no-git 应含全部（含隐藏）"
+            "--full 应含全部（含隐藏）"
         );
         assert!(names.iter().any(|n| n == "deliver.lock"));
     }
@@ -250,7 +311,7 @@ mod tests {
         assert!(git_ok(root, &["add", "tracked.txt"]));
 
         let out = dir.path().join("out.tar.gz");
-        pack_system(root, &out, true).unwrap();
+        pack_system(root, &out, true, &[]).unwrap();
 
         let names = tar_names(&out);
         assert!(names.iter().any(|n| n == "tracked.txt"));
@@ -276,7 +337,7 @@ mod tests {
         std::fs::write(root.join("vars.yml"), "v2\n").unwrap();
 
         let out = dir.path().join("out.tar.gz");
-        pack_system(root, &out, true).unwrap();
+        pack_system(root, &out, true, &[]).unwrap();
         assert_eq!(tar_file_content(&out, "vars.yml").as_deref(), Some("v2\n"));
     }
 
@@ -294,7 +355,7 @@ mod tests {
         std::fs::write(root.join("a.txt"), "x").unwrap();
         let out = dir.path().join("out.tar.gz");
         assert!(
-            pack_system(root, &out, true).is_err(),
+            pack_system(root, &out, true, &[]).is_err(),
             "非 git 仓库时默认打包应报错"
         );
     }
@@ -308,7 +369,7 @@ mod tests {
         std::os::unix::fs::symlink("real.txt", root.join("link.txt")).unwrap();
 
         let out = dir.path().join("out.tar.gz");
-        pack_system(root, &out, false).unwrap();
+        pack_system(root, &out, false, &[]).unwrap();
 
         assert_eq!(
             tar_entry_type(&out, "link.txt"),
@@ -318,6 +379,119 @@ mod tests {
         assert_ne!(
             tar_entry_type(&out, "real.txt"),
             Some(tar::EntryType::Symlink)
+        );
+    }
+
+    #[test]
+    fn test_pack_ignore_excludes_subtree_in_full_mode() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sys/arm-mac14-host/mods/m1/local")).unwrap();
+        std::fs::write(root.join("sys/merged_vars.yml"), "a: 1\n").unwrap();
+        std::fs::write(root.join("sys/arm-mac14-host/mods/m1/local/big.bin"), "x").unwrap();
+        std::fs::write(root.join("sys/arm-mac14-host/mods/m1/spec.yml"), "s").unwrap();
+        // 两个组件在 sys 与 mods 之间：`sys/*/mods`（`*` 不跨 `/`）不应匹配它
+        std::fs::create_dir_all(root.join("sys/a/b/mods")).unwrap();
+        std::fs::write(root.join("sys/a/b/mods/deep.txt"), "d").unwrap();
+        std::fs::write(root.join(".env"), "K=V\n").unwrap();
+        std::fs::write(root.join("keep.txt"), "k").unwrap();
+
+        let out = dir.path().join("out.tar.gz");
+        // 目录级模式 `sys/*/mods` 应排除其下全部文件；`.env` 也排除
+        let ignore = vec!["sys/*/mods".to_string(), ".env".to_string()];
+        pack_system(root, &out, false, &ignore).unwrap();
+
+        let names = tar_names(&out);
+        assert!(
+            !names.iter().any(|n| n.contains("mods/m1")),
+            "ignore `sys/*/mods` 应排除其下所有文件: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "sys/a/b/mods/deep.txt"),
+            "`*` 不应跨 `/`，`sys/a/b/mods` 不应被 `sys/*/mods` 排除: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n == ".env"), "ignore 应排除 .env");
+        assert!(names.iter().any(|n| n == "sys/merged_vars.yml"));
+        assert!(names.iter().any(|n| n == "keep.txt"));
+    }
+
+    #[test]
+    fn test_pack_ignore_applies_in_git_mode() {
+        if !git_ok(Path::new("."), &["--version"]) {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sys/arm-mac14-host/mods/m1")).unwrap();
+        std::fs::write(root.join("sys/arm-mac14-host/mods/m1/spec.yml"), "s").unwrap();
+        std::fs::write(root.join("tracked.txt"), "t").unwrap();
+        assert!(git_ok(root, &["init", "-q"]));
+        assert!(git_ok(
+            root,
+            &["add", "tracked.txt", "sys/arm-mac14-host/mods/m1/spec.yml"]
+        ));
+
+        let out = dir.path().join("out.tar.gz");
+        let ignore = vec!["sys/*/mods".to_string()];
+        pack_system(root, &out, true, &ignore).unwrap();
+
+        let names = tar_names(&out);
+        assert!(names.iter().any(|n| n == "tracked.txt"));
+        assert!(
+            !names.iter().any(|n| n.contains("mods/m1")),
+            "git 模式下 ignore 也应生效: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_pack_invalid_ignore_pattern_errors() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let out = dir.path().join("out.tar.gz");
+        let ignore = vec!["[".to_string()];
+        let err = pack_system(root, &out, false, &ignore).expect_err("invalid pattern must fail");
+        assert!(
+            err.to_string().contains("invalid ignore pattern"),
+            "错误信息应指出 ignore 模式非法: {err}"
+        );
+    }
+
+    #[test]
+    fn test_pack_ignore_normalizes_leading_slash_and_dot() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("artifacts")).unwrap();
+        std::fs::write(root.join("artifacts/big.bin"), "x").unwrap();
+        std::fs::write(root.join(".env"), "K=V\n").unwrap();
+        std::fs::write(root.join("keep.txt"), "k").unwrap();
+
+        let out = dir.path().join("out.tar.gz");
+        // gitignore 风格写法：`/artifacts`、`./.env` 应等价于 `artifacts`、`.env`
+        let ignore = vec!["/artifacts".to_string(), "./.env".to_string()];
+        pack_system(root, &out, false, &ignore).unwrap();
+
+        let names = tar_names(&out);
+        assert!(!names.iter().any(|n| n.contains("artifacts")), "{names:?}");
+        assert!(!names.iter().any(|n| n == ".env"), "{names:?}");
+        assert!(names.iter().any(|n| n == "keep.txt"));
+    }
+
+    #[test]
+    fn test_pack_deliver_lock_never_ignored() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("deliver.lock"), "lock").unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+
+        let out = dir.path().join("out.tar.gz");
+        let ignore = vec!["deliver.lock".to_string()];
+        pack_system(root, &out, false, &ignore).unwrap();
+
+        let names = tar_names(&out);
+        assert!(
+            names.iter().any(|n| n == "deliver.lock"),
+            "deliver.lock 不应被 ignore 排除: {names:?}"
         );
     }
 }

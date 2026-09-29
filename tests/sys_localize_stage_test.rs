@@ -59,10 +59,11 @@ fn setup_system(home: &Path, root: &Path) -> PathBuf {
     assert!(out.status.success(), "sys new failed: {}", stderr(&out));
 
     let sys = root.join("demo");
+    // 变量定义写在 `sys/setting/vars.yml`（`localize` 会从它重解析出 `merged_vars.yml`）。
     // `BASE_URL` 含 `${DOMAIN}`（验证注入值与 `.env` 一样**展开**）；
     // `PATH` 故意设成不存在的路径：它必须**不被注入**（保留变量）。
     std::fs::write(
-        sys.join("sys/merged_vars.yml"),
+        sys.join("sys/setting/vars.yml"),
         "system:\n\
          - name: DOMAIN\n  value: example.test\n\
          - name: BASE_URL\n  value: \"http://${DOMAIN}:5432\"\n\

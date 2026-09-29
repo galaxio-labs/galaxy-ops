@@ -1,10 +1,9 @@
 use crate::const_vars::{
-    MERGED_VARS_YML, MOD_VALUE_FILE, SYS_MODLE_DEF_YML, SYS_VALUE_FILE, SYS_VARS_YML,
-    USED_READABLE_FILE,
+    MERGED_VARS_YML, MOD_LIST_YML, MOD_VALUE_FILE, SETTING_DIR, SYS_MODLE_DEF_YML, SYS_VALUE_FILE,
+    SYS_VARS_YML, USED_READABLE_FILE, VARS_YML,
 };
 use std::path::{Path, PathBuf};
 
-use crate::const_vars::{MOD_LIST_YML, VARS_YML};
 use crate::error::MainResult;
 use crate::internal_prelude::ErrorOwe;
 use crate::types::ValuePath;
@@ -125,6 +124,24 @@ impl SysOperatorPath {
             return legacy;
         }
         new_path
+    }
+
+    /// 影响 `sys/merged_vars.yml` 的本地定义文件（改动后需重新解析）；只返回实际存在的项。
+    ///
+    /// 只含真正的解析输入：`sys/setting/vars.yml`、`sys/mod_list.yml`、`sys/sys_model.yml`。
+    /// **不含 `sys/setting/list.yml`**——它是按模块的本地化目的地映射，不参与变量解析；
+    /// 而且 `update_local` 会在写 `merged_vars.yml` **之后**运行其迁移（重写 `list.yml`），
+    /// 若纳入会导致刚 localize 完 `sys check` 就误报“定义更新”。
+    pub fn var_input_files(&self) -> Vec<PathBuf> {
+        let sys = self.sys_dir();
+        [
+            sys.join(SETTING_DIR).join(VARS_YML),
+            sys.join(MOD_LIST_YML),
+            sys.join(SYS_MODLE_DEF_YML),
+        ]
+        .into_iter()
+        .filter(|p| p.is_file())
+        .collect()
     }
 
     /// 获取值目录路径 (values/)

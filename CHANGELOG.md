@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.8] - 2026-09-30
+
+### 变更
+- **localize 文件变更表标头改为「输出 ← 源」**：一次 localize 会有多个渲染目标——模块 `spec/` 与 `sys/setting/<mod>` **写入同一个 `local/`**。此前模块渲染的标签误用**模型名**（同名模型的模块标签完全相同）、setting 渲染用绝对路径，无法分辨某张表是哪一步、文件来自何处。现统一为 `<相对输出路径> ← <相对源路径>`（如 `…/mods/warp-fusion/local ← sys/setting/warp-fusion`），并把 `GXL_PRJ_ROOT`/当前目录前缀去掉，路径更短。
+
 ## [2.0.7] - 2026-09-30
 
 ### Bug 修复

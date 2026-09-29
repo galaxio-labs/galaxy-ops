@@ -131,15 +131,18 @@ CPU  1000     2000       mod-setting  module      changed
 `localize` 除写值与 `.env` 外，还会**渲染文件**（sys setting 模板 `src` → `dst`；mod 为 `spec/` → `local/`）。落地后打印本次**新增 / 替换**的文件表：
 
 ```text
-文件变更 (2 项) @ arm-mac14-host/local:
+文件变更 (2 项) @ sys/arm-mac14-host/mods/warp-fusion/local ← sys/setting/warp-fusion:
 FILE          STATE
 ----------------------
 artifact.yml  created
 depends.yml   replaced
 ```
 
+标头是 `<输出目录> ← <源模板>`：一次 localize 有多个渲染目标（模块 `spec/`、`sys/setting/<mod>`）会写入**同一个** `local/`，这样能看出每张表的来源。
+
 - 用 localize **前后内容指纹（sha256）比对**：清空输出树再重建不会把内容未变的文件误报为变更。
 - 只报 `created` / `replaced`；**删除不报**（重建输出树时属常态）。
+- 只列**变更**文件；未变的 setting 文件不出现在表里（同 `git diff` 语义）。
 - 需前后基线，故只在 `localize` 呈现；`diff` 仍只呈现值。
 
 ## 可选阶段流程（`localize` 扩展点）

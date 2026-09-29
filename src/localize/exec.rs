@@ -134,7 +134,11 @@ impl ModuleLocalizable<PathBuf> for LocalizeExecPath {
                 .render_path(self.src(), &self.dst, &value_file, &tpl_path)
                 .with(&ctx)?;
             crate::report::print_file_changes(
-                &self.dst.display().to_string(),
+                &format!(
+                    "{} ← {}",
+                    crate::report::display_path(self.dst()),
+                    crate::report::display_path(self.src())
+                ),
                 &file_before,
                 &crate::report::snapshot_tree(self.dst()),
             );

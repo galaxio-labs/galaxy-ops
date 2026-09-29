@@ -316,7 +316,11 @@ impl ModuleLocalizable<ModValuePaths> for MMOperator {
             .render_path(&spec_tpl, &local_path, &used_value_file, &tpl_path)
             .with(&ctx)?;
         crate::report::print_file_changes(
-            &format!("{}/local", self.model()),
+            &format!(
+                "{} ← {}",
+                crate::report::display_path(&local_path),
+                crate::report::display_path(&spec_tpl)
+            ),
             &file_before,
             &crate::report::snapshot_tree(&local_path),
         );

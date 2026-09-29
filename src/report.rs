@@ -402,7 +402,8 @@ pub fn render_files_json(rows: &[FileRow]) -> String {
 
 /// 在 localize 前后各取一次快照，打印文件变更表；返回变更项数（0 则不打任何东西）。
 ///
-/// `label` 非空时拼在表头（如模型名 / 输出目录），便于同一次 localize 多个目标时区分。
+/// `label` 非空时拼在表头；建议形如 `<输出目录> ← <源模板>`（用 [`display_path`] 缩短），
+/// 以便同一次 localize 多个渲染目标（模块 `spec/`、`sys/setting/` 写入同一 `local/`）时能区分来源。
 pub fn print_file_changes(
     label: &str,
     before: &BTreeMap<String, String>,
@@ -419,6 +420,23 @@ pub fn print_file_changes(
     }
     print!("{}", render_file_table(&rows, use_color()));
     rows.len()
+}
+
+/// 便于阅读的路径显示：若位于项目根（`GXL_PRJ_ROOT`，`gops` 启动时设置）或当前目录下，去掉前缀。
+pub fn display_path(path: &Path) -> String {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(env_root) = std::env::var_os("GXL_PRJ_ROOT") {
+        roots.push(PathBuf::from(env_root));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    for root in roots {
+        if let Ok(rel) = path.strip_prefix(&root) {
+            return rel.display().to_string();
+        }
+    }
+    path.display().to_string()
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {

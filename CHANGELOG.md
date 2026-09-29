@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.1] - 2026-09-29
+
+### 变更
+- 补发：发布时生成更新清单（`updates/gops/<channel>`），`inst-x.sh gops <alpha|beta|stable>` / `wp-inst install --source …/updates/gops` 可直接下载与更新
+
 ## [2.0.0] - 2026-09-29
 
 > **破坏性变更**：系统模块布局重构，与 1.x 不完全兼容。新 gops 请配合 `galaxio-hub/ops-gxl` 的 `2.0` 通道使用。

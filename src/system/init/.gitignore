@@ -9,7 +9,7 @@ artifacts
 # ===== 本地化中间产物 =====
 **/local
 spec/mods
-sys/mods
+sys/*/mods
 used.json
 used.yml
 _used.json

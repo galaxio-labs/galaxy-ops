@@ -52,7 +52,7 @@ impl LocalizeExecPath {
         Self {
             src: PathBuf::from(format!("${{GXL_PRJ_ROOT}}/sys/setting/{module}")),
             dst: PathBuf::from(format!(
-                "${{GXL_PRJ_ROOT}}/sys/mods/{module}/{model}/local/",
+                "${{GXL_PRJ_ROOT}}/sys/{model}/mods/{module}/local/",
             )),
             setting: None,
         }
@@ -285,7 +285,7 @@ Date: {{date}}"#;
         );
         assert_eq!(
             module_path.dst(),
-            &PathBuf::from("${GXL_PRJ_ROOT}/sys/mods/nginx/v1.0/local/")
+            &PathBuf::from("${GXL_PRJ_ROOT}/sys/v1.0/mods/nginx/local/")
         );
         assert!(module_path.setting().is_none());
     }
@@ -364,7 +364,7 @@ Date: {{date}}"#;
         let root = temp_dir.path();
         let localize_path = LocalizeExecPath {
             src: root.join("${GXL_PRJ_ROOT}/sys/setting/nginx"),
-            dst: root.join("${GXL_PRJ_ROOT}/sys/mods/nginx/v1.0/local/"),
+            dst: root.join("${GXL_PRJ_ROOT}/sys/v1.0/mods/nginx/local/"),
             setting: None,
         };
         let (_values, value_path, _value_temp_dir) = create_test_value_file();

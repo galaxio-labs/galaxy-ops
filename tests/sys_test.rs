@@ -45,9 +45,33 @@ async fn test_full_flow() -> MainResult<()> {
     let sys_value_dict =
         OriginDict::from(ValueDict::load_yaml(&sys_value_path.sys_value_file()).source_conf()?)
             .with_origin("sys-setting");
+    // 预置旧布局内容与旧 `.gitignore`，验证 `sys update` 会迁移
+    let legacy_dir = sys_path.join("sys/mods/legacy-mod/arm-mac14-host");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(legacy_dir.join("vars.yml"), "spoof").unwrap();
+    std::fs::write(sys_path.join(".gitignore"), "sys/mods\nvalues/*\n").unwrap();
     sys_proj
         .update_local(accessor, &sys_path, &DownloadOptions::default())
         .await?;
+    // 布局：模块按目标模型分组到 `sys/<model>/mods/<mod>`
+    let sys_dir = sys_path.join("sys");
+    assert!(
+        sys_dir
+            .join("arm-mac14-host/mods/redis2_mock/vars.yml")
+            .exists()
+    );
+    assert!(
+        sys_dir
+            .join("arm-mac14-host/mods/mysql2_mock/vars.yml")
+            .exists()
+    );
+    assert!(!sys_dir.join("mods").exists(), "旧布局 sys/mods 应被清理");
+    // `.gitignore` 被迁移，新布局目录不会沦为未跟踪
+    let ignore = std::fs::read_to_string(sys_path.join(".gitignore")).unwrap();
+    assert!(
+        ignore.contains("sys/*/mods"),
+        "gitignore 应迁移到新布局规则"
+    );
     sys_proj
         .localize(sys_value_path, LocalizeOptions::new(sys_value_dict))
         .await?;

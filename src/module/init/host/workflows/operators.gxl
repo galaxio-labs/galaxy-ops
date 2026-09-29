@@ -1,11 +1,13 @@
-extern mod mod_ops { git =  "https://github.com/galaxio-hub/ops-gxl.git", channel = "${GXL_CHANNEL:main}" }
+extern mod mod_ops { git =  "https://github.com/galaxio-hub/ops-gxl.git", channel = "${GXL_CHANNEL:2.0}" }
 mod operators : empty_operators {
 
-    // 下载构件到 local/cache：支持 http(s) 归档（url）与 git 仓库（repo[/tag]）
+    // 下载构件：支持 http(s) 归档（url）与 git 仓库（repo[/tag]）
+    // 制品缓存放在「共享 local」：系统内（模块位于 sys/<model>/mods/<mod>）→ sys/<model>/local/cache；
+    // 独立运行（模块位于 <repo>/mod/<model>）→ <repo>/local/cache。可用 GXL_SHARED_LOCAL 覆盖。
     #[task(name="gops@download")]
     flow download {
       local_dir = "./local";
-      cache_dir = "${local_dir}/cache";
+      cache_dir = "${GXL_SHARED_LOCAL:../../local}/cache";
       gx.cmd ( "mkdir -p ${cache_dir}" );
       gx.read_file ( file : "${local_dir}/artifact.yml" , name : "ART" ) ;
       for ${ITEM} in ${ART} {

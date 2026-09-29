@@ -17,11 +17,11 @@ use galaxy_ops::project::load_value_file;
 use galaxy_ops::system::drift::{DriftStatus, detect_drift};
 use galaxy_ops::system::lock::DeliverLock;
 use galaxy_ops::system::operator::SysOperator;
+use galaxy_ops::system::pack::pack_system;
 use galaxy_ops::system::setting::SysSetting;
 use galaxy_ops::system::{SysKind, SysOperatorPath, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_infra::path::ensure_path;
-use orion_variate::archive::compress;
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{OriginDict, ValueDict};
 
@@ -77,6 +77,10 @@ pub struct SysPackageArgs {
         help = "输出 tar.gz 路径 (默认: ../<name>-<version>.tar.gz)"
     )]
     pub output: Option<String>,
+
+    /// 不按 git 入库文件打包，而是打包当前目录全部（默认只打 git 跟踪的入库文件）
+    #[arg(long = "no-git", default_value_t = false)]
+    pub no_git: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -425,8 +429,8 @@ impl SysCommandHandler {
                 .unwrap_or_else(|| PathBuf::from(format!("{name}-{version}.tar.gz"))),
         };
 
-        // 3. 打包
-        compress(&current_dir, &out_path).source_sys()?;
+        // 3. 打包：默认只含 git 入库文件；`--no-git` 打整目录
+        pack_system(&current_dir, &out_path, !args.no_git)?;
         println!("系统已打包: {}", out_path.display());
         Ok(())
     }
@@ -1086,6 +1090,7 @@ mod tests {
             },
             force: false,
             output: None,
+            no_git: false,
         };
 
         assert_eq!(args.debug_level(), 1);

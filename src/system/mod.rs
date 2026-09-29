@@ -4,6 +4,7 @@ pub mod init;
 pub mod lock;
 pub mod mod_list;
 pub mod operator;
+pub mod pack;
 mod path;
 mod prelude;
 pub mod refs;

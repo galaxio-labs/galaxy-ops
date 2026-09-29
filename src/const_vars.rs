@@ -34,7 +34,10 @@ pub const SETTING_YML: &str = "setting.yml";
 pub const LOGS_SPEC_YML: &str = "logs.yml";
 pub const RES_SPEC_YML: &str = "res.yml";
 pub const SPEC_DIR: &str = "spec";
+/// 模块包内承载各模型产物的目录名（单数）。
 pub const MOD_DIR: &str = "mod";
+/// 系统内模块内容目录名（复数）：`sys/<model>/mods/<mod>/`。
+pub const MODS_DIR: &str = "mods";
 pub const LOCAL_DIR: &str = "local";
 pub const CONFS_DIR: &str = "confs";
 pub const WORKFLOWS_DIR: &str = "workflows";

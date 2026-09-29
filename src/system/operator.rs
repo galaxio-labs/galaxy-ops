@@ -7,7 +7,9 @@ use crate::system::spec::SysDefine;
 use crate::types::ValuePath;
 use crate::workflow::prj::GxlProject;
 
-use super::init::{SYS_PRJ_ADM, SYS_PRJ_WORK, sys_init_docker_compose, sys_init_gitignore};
+use super::init::{
+    SYS_PRJ_ADM, SYS_PRJ_WORK, sys_init_docker_compose, sys_init_gitignore, sys_migrate_gitignore,
+};
 use super::{
     conf::{SysConf, SysKind},
     path::SysOperatorPath,
@@ -140,7 +142,12 @@ impl RefUpdateable<()> for SysOperator {
         self.conf
             .update_local(accessor.clone(), path, options)
             .await?;
-        self.sys_spec().update_local(accessor, path, options).await
+        self.sys_spec()
+            .update_local(accessor, path, options)
+            .await?;
+        // 迁移：补齐已有系统 `.gitignore` 的新布局忽略规则（幂等）
+        sys_migrate_gitignore(self.paths.root())?;
+        Ok(())
     }
 }
 

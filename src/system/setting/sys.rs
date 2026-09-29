@@ -34,6 +34,12 @@ impl ModSetting {
             localize: LocalizeVarPath::of_module(module, model),
         }
     }
+    /// 迁移旧布局的本地化目标；返回是否有改动。
+    pub fn migrate_legacy_dst(&mut self) -> bool {
+        let before = self.localize.dst().clone();
+        self.localize = self.localize.clone().migrate_legacy_dst();
+        self.localize.dst() != &before
+    }
 }
 #[derive(Getters, Clone, Debug, Default, Serialize, Deserialize)]
 #[getset(get = "pub ")]
@@ -50,6 +56,17 @@ impl LocalizeDict {
         );
 
         Self { dicts }
+    }
+
+    /// 迁移所有条目的旧布局本地化目标；返回是否有改动。
+    pub fn migrate_legacy_dst(&mut self) -> bool {
+        let mut changed = false;
+        for v in self.dicts.values_mut() {
+            if v.migrate_legacy_dst() {
+                changed = true;
+            }
+        }
+        changed
     }
 }
 impl LoadHook for LocalizeDict {
@@ -121,16 +138,29 @@ impl SysSetting {
         }
         Ok(())
     }
+    /// 只写按模块的本地化列表（`list.yml`）。
+    pub fn save_list(&self, path: &Path) -> MainResult<()> {
+        self.list
+            .save_yaml(&path.join("list.yml"))
+            .source_resource()?;
+        Ok(())
+    }
+    /// 迁移 `list.yml` 里旧布局的本地化目标；返回是否有改动。
+    pub fn migrate_legacy_localize(&mut self) -> bool {
+        self.list.migrate_legacy_dst()
+    }
     pub fn load_from(root: &Path) -> MainResult<Self> {
         let vars_file_name = root.join(VARS_YML);
         let list_file_name = root.join("list.yml");
         let vars = VarCollection::load_yaml(&vars_file_name).source_resource()?;
         // list.yml 可选：缺失时视为空本地化列表（纯 docker-compose 等场景）
-        let list = if list_file_name.exists() {
+        let mut list = if list_file_name.exists() {
             LocalizeDict::load_yaml(&list_file_name).source_resource()?
         } else {
             LocalizeDict::default()
         };
+        // 迁移旧布局 dst：sys/mods/<mod>/<model>/local/ → sys/<model>/mods/<mod>/local/
+        list.migrate_legacy_dst();
         let root = Some(root.to_path_buf());
         Ok(SysSetting { vars, list, root }.finalize_loaded())
     }
@@ -232,5 +262,24 @@ mod tests {
 
         let content = std::fs::read_to_string(temp_dir.path().join("vars.yml")).unwrap();
         assert_eq!(content, "# user custom\n");
+    }
+
+    #[test]
+    fn test_load_from_migrates_legacy_list_dst() {
+        let temp_dir = tempdir().unwrap();
+        SysSetting::example().save_local(temp_dir.path()).assert();
+        // 覆盖为旧布局 dst
+        std::fs::write(
+            temp_dir.path().join("list.yml"),
+            "nginx:\n  enable: true\n  localize:\n    src: ${GXL_PRJ_ROOT}/sys/setting/nginx\n    dst: ${GXL_PRJ_ROOT}/sys/mods/nginx/v1.0/local/\n",
+        )
+        .unwrap();
+
+        let loaded = SysSetting::load_from(temp_dir.path()).assert();
+        let entry = loaded.list().dicts().get("nginx").expect("entry");
+        assert_eq!(
+            entry.localize().dst().as_str(),
+            "${GXL_PRJ_ROOT}/sys/v1.0/mods/nginx/local/"
+        );
     }
 }

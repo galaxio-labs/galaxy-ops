@@ -1,4 +1,4 @@
-extern mod mod_ops { git =  "https://github.com/galaxio-hub/ops-gxl.git", channel = "${GXL_CHANNEL:main}" }
+extern mod mod_ops { git =  "https://github.com/galaxio-hub/ops-gxl.git", channel = "${GXL_CHANNEL:2.0}" }
 mod envs : {
     env  _common {
         module_env = "default";

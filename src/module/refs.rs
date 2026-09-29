@@ -4,7 +4,10 @@ use orion_variate::types::ResourceDownloader;
 
 use super::ModelSTD;
 use crate::types::{Accessor, RefUpdateable, SystemLocalizable};
-use crate::{const_vars::MOD_DIR, module::model::MMOperator};
+use crate::{
+    const_vars::{MOD_DIR, MODS_DIR},
+    module::model::MMOperator,
+};
 
 #[derive(Getters, Clone, Debug, Serialize, Deserialize)]
 #[getset(get = "pub")]
@@ -17,6 +20,9 @@ pub struct ModuleSpecRef {
     enable: Option<bool>,
     #[serde(skip)]
     local: Option<PathBuf>,
+    /// 旧布局内容目录 `sys/mods/<mod>/<model>`（1.3 及更早），仅供读取回退。
+    #[serde(skip)]
+    legacy_local: Option<PathBuf>,
 }
 
 impl ModuleSpecRef {
@@ -31,6 +37,7 @@ impl ModuleSpecRef {
             model: node,
             enable: None,
             local: None,
+            legacy_local: None,
         }
     }
     pub fn with_enable(mut self, effective: bool) -> Self {
@@ -46,24 +53,44 @@ impl ModuleSpecRef {
     pub fn is_enable(&self) -> bool {
         self.enable.unwrap_or(true)
     }
-    pub fn spec_path(&self, root: &Path) -> PathBuf {
-        root.join("mods").join(self.name.as_str())
+    /// 模块内容目录：`<sys_root>/<model>/mods/<name>`。
+    ///
+    /// 自 1.4 起按目标模型分组（`sys/<model>/mods/<mod>`），
+    /// 取代旧的 `<sys_root>/mods/<name>/<model>`；同一模型的模块因此集中在一处。
+    pub fn mod_dir(&self, sys_root: &Path) -> PathBuf {
+        sys_root
+            .join(self.model().to_string())
+            .join(MODS_DIR)
+            .join(self.name.as_str())
     }
-    pub fn set_local(&mut self, local: PathBuf) {
+    /// 旧布局内容目录：`<sys_root>/mods/<name>/<model>`（1.3 及更早）。
+    pub fn legacy_mod_dir(&self, sys_root: &Path) -> PathBuf {
+        sys_root
+            .join(MODS_DIR)
+            .join(self.name.as_str())
+            .join(self.model().to_string())
+    }
+    /// 同时记录新布局（写入/优先读取）与旧布局（读取回退）目录。
+    pub fn set_local_with_legacy(&mut self, local: PathBuf, legacy: PathBuf) {
         self.local = Some(local);
+        self.legacy_local = Some(legacy);
+    }
+    /// 读取模块内容目录：优先新布局 `sys/<model>/mods/<mod>`，
+    /// 缺失时回退旧布局 `sys/mods/<mod>/<model>`（两者皆无时返回 `None`）。
+    pub fn content_dir(&self) -> Option<&PathBuf> {
+        self.local
+            .as_ref()
+            .filter(|p| p.exists())
+            .or_else(|| self.legacy_local.as_ref().filter(|p| p.exists()))
     }
     pub fn get_target_spec(&self) -> MainResult<Option<MMOperator>> {
         if self.is_enable()
-            && let Some(local) = &self.local
+            && let Some(local) = self.content_dir()
         {
-            let target_root = local.join(self.name());
-            let target_path = target_root.join(self.model().to_string());
-            if target_path.exists() {
-                let spec = MMOperator::load_from(&target_path)
-                    .with(&target_root)
-                    .owe(MainReason::from(ModReason::Load))?;
-                return Ok(Some(spec));
-            }
+            let spec = MMOperator::load_from_model(local, self.model())
+                .with(local)
+                .owe(MainReason::from(ModReason::Load))?;
+            return Ok(Some(spec));
         }
         Ok(None)
     }
@@ -83,24 +110,32 @@ impl RefUpdateable<UpdateUnit> for ModuleSpecRef {
                 info!(target: "/mod/ref",  "update mod ref {} success!", self.name ),
                 error!(target: "/mod/ref", "update mod ref {} fail!", self.name )
             );
-            std::fs::create_dir_all(local)
+            // local 即模块内容目录 `sys/<model>/mods/<mod>`；下载和解包在它的父目录进行。
+            let target_root = local.clone();
+            let work_root = target_root
+                .parent()
+                .ok_or_else(|| MainReason::logic_detail("bad module local path"))?
+                .to_path_buf();
+            std::fs::create_dir_all(&work_root)
                 .source_resource()
-                .with(local)?;
-            let target_root = local.join(self.name());
-            let target_path = target_root.join(self.model().to_string());
-            if !target_path.exists() || options.clean_cache() {
+                .with(&work_root)?;
+            if !target_root.exists() || options.clean_cache() {
                 let tmp_name = "__mod";
                 let prj_path = accessor
-                    .download_rename(self.addr(), local, tmp_name, options)
+                    .download_rename(self.addr(), &work_root, tmp_name, options)
                     .await
                     .map_err(MainReason::from_addr_error)?;
-                let mod_path = prj_path.position().join(MOD_DIR);
-                let tmp_path = local.join(tmp_name);
+                // 模块包里 `mod/<model>/` 才是本模型的产物，只取这一份。
+                let model_path = prj_path
+                    .position()
+                    .join(MOD_DIR)
+                    .join(self.model().to_string());
+                let tmp_path = work_root.join(tmp_name);
                 make_clean_path(&target_root).source_resource()?;
 
-                std::fs::rename(&mod_path, &target_root)
+                std::fs::rename(&model_path, &target_root)
                     .source_logic()
-                    .with(("from", &mod_path))
+                    .with(("from", &model_path))
                     .with(("to", &target_root))?;
                 if tmp_path.exists() {
                     std::fs::remove_dir_all(tmp_path).source_sys()?;
@@ -108,15 +143,13 @@ impl RefUpdateable<UpdateUnit> for ModuleSpecRef {
             }
 
             debug!(target: "mod/ref",  "update target success!" );
-            //let target_path = target_root.join(self.node().to_string());
-            let spec = MMOperator::load_from(&target_path)
+            let spec = MMOperator::load_from_model(&target_root, self.model())
                 .with(&target_root)
                 .owe(MainReason::from(ModReason::Load))?;
             let unit = spec
-                .update_local(accessor, &target_path, options)
+                .update_local(accessor, &target_root, options)
                 .await
                 .with(("module", self.name().to_string()))?;
-            MMOperator::clean_other(&target_root, self.model())?;
             flag.mark_suc();
             return Ok(unit);
         } else {
@@ -146,10 +179,10 @@ impl SystemLocalizable<SysValuePaths> for ModuleSpecRef {
                     .with_mod_path("mod");
                 ctx.record("name", self.name.as_str());
                 let mod_val_path = val_path.join(self.name.as_str());
-                let mod_path = local.join(self.name.as_str());
-                let target_path = mod_path.join(self.model().to_string());
-                let spec =
-                    MMOperator::load_from(&target_path).owe(MainReason::from(ModReason::Load))?;
+                // 读取优先新布局，缺失时回退旧布局；两者皆无时按新路径报错。
+                let target_path = self.content_dir().unwrap_or(local);
+                let spec = MMOperator::load_from_model(target_path, self.model())
+                    .owe(MainReason::from(ModReason::Load))?;
                 //let value = PathBuf::from(self.name());
                 let cur_md_path = ModValuePaths::from(mod_val_path.root().clone());
                 spec.mod_localize(cur_md_path.clone(), options.clone())
@@ -166,9 +199,22 @@ impl SystemLocalizable<SysValuePaths> for ModuleSpecRef {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    use crate::module::{ModelSTD, refs::ModuleSpecRef};
+    use crate::module::{CpuArch, ModelSTD, OsCPE, RunSPC, refs::ModuleSpecRef};
+
+    fn copy_dir_all(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir_all(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn test_module_spec_ref_builder() {
@@ -204,13 +250,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_module_spec_ref_spec_path() {
+    async fn test_module_spec_ref_mod_dir() {
         let model_std = ModelSTD::x86_ubt22_k8s();
         let module_ref = ModuleSpecRef::from("test-module", "https://example.com", model_std);
 
         let root = PathBuf::from("/project/root");
-        let spec_path = module_ref.spec_path(&root);
+        let spec_path = module_ref.mod_dir(&root);
 
-        assert_eq!(spec_path, root.join("mods").join("test-module"));
+        assert_eq!(
+            spec_path,
+            root.join("x86-ubt22-k8s").join("mods").join("test-module")
+        );
+    }
+
+    #[test]
+    fn test_content_dir_prefers_new_then_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sys_root = tmp.path().join("sys");
+        let mut r = ModuleSpecRef::from(
+            "m",
+            "https://example.com",
+            ModelSTD::new(CpuArch::Arm, OsCPE::MAC14, RunSPC::Host),
+        );
+        let new = r.mod_dir(&sys_root);
+        let legacy = r.legacy_mod_dir(&sys_root);
+        assert_eq!(new, sys_root.join("arm-mac14-host/mods/m"));
+        assert_eq!(legacy, sys_root.join("mods/m/arm-mac14-host"));
+        r.set_local_with_legacy(new.clone(), legacy.clone());
+
+        // 两者皆无 → None
+        assert_eq!(r.content_dir(), None);
+        // 仅旧布局 → 回退旧布局
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(r.content_dir(), Some(&legacy));
+        // 新布局存在 → 优先新布局
+        std::fs::create_dir_all(&new).unwrap();
+        assert_eq!(r.content_dir(), Some(&new));
+    }
+
+    #[test]
+    fn test_get_target_spec_falls_back_to_legacy_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sys_root = tmp.path().join("sys");
+        let mut r = ModuleSpecRef::from(
+            "redis2_mock",
+            "https://example.com",
+            ModelSTD::new(CpuArch::Arm, OsCPE::MAC14, RunSPC::Host),
+        );
+        // 内容只放在旧布局
+        let legacy = r.legacy_mod_dir(&sys_root);
+        copy_dir_all(
+            Path::new("./example/mod-operators/redis2_mock/mod/arm-mac14-host"),
+            &legacy,
+        );
+        let new = r.mod_dir(&sys_root);
+        r.set_local_with_legacy(new, legacy);
+
+        let spec = r.get_target_spec().unwrap();
+        assert!(spec.is_some(), "应能从旧布局回退加载模块");
+    }
+
+    #[test]
+    fn test_get_target_spec_prefers_new_layout_when_both_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sys_root = tmp.path().join("sys");
+        let mut r = ModuleSpecRef::from(
+            "redis2_mock",
+            "https://example.com",
+            ModelSTD::new(CpuArch::Arm, OsCPE::MAC14, RunSPC::Host),
+        );
+        let new = r.mod_dir(&sys_root);
+        let legacy = r.legacy_mod_dir(&sys_root);
+        copy_dir_all(
+            Path::new("./example/mod-operators/redis2_mock/mod/arm-mac14-host"),
+            &new,
+        );
+        copy_dir_all(
+            Path::new("./example/mod-operators/redis2_mock/mod/arm-mac14-host"),
+            &legacy,
+        );
+        r.set_local_with_legacy(new.clone(), legacy);
+
+        let spec = r.get_target_spec().unwrap().unwrap();
+        assert_eq!(spec.root().as_ref(), Some(&new), "应优先加载新布局");
     }
 }

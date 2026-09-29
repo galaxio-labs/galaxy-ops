@@ -169,7 +169,7 @@ mod tests {
     fn test_k8s_operators_use_helm_ops() {
         assert!(K8S_K8S_OPS_GXL.contains("mod operators : helm_ops"));
         assert!(K8S_K8S_OPS_GXL.contains("galaxio-hub/ops-gxl"));
-        assert!(K8S_K8S_OPS_GXL.contains("${GXL_CHANNEL:main}"));
+        assert!(K8S_K8S_OPS_GXL.contains("${GXL_CHANNEL:2.0}"));
         // helm_ops.download 依赖 SPEC_DIR 环境变量定位 artifact.yml
         assert!(MOD_K8S_WORK_GXL.contains("SPEC_DIR"));
     }
@@ -177,9 +177,12 @@ mod tests {
     #[test]
     fn test_host_operators_scaffold_invariants() {
         assert!(MOD_HOST_OPS_GXL.contains("galaxio-hub/ops-gxl"));
-        // 统一使用 GXL_CHANNEL（旧模板用过 GXL_CHANNEL_OPS）
-        assert!(MOD_HOST_OPS_GXL.contains("${GXL_CHANNEL:main}"));
+        // 统一使用 GXL_CHANNEL（旧模板用过 GXL_CHANNEL_OPS）；2.0 线提供 host 级制品缓存
+        assert!(MOD_HOST_OPS_GXL.contains("${GXL_CHANNEL:2.0}"));
         assert!(!MOD_HOST_OPS_GXL.contains("GXL_CHANNEL_OPS"));
+        // 制品缓存放在「共享 local」（与 host 模块一致）：
+        // 系统内 → sys/<model>/local/cache；独立运行 → <repo>/local/cache。可用 GXL_SHARED_LOCAL 覆盖。
+        assert!(MOD_HOST_OPS_GXL.contains("${GXL_SHARED_LOCAL:../../local}/cache"));
         // git（repo[/tag]）与 http（url）双形态
         assert!(MOD_HOST_OPS_GXL.contains("${ITEM.ORIGIN_ADDR.REPO}"));
         assert!(MOD_HOST_OPS_GXL.contains("${ITEM.ORIGIN_ADDR.URL}"));

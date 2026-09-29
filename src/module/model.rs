@@ -67,22 +67,6 @@ impl MMOperator {
         self.workflow.save_to(&target_path, None).source_logic()?;
         Ok(())
     }
-
-    pub fn clean_other(root: &Path, node: &ModelSTD) -> MainResult<()> {
-        let subs = get_sub_dirs(root).source_logic()?;
-        for sub in subs {
-            if !sub.ends_with(node.to_string().as_str()) {
-                Self::clean_path(&sub)?;
-            }
-        }
-        Ok(())
-    }
-    fn clean_path(path: &Path) -> MainResult<()> {
-        if path.exists() {
-            std::fs::remove_dir_all(path).source_resource().with(path)?;
-        }
-        Ok(())
-    }
 }
 
 #[derive(Getters, Clone, Debug)]
@@ -173,6 +157,19 @@ impl FilePersist<MMOperator> for MMOperator {
     }
 
     fn load_from(target_root: &Path) -> SerdeResult<Self> {
+        // 模块包目录名即模型名（`mod/<model>/`），据此推断模型。
+        let model = ModelSTD::from_str(path_file_name(target_root).source_logic()?.as_str())
+            .source_resource()?;
+        Self::load_from_model(target_root, &model)
+    }
+}
+
+impl MMOperator {
+    /// 从内容目录加载模块目标，模型由调用方显式给出。
+    ///
+    /// 系统布局 `sys/<model>/mods/<mod>` 下内容目录名是模块名，
+    /// 模型无法再从目录名推断（由 `mod_list.yml` 的 ref 携带）。
+    pub fn load_from_model(target_root: &Path, model: &ModelSTD) -> SerdeResult<Self> {
         let mut ctx = WithContext::want("load target mod spec");
 
         let mut flag = auto_exit_log!(
@@ -181,9 +178,7 @@ impl FilePersist<MMOperator> for MMOperator {
         );
         let paths = ModTargetPaths::from(&target_root.to_path_buf());
         ctx.record("root", target_root.display());
-        let target = ModelSTD::from_str(path_file_name(target_root).source_logic()?.as_str())
-            .source_resource()
-            .with(&ctx)?;
+        let target = model.clone();
         let actions = ModWorkflows::load_from(paths.workflow_path()).with(&ctx)?;
 
         let setting = if paths.setting_path().exists() {

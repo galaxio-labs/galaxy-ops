@@ -3,7 +3,7 @@ use super::prelude::*;
 use crate::system::SysKind;
 
 use crate::{
-    const_vars::{MERGED_VARS_YML, MOD_OPERATORS_ROOT, SYS_VARS_YML},
+    const_vars::{MERGED_VARS_YML, MOD_OPERATORS_ROOT, SETTING_DIR, SYS_VARS_YML},
     error::ElementReason,
     module::operator::ModOperator,
     system::setting::ModSetting,
@@ -202,6 +202,17 @@ impl RefUpdateable<()> for SysModelSpec {
             }
             let sys_vars = value.vars.merge_system(self.setting().vars().clone());
             sys_vars.save_yaml(&path).source_resource()?;
+            // 迁移 `list.yml` 里旧布局的本地化目标（仅当文件仍是旧布局时重写）：
+            // `sys/setting/list.yml` 的 dst 若是 `sys/mods/<mod>/<model>/local/`，
+            // localize 会把产物写回旧路径、重建 sys/mods。
+            let setting_dir = local.join(SETTING_DIR);
+            let list_file = setting_dir.join("list.yml");
+            if list_file.exists() {
+                let content = std::fs::read_to_string(&list_file).source_resource()?;
+                if content.contains("/sys/mods/") {
+                    self.setting().save_list(&setting_dir)?;
+                }
+            }
             Ok(())
         } else {
             MainReason::from(ElementReason::Miss("local path".into())).err_result()

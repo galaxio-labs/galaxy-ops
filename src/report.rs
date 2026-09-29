@@ -1,7 +1,9 @@
-//! 值变更表格：比对「初始层」（系统 / 模块默认值）与「生效层」（合并覆盖后的值），
-//! 以等宽文字表呈现每个键的默认值、生效值、来源（origin）与可变性（mutability）。
+//! 变更呈现（供 `gops sys diff` / `gops mod diff` 与 `localize` 结尾复用）：
 //!
-//! 供 `gops sys diff` / `gops mod diff`，以及 `localize` 结尾的变更提示复用。
+//! - **值变更表**：比对「初始层」（系统 / 模块默认值）与「生效层」（合并覆盖后的值），
+//!   逐键列出 `KEY` / `INITIAL` / `EFFECTIVE` / `ORIGIN` / `MUTABILITY` / `STATE`；
+//! - **文件变更表**：localize 渲染文件前后各取一次内容指纹快照（[`snapshot_tree`]），
+//!   只列出**新增 / 替换**的文件（`FILE` / `STATE`）。
 
 use crate::internal_prelude::*;
 use orion_vars::vars::{Mutability, ValueType};

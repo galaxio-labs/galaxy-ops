@@ -296,6 +296,54 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// `gops mod diff` 的核心：初始层（模块默认值）vs 生效层（客户 / mod_value 覆盖）。
+    #[test]
+    fn test_mod_value_changes_detect_override_from_mod_value() {
+        let temp_dir = tempdir().unwrap();
+        let mod_dir = temp_dir.path().join("m");
+        std::fs::create_dir_all(&mod_dir).unwrap();
+        // make_new 会为每个受支持模型建 target（module 作用域变量：cpu / mem）
+        ModOperator::make_new(&mod_dir, "m")
+            .unwrap()
+            .save()
+            .unwrap();
+        let operator = ModOperator::load(&mod_dir).unwrap();
+        let val_path = ModValuePaths::from(mod_dir.clone()).join(VALUE_DIR);
+
+        // 无覆盖：所有模型值都取默认值，不应有变更行
+        let changes = mod_value_changes(&operator, &val_path).unwrap();
+        assert!(
+            changes.iter().all(|(_, rows)| rows.is_empty()),
+            "no override expected: {changes:?}"
+        );
+
+        // 给 host 模型写一个 module 作用域变量的覆盖（与默认值不同）
+        let (model_key, mm) = operator.mod_spec().targets().iter().next().unwrap();
+        let var = mm
+            .vars()
+            .module_vars()
+            .first()
+            .expect("module var")
+            .name()
+            .to_string();
+        let model_path = val_path.clone().join(model_key.to_string());
+        std::fs::create_dir_all(model_path.mod_value_file().parent().unwrap()).unwrap();
+        std::fs::write(model_path.mod_value_file(), format!("{var}: 7777\n")).unwrap();
+
+        let changes = mod_value_changes(&operator, &val_path).unwrap();
+        let (_, rows) = changes
+            .iter()
+            .find(|(m, _)| m == &model_key.to_string())
+            .expect("model group");
+        let row = rows
+            .iter()
+            .find(|r| r.key() == var.to_uppercase())
+            .unwrap_or_else(|| panic!("row for {var}: {rows:?}"));
+        assert_eq!(row.state(), report::ValueState::Changed);
+        assert_eq!(row.effective(), Some("7777"));
+        assert_eq!(row.origin(), Some("mod-setting"));
+    }
+
     #[ignore = "reason"]
     #[tokio::test]
     async fn test_mod_new_command() {

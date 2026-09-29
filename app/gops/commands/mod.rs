@@ -1,6 +1,8 @@
 pub mod common;
+pub mod gx_dispatch;
 pub mod mod_cmd;
 pub mod prj_cmd;
+pub mod run_cmd;
 pub mod self_cmd;
 pub mod sys_cmd;
 
@@ -9,6 +11,7 @@ use galaxy_ops::error::MainResult;
 
 pub use mod_cmd::{ModCmd, ModCommandHandler};
 pub use prj_cmd::{PrjCmd, PrjCommandHandler};
+pub use run_cmd::{RunCmd, RunCommandHandler};
 pub use self_cmd::{SelfCmd, SelfCommandHandler};
 pub use sys_cmd::{SysCmd, SysCommandHandler};
 
@@ -30,9 +33,17 @@ pub enum GInsCmd {
     #[command(subcommand, about = "模块管理命令 (Module Management Commands)")]
     Mod(ModCmd),
 
-    /// 系统管理命令 (System Management Commands)
+    /// 系统管理命令 (System Management Commands) — 定义 / 交付 / 工件
     #[command(subcommand, about = "系统管理命令 (System Management Commands)")]
     Sys(SysCmd),
+
+    /// 运行时运维命令 (Runtime Operation Commands) — 在环境里落地 / 运行
+    #[command(
+        name = "run",
+        subcommand,
+        about = "运行时运维命令 (Runtime Operation Commands)"
+    )]
+    Run(RunCmd),
 
     /// 自升级命令 (Self-Update Commands)
     #[command(name = "self", subcommand, about = "自升级命令 (Self-Update Commands)")]
@@ -61,6 +72,7 @@ impl CommandDispatcher {
             GInsCmd::Mod(mod_cmd) => ModCommandHandler::execute(mod_cmd).await,
             GInsCmd::Prj(prj_cmd) => PrjCommandHandler::execute(prj_cmd).await,
             GInsCmd::Sys(sys_cmd) => SysCommandHandler::execute(sys_cmd).await,
+            GInsCmd::Run(run_cmd) => RunCommandHandler::execute(run_cmd).await,
             GInsCmd::SelfUpdate(self_cmd) => SelfCommandHandler::execute(self_cmd).await,
         }
     }

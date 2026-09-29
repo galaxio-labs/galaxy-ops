@@ -32,6 +32,8 @@ galaxy-ops/
 │   └── commands/
 │       ├── mod_cmd.rs         # gops mod
 │       ├── sys_cmd.rs         # gops sys
+│       ├── run_cmd.rs         # gops run（运行时运维）
+│       ├── gx_dispatch.rs     # 调 gx 的共用基础设施（sys/run 共用）
 │       ├── prj_cmd.rs         # gops prj
 │       └── common/            # 公共参数（debug/log/force/localize）
 ├── src/

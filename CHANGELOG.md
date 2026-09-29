@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.4] - 2026-09-29
+
+### 重大变更
+- **`gops sys` 拆分出运行时运维命令 `gops run`**：`download`/`install`/`uninstall`/`start`/`stop`/`status`/`diagnose` 从 `gops sys` 移到 **`gops run <cmd>`**（语义不变：按 `sys/sys_model.yml` 的 `kind` 分派到 gx 算子流或 docker compose）。`gops sys` 只保留**定义/交付/工件**：`new`/`update`/`localize`/`package`/`setting`/`check`。**破坏性**：`gops sys start` 之类需改为 `gops run start`。
+
 ## [2.0.3] - 2026-09-29
 
 ### 新增功能

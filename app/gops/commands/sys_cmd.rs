@@ -1,9 +1,5 @@
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command as TokioCommand;
 
 use clap::{Args, Parser};
 use derive_getters::Getters;
@@ -19,13 +15,14 @@ use galaxy_ops::system::lock::DeliverLock;
 use galaxy_ops::system::operator::SysOperator;
 use galaxy_ops::system::pack::pack_system;
 use galaxy_ops::system::setting::SysSetting;
-use galaxy_ops::system::{SysKind, SysOperatorPath, SysValuePaths};
+use galaxy_ops::system::{SysKind, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_infra::path::ensure_path;
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{OriginDict, ValueDict};
 
 use crate::commands::common::DebugLogArgs;
+use crate::commands::gx_dispatch;
 
 /// 解析当前系统的值目录：若系统属于某个运维项目（父目录有 `ops-prj.yml` 且列出该系统），
 /// 使用项目为该系统维护的 `values/<sys_name>`（客户值）；否则使用 `<sys>/values`。
@@ -113,18 +110,6 @@ pub struct SysCheckArgs {
     pub debug_log: DebugLogArgs,
 }
 
-#[derive(Debug, Args, Getters)]
-pub struct SysOpsArgs {
-    #[clap(flatten)]
-    pub debug_log: DebugLogArgs,
-
-    #[arg(long = "mod", help = "mod name")]
-    pub module: Option<String>,
-
-    #[arg(short, long = "env", help = "env name", default_value = "default")]
-    pub env: String,
-}
-
 #[derive(Debug, Parser)]
 pub enum SysCmd {
     /// 创建新的系统操作符 (Create New System Operator)
@@ -169,74 +154,6 @@ pub enum SysCmd {
     )]
     Setting(SysSettingArgs),
 
-    /// 下载系统组件 (Download System Components)
-    #[command(
-        about = "下载系统组件 (Download System Components)",
-        long_about = "从指定源下载系统所需的组件、依赖或资源。支持指定特定的模块和环境，\
-                     便于在不同配置下获取相应的系统组件。\n\
-                     Download required components, dependencies, or resources for the system from specified sources. \
-                     Supports specifying particular modules and environments for obtaining corresponding system components \
-                     under different configurations."
-    )]
-    Download(SysOpsArgs),
-
-    /// 安装系统组件 (Install System Components)
-    #[command(
-        about = "安装系统组件 (Install System Components)",
-        long_about = "安装已下载的系统组件到目标环境。支持模块化安装和环境特定配置，\
-                     确保系统组件正确部署到指定的环境中。\n\
-                     Install downloaded system components to the target environment. Supports modular installation and \
-                     environment-specific configurations to ensure system components are properly deployed to specified environments."
-    )]
-    Install(SysOpsArgs),
-    /// 卸载系统组件 (Uninstall System Components)
-    #[command(
-        about = "卸载系统组件 (Uninstall System Components)",
-        long_about = "从系统中移除已安装的组件。支持安全卸载指定模块的组件，\
-                     清理相关配置和依赖，确保系统状态的完整性。\n\
-                     Remove installed components from the system. Supports safe uninstallation of specified module components, \
-                     cleaning up related configurations and dependencies to ensure system state integrity."
-    )]
-    Uninstall(SysOpsArgs),
-
-    /// 启动系统服务 (Start System Services)
-    #[command(
-        about = "启动系统服务 (Start System Services)",
-        long_about = "启动指定的系统服务或组件。支持按模块和环境启动服务，\
-                     提供调试日志输出，便于监控启动过程和故障排除。\n\
-                     Start specified system services or components. Supports starting services by module and environment, \
-                     providing debug log output for monitoring the startup process and troubleshooting."
-    )]
-    Start(SysOpsArgs),
-    /// 停止系统服务 (Stop System Services)
-    #[command(
-        about = "停止系统服务 (Stop System Services)",
-        long_about = "停止正在运行的系统服务或组件。支持优雅停机过程，\
-                     确保服务正常关闭并清理相关资源，维护系统稳定性。\n\
-                     Stop running system services or components. Supports graceful shutdown processes to ensure \
-                     services terminate normally and clean up related resources, maintaining system stability."
-    )]
-    Stop(SysOpsArgs),
-
-    /// 查询系统状态 (Query System Status)
-    #[command(
-        about = "查询系统状态 (Query System Status)",
-        long_about = "获取系统服务和组件的当前运行状态。支持按模块和环境过滤状态信息，\
-                     提供详细的运行时状态和健康检查结果。\n\
-                     Retrieve current runtime status of system services and components. Supports filtering status information \
-                     by module and environment, providing detailed runtime status and health check results."
-    )]
-    Status(SysOpsArgs),
-    /// 诊断系统问题 (Diagnose System Issues)
-    #[command(
-        about = "诊断系统问题 (Diagnose System Issues)",
-        long_about = "对系统进行全面诊断和故障排除。支持针对特定模块和环境进行诊断，\
-                     生成详细的诊断报告和建议解决方案。\n\
-                     Perform comprehensive system diagnosis and troubleshooting. Supports targeted diagnosis for specific \
-                     modules and environments, generating detailed diagnostic reports and suggested solutions."
-    )]
-    Diagnose(SysOpsArgs),
-
     /// 检查系统配置漂移 (Check Configuration Drift)
     #[command(
         about = "检查系统配置漂移 (Check Configuration Drift)",
@@ -278,14 +195,6 @@ impl DfxArgsGetter for SysPackageArgs {
 }
 
 impl DfxArgsGetter for SysLocalizeArgs {
-    fn debug_level(&self) -> usize {
-        self.debug_log.debug_level()
-    }
-    fn log_setting(&self) -> Option<String> {
-        self.debug_log.log_setting()
-    }
-}
-impl DfxArgsGetter for SysOpsArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -496,7 +405,7 @@ impl SysCommandHandler {
         if !no_flow {
             Self::run_stage_flow(
                 spec.kind(),
-                &Self::gx_bin_path(),
+                &gx_dispatch::gx_bin_path(),
                 "localize",
                 debug,
                 &stage_env,
@@ -515,123 +424,6 @@ impl SysCommandHandler {
             setting.save_local(&setting_path)?;
         }
         Ok(())
-    }
-
-    /// 外部执行器 `gx`（galaxy-flow）的最低版本要求。
-    const GX_MIN_VERSION: (u32, u32, u32) = (0, 13, 0);
-
-    /// `gx` 可执行文件路径（`$HOME/bin/gx`）。
-    fn gx_bin_path() -> String {
-        format!(
-            "{}/bin/gx",
-            std::env::var("HOME").unwrap_or_else(|_| "".to_string())
-        )
-    }
-
-    fn check_gx_version() -> MainResult<()> {
-        // 检查 gx 版本
-        let gx_path = Self::gx_bin_path();
-        let output = Command::new(&gx_path)
-            .arg("-V")
-            .output()
-            .map_err(|e| format!("无法执行 gx 命令 ({gx_path}): {e}"))
-            .source_resource()?;
-
-        if !output.status.success() {
-            return Err("gx 命令执行失败").source_resource()?;
-        }
-
-        let version_str = String::from_utf8_lossy(&output.stdout);
-        // 解析版本号，假设输出格式为 "gx x.y.z"
-        let version_parts: Vec<&str> = version_str.split_whitespace().collect();
-        if version_parts.len() < 2 {
-            return Err(format!("无法解析 gx 版本: {version_str}")).source_resource()?;
-        }
-
-        let version = version_parts[1];
-        let version_parts: Vec<&str> = version.split('.').collect();
-        if version_parts.len() < 3 {
-            return Err(format!("无效的 gx 版本格式: {version}")).source_resource()?;
-        }
-
-        // 解析主版本、次版本和修订版本
-        let major: u32 = version_parts[0]
-            .parse()
-            .map_err(|_| format!("无效的主版本号: {}", version_parts[0]))
-            .source_resource()?;
-        let minor: u32 = version_parts[1]
-            .parse()
-            .map_err(|_| format!("无效的次版本号: {}", version_parts[1]))
-            .source_resource()?;
-        let patch: u32 = version_parts[2]
-            .parse()
-            .map_err(|_| format!("无效的修订版本号: {}", version_parts[2]))
-            .source_resource()?;
-
-        // 检查版本是否 >= GX_MIN_VERSION
-        let (min_major, min_minor, min_patch) = Self::GX_MIN_VERSION;
-        if (major, minor, patch) >= (min_major, min_minor, min_patch) {
-            Ok(())
-        } else {
-            Err(format!(
-                "gx 版本过低，需要 >= {min_major}.{min_minor}.{min_patch}，当前版本: {version}"
-            ))
-            .source_resource()?
-        }
-    }
-
-    pub async fn handle_ops_cmd(cmd_name: &str, args: SysOpsArgs) -> MainResult<()> {
-        galaxy_ops::infra::configure_dfx_logging(&args);
-
-        let current_dir = std::env::current_dir().expect("无法获取当前目录");
-        match SysOperator::load_kind(&current_dir) {
-            SysKind::DockerCompose => Self::run_compose_cmd(cmd_name, &args).await,
-            SysKind::Gxl => Self::run_gx_cmd(cmd_name, &args).await,
-        }
-    }
-
-    /// 构造 `gx run` 的参数（不含可执行文件路径）。
-    ///
-    /// 映射：`gops sys <cmd> [-e ENV] [-d N] [--mod M]` -> `gx run -e ENV -d N [--cmd-arg M] <cmd>`
-    fn gx_run_args(cmd_name: &str, env: &str, debug: usize, module: Option<&str>) -> Vec<String> {
-        let mut args = vec![
-            "run".to_string(),
-            "-e".to_string(),
-            env.to_string(),
-            "-d".to_string(),
-            debug.to_string(),
-        ];
-        if let Some(module) = module {
-            args.push("--cmd-arg".to_string());
-            args.push(module.to_string());
-        }
-        args.push(cmd_name.to_string());
-        args
-    }
-
-    /// 统一的 gx 流程执行入口：`gx run -e <env> -d <n> [--cmd-arg <mod>] <flow>`，
-    /// 并可按需把 `inject_env` 注入子进程环境。
-    ///
-    /// `gxl` 的分派（`gops sys start` 等）与 `docker-compose` 的可选阶段流程都走这里，
-    /// 保证「如何调 gx」只有一处。（GXL 内部的 `gx.run` 是另一种东西，gops 不直接使用。）
-    async fn run_gx_flow(
-        gx_path: &str,
-        env: &str,
-        debug: usize,
-        module: Option<&str>,
-        flow: &str,
-        inject_env: &[(String, String)],
-    ) -> MainResult<()> {
-        let mut cmd = TokioCommand::new(gx_path);
-        cmd.args(Self::gx_run_args(flow, env, debug, module));
-        for (key, value) in inject_env {
-            // 保留变量不被合并配置覆盖，否则可能破坏 gx 自身或其 shell（如 PATH/HOME）。
-            if is_reserved_env(key) {
-                continue;
-            }
-            cmd.env(key, value);
-        }
-        Self::run_and_stream(cmd, "gx").await
     }
 
     /// 阶段扩展点：内置动作完成后，若项目定义了**同名 gx 流程**则执行。
@@ -666,7 +458,7 @@ impl SysCommandHandler {
         }
         println!("run stage flow: gx run {flow_name}");
         // 与 gxl 分派共用同一入口（`-e default`，因为 compose 系统没有可选的 env）。
-        Self::run_gx_flow(gx_path, "default", debug, None, flow_name, env_pairs).await
+        gx_dispatch::run_gx_flow(gx_path, "default", debug, None, flow_name, env_pairs).await
     }
 
     /// `gx run --exists <flow>`：退出 `0` = 存在；其余（不存在 / conf 不可加载 /
@@ -690,133 +482,6 @@ impl SysCommandHandler {
             }
             Err(e) => StageProbe::Skipped(format!("无法执行 gx: {e}")),
         }
-    }
-
-    /// `kind: gxl` 的系统：把 `gops sys <cmd>` 映射为 `gx run <cmd>`。
-    ///
-    /// 系统的 `start` / `stop` / `status` / `diagnose` 等即工作流里的同名流程
-    /// （定义在 `_gal/work.gxl` 或其引用的模块中）。
-    async fn run_gx_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
-        Self::check_gx_version()?;
-
-        let gx_path = Self::gx_bin_path();
-        let module = args.module();
-        if let Some(module) = module {
-            println!("use module :{module}");
-        }
-
-        // 与 compose 的可选阶段流程共用同一入口 `run_gx_flow`。
-        Self::run_gx_flow(
-            &gx_path,
-            args.env(),
-            args.debug_level(),
-            module.as_deref(),
-            cmd_name,
-            &[],
-        )
-        .await
-    }
-
-    async fn run_compose_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
-        let current_dir = std::env::current_dir().expect("无法获取当前目录");
-
-        // 将 gops sys 语义映射到 docker compose 子命令：
-        //   download -> pull, install -> create, start -> up -d, stop -> stop,
-        //   uninstall -> down, status -> ps, diagnose -> config
-        let (subcommand, extra) = compose_subcommand(cmd_name);
-
-        if args.module().is_some() {
-            println!("note: docker-compose 类型系统忽略 --mod 参数");
-        }
-
-        let mut cmd = TokioCommand::new("docker");
-        // compose 文件位置可变（默认 `sys/docker-compose.yaml`），但项目目录始终锚定到系统根，
-        // 使相对挂载与 .env 的基准保持不变。
-        let sys_paths = SysOperatorPath::new(&current_dir);
-        let candidates = sys_paths.compose_candidates();
-        let compose_file = candidates.first().cloned();
-        if let Some(file) = &compose_file {
-            if candidates.len() > 1 {
-                eprintln!(
-                    "warn: 检测到 {} 个 compose 文件，使用 {}（其余忽略）",
-                    candidates.len(),
-                    file.display()
-                );
-            }
-        } else {
-            eprintln!(
-                "warn: 未找到 compose 文件（已按 sys/ 与系统根的 {{compose,docker-compose}}.{{yaml,yml}} 查找），交由 docker compose 自行发现"
-            );
-        }
-        cmd.arg("compose")
-            .args(compose_global_args(compose_file.as_deref(), &current_dir))
-            .arg(subcommand)
-            .args(extra);
-        cmd.current_dir(&current_dir);
-
-        // 运行时注入密钥：从 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）读取 SEC_* 变量，
-        // 只进入 docker compose 子进程环境，不落盘、不进 .env。
-        // diagnose（docker compose config）只读校验，注入掩码值以免泄露明文。
-        let sec_dict = orion_sec::load_sec_dict().source_resource()?;
-        for (key, value) in sec_env_pairs_for(cmd_name, &sec_dict) {
-            cmd.env(key, value);
-        }
-
-        Self::run_and_stream(cmd, "docker compose").await
-    }
-
-    /// 启动子进程并转发 stdout/stderr，非零退出返回错误。
-    async fn run_and_stream(mut cmd: TokioCommand, label: &str) -> MainResult<()> {
-        // 设置管道并启动进程
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("无法启动 {label} 命令: {}", e))
-            .source_resource()?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("无法获取stdout"))
-            .source_resource()?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("无法获取stderr"))
-            .source_resource()?;
-
-        // 创建异步读取器并并发处理stdout和stderr
-        let stdout_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                println!("{}", line);
-            }
-        });
-
-        let stderr_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                eprintln!("{}", line);
-            }
-        });
-
-        // 等待输出处理完成
-        let _ = tokio::try_join!(stdout_handle, stderr_handle);
-
-        // 等待子进程完成并检查退出状态
-        let exit_status = child
-            .wait()
-            .await
-            .map_err(|e| anyhow::anyhow!("等待子进程失败: {}", e))
-            .source_resource()?;
-
-        if !exit_status.success() {
-            return Err(anyhow::anyhow!("命令执行失败，退出状态: {}", exit_status))
-                .source_resource()?;
-        }
-
-        Ok(())
     }
 
     pub async fn handle_check(args: SysCheckArgs) -> MainResult<()> {
@@ -869,15 +534,6 @@ impl SysCommandHandler {
             SysCmd::Package(args) => Self::handle_package(args).await,
             SysCmd::Localize(args) => Self::handle_localize(args).await,
             SysCmd::Setting(args) => Self::handle_setting(args).await,
-            SysCmd::Download(sys_ops_args) => Self::handle_ops_cmd("download", sys_ops_args).await,
-            SysCmd::Install(sys_ops_args) => Self::handle_ops_cmd("install", sys_ops_args).await,
-            SysCmd::Start(sys_ops_args) => Self::handle_ops_cmd("start", sys_ops_args).await,
-            SysCmd::Stop(sys_ops_args) => Self::handle_ops_cmd("stop", sys_ops_args).await,
-            SysCmd::Uninstall(sys_ops_args) => {
-                Self::handle_ops_cmd("uninstall", sys_ops_args).await
-            }
-            SysCmd::Status(sys_ops_args) => Self::handle_ops_cmd("status", sys_ops_args).await,
-            SysCmd::Diagnose(sys_ops_args) => Self::handle_ops_cmd("diagnose", sys_ops_args).await,
             SysCmd::Check(args) => Self::handle_check(args).await,
         }
     }
@@ -903,16 +559,6 @@ enum StageProbe {
     Skipped(String),
 }
 
-/// 注入 gx 子进程时**保留**的环境变量：不被合并配置覆盖，否则可能破坏 gx 自身
-/// （`~/.galaxy` 解析、动态库加载、`gx.*` 内部变量）或其 shell 的 `PATH`。
-fn is_reserved_env(key: &str) -> bool {
-    const RESERVED: &[&str] = &[
-        "PATH", "HOME", "PWD", "OLDPWD", "SHELL", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL",
-    ];
-    const RESERVED_PREFIXES: &[&str] = &["LD_", "DYLD_", "GX_", "GXL_"];
-    RESERVED.contains(&key) || RESERVED_PREFIXES.iter().any(|p| key.starts_with(p))
-}
-
 /// 把 `--kind` 的字符串解析为系统类型，未知值默认 Gxl。
 fn parse_kind(s: &str) -> SysKind {
     match s {
@@ -921,89 +567,12 @@ fn parse_kind(s: &str) -> SysKind {
     }
 }
 
-/// 把 gops sys 命令名映射为 docker compose 子命令（及附加参数）。
-fn compose_subcommand(cmd_name: &str) -> (&str, &'static [&'static str]) {
-    match cmd_name {
-        "download" => ("pull", &[]),
-        "install" => ("create", &[]),
-        "start" => ("up", &["-d"]),
-        "stop" => ("stop", &[]),
-        "uninstall" => ("down", &[]),
-        "status" => ("ps", &[]),
-        "diagnose" => ("config", &[]),
-        other => (other, &[]),
-    }
-}
-
-/// 构造 `docker compose` 的全局参数（必须位于子命令之前）。
-///
-/// 分两种布局：
-/// - **内收布局**（compose 在 `sys/` 下）：显式 `-f <file> --project-directory <系统根>`，
-///   把项目目录锚回系统根，避免项目名与相对挂载基准漂到 `sys/`。显式 `-f` 会关闭 docker
-///   对 override 的自动合并，因此这里同时显式合并同目录的 `*.override.{yaml,yml}`。
-/// - **旧布局**（compose 就在系统根）：**不传任何全局参数**，退回 docker 自动发现。
-///   这样能完整保留 docker 的 override 自动合并与 `COMPOSE_FILE` 环境变量语义，
-///   保证旧仓不加改动照样跑。此时项目目录本就等于系统根，语义与内收布局一致。
-///
-/// 未找到 compose 文件时同样返回空参数，交由 docker 自行发现。
-fn compose_global_args(compose_file: Option<&Path>, project_dir: &Path) -> Vec<OsString> {
-    let Some(file) = compose_file else {
-        return Vec::new();
-    };
-    // 旧布局：文件就在系统根，交给 docker 自动发现（保留 override 合并 / COMPOSE_FILE）。
-    if file.parent() == Some(project_dir) {
-        return Vec::new();
-    }
-
-    let mut args = vec![OsString::from("-f"), file.as_os_str().to_os_string()];
-    for override_file in compose_override_files(file) {
-        args.push(OsString::from("-f"));
-        args.push(override_file.into_os_string());
-    }
-    args.push(OsString::from("--project-directory"));
-    args.push(project_dir.as_os_str().to_os_string());
-    args
-}
-
-/// 与 compose 主文件同目录、按 docker 约定命名的 override 文件（存在者）：
-/// `<stem>.override.yaml` → `<stem>.override.yml`。
-fn compose_override_files(base: &Path) -> Vec<PathBuf> {
-    let (Some(stem), Some(dir)) = (base.file_stem().and_then(|s| s.to_str()), base.parent()) else {
-        return Vec::new();
-    };
-    ["yaml", "yml"]
-        .into_iter()
-        .map(|ext| dir.join(format!("{stem}.override.{ext}")))
-        .filter(|path| path.is_file())
-        .collect()
-}
-
-/// 密钥掩码值，与 `orion-sec` 的 `SECRET_MASK` 保持一致。
-const SECRET_MASK: &str = "********";
-
-/// 把 secret dict（SEC_* → 明文值）转成要注入子进程的 (KEY, VALUE) 环境变量对。
-/// `diagnose`（docker compose config）是只读校验，注入掩码值以免泄露明文；其余命令注入明文。
-fn sec_env_pairs_for(cmd_name: &str, dict: &ValueDict) -> Vec<(String, String)> {
-    let mask = cmd_name == "diagnose";
-    dict.iter()
-        .map(|(k, v)| {
-            let value = if mask {
-                SECRET_MASK.to_string()
-            } else {
-                v.to_string()
-            };
-            (k.as_str().to_string(), value)
-        })
-        .collect()
-}
-
 // === 测试 ===
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use galaxy_ops::infra::{WorkDirWithLock, once_init_log};
-    use orion_vars::vars::ValueType;
     use tempfile::tempdir;
     #[tokio::test]
     async fn test_sys_new_command() {
@@ -1135,40 +704,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gx_run_args_basic() {
-        // gops sys start  ->  gx run -e default -d 0 start
-        let args = SysCommandHandler::gx_run_args("start", "default", 0, None);
-        assert_eq!(args.join(" "), "run -e default -d 0 start");
-    }
-
-    #[test]
-    fn test_gx_run_args_with_module_and_debug() {
-        // gops sys stop --mod nginx -e prod -d 2
-        //   ->  gx run -e prod -d 2 --cmd-arg nginx stop
-        let args = SysCommandHandler::gx_run_args("stop", "prod", 2, Some("nginx"));
-        assert_eq!(args.join(" "), "run -e prod -d 2 --cmd-arg nginx stop");
-        // 流程名始终在末尾
-        assert_eq!(args.last().map(String::as_str), Some("stop"));
-    }
-
-    #[test]
-    fn test_gx_run_args_covers_all_dispatch_commands() {
-        for cmd in [
-            "download",
-            "install",
-            "uninstall",
-            "start",
-            "stop",
-            "status",
-            "diagnose",
-        ] {
-            let args = SysCommandHandler::gx_run_args(cmd, "default", 0, None);
-            assert_eq!(args.first().map(String::as_str), Some("run"));
-            assert_eq!(args.last().map(String::as_str), Some(cmd));
-        }
-    }
-
-    #[test]
     fn test_sys_localize_args_getter() {
         once_init_log();
         let args = SysLocalizeArgs {
@@ -1215,25 +750,6 @@ mod tests {
             SysCommandHandler::gx_flow_probe("/nonexistent/gx-xyz", "localize"),
             StageProbe::Skipped(_)
         ));
-    }
-
-    #[test]
-    fn test_reserved_env_filter() {
-        // 关键系统变量/内部前缀不得被合并配置覆盖
-        for k in [
-            "PATH",
-            "HOME",
-            "PWD",
-            "LD_PRELOAD",
-            "DYLD_LIBRARY_PATH",
-            "GX_FOO",
-            "GXL_PRJ_ROOT",
-        ] {
-            assert!(is_reserved_env(k), "{k} should be reserved");
-        }
-        for k in ["DOMAIN", "HTTP_PORT", "NGINX_TAG"] {
-            assert!(!is_reserved_env(k), "{k} should not be reserved");
-        }
     }
 
     #[tokio::test]
@@ -1314,79 +830,6 @@ exit 0
         assert_eq!(kind, SysKind::Gxl);
     }
 
-    #[test]
-    fn test_compose_subcommand() {
-        fn check(cmd: &str, sub: &str, extra: &[&str]) {
-            let (s, e) = compose_subcommand(cmd);
-            assert_eq!(s, sub);
-            assert_eq!(e, extra);
-        }
-        check("download", "pull", &[]);
-        check("install", "create", &[]);
-        check("start", "up", &["-d"]);
-        check("stop", "stop", &[]);
-        check("uninstall", "down", &[]);
-        check("status", "ps", &[]);
-        check("diagnose", "config", &[]);
-        // 未知命令透传
-        check("whatever", "whatever", &[]);
-    }
-
-    #[test]
-    fn test_compose_global_args_anchor_to_project_dir() {
-        let root = Path::new("/srv/gateway");
-        let file = root.join("sys/docker-compose.yaml");
-
-        assert_eq!(
-            compose_global_args(Some(&file), root),
-            vec![
-                OsString::from("-f"),
-                OsString::from("/srv/gateway/sys/docker-compose.yaml"),
-                OsString::from("--project-directory"),
-                OsString::from("/srv/gateway"),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_compose_global_args_empty_for_root_layout() {
-        // 旧布局（compose 就在系统根）：不传 global args，退回 docker 自动发现，
-        // 以保留 docker-compose.override.yml 的自动合并与 COMPOSE_FILE 环境变量语义。
-        let root = Path::new("/srv/gateway");
-        assert!(compose_global_args(Some(&root.join("docker-compose.yml")), root).is_empty());
-        assert!(compose_global_args(Some(&root.join("compose.yaml")), root).is_empty());
-    }
-
-    #[test]
-    fn test_compose_global_args_merges_override_in_sys_layout() {
-        // 显式 -f 会关闭 override 自动合并，因此内收布局要把同目录的 override 显式带上。
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("sys")).unwrap();
-        std::fs::write(root.join("sys/docker-compose.yaml"), "base").unwrap();
-        std::fs::write(root.join("sys/docker-compose.override.yaml"), "override").unwrap();
-        let file = root.join("sys/docker-compose.yaml");
-
-        assert_eq!(
-            compose_global_args(Some(&file), root),
-            vec![
-                OsString::from("-f"),
-                root.join("sys/docker-compose.yaml").into_os_string(),
-                OsString::from("-f"),
-                root.join("sys/docker-compose.override.yaml")
-                    .into_os_string(),
-                OsString::from("--project-directory"),
-                root.as_os_str().to_os_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_compose_global_args_empty_without_compose_file() {
-        // 未找到 compose 文件时不加全局参数，仍交由 docker 自行发现（兼容旧布局）
-        assert!(compose_global_args(None, Path::new("/srv/gateway")).is_empty());
-    }
-
     #[tokio::test]
     async fn test_sys_new_writes_kind() {
         once_init_log();
@@ -1450,28 +893,6 @@ exit 0
     }
 
     #[test]
-    fn test_sec_env_pairs_for_diagnose_masks() {
-        let mut dict = ValueDict::new();
-        dict.insert("SEC_DB_PASSWORD", ValueType::from("pw"));
-        dict.insert("SEC_API_KEY", ValueType::from("tok-123"));
-        // diagnose 注入掩码值，不泄露明文
-        let pairs = sec_env_pairs_for("diagnose", &dict);
-        assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "********".to_string())));
-        assert!(pairs.contains(&("SEC_API_KEY".to_string(), "********".to_string())));
-    }
-
-    #[test]
-    fn test_sec_env_pairs_for_start_plaintext() {
-        let mut dict = ValueDict::new();
-        dict.insert("SEC_DB_PASSWORD", ValueType::from("pw"));
-        dict.insert("SEC_API_KEY", ValueType::from("tok-123"));
-        // 非 diagnose 注入明文
-        let pairs = sec_env_pairs_for("start", &dict);
-        assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "pw".to_string())));
-        assert!(pairs.contains(&("SEC_API_KEY".to_string(), "tok-123".to_string())));
-    }
-
-    #[test]
     fn test_load_sec_dict_normalizes_keys() {
         let temp_dir = tempdir().unwrap();
         let _wd = WorkDirWithLock::change(temp_dir.path()).unwrap();
@@ -1483,14 +904,10 @@ exit 0
         )
         .unwrap();
 
-        // orion-sec 归一化为大写并加 SEC_ 前缀
+        // orion-sec 归一化为大写并加 SEC_ 前缀；掩码/明文转换见 run_cmd 的 sec_env_pairs_for
         let dict = orion_sec::load_sec_dict().unwrap();
-        let pairs = sec_env_pairs_for("start", &dict);
-        assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "secretpw".to_string())));
-        assert!(pairs.contains(&(
-            "SEC_POSTGRES_PASSWORD".to_string(),
-            "secretpgpw".to_string()
-        )));
+        assert!(dict.get("SEC_DB_PASSWORD").is_some());
+        assert!(dict.get("SEC_POSTGRES_PASSWORD").is_some());
     }
 
     #[tokio::test]

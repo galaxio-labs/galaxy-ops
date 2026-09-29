@@ -140,7 +140,7 @@ System（共享定义）              Ops Project（客户差异）
                                     ↓  gops sys localize
                                     .env（仅非密钥配置，供 compose 消费，位于系统根）
 
-密钥（密码/token）→ 运行时由 gops sys start 从 ~/.galaxy/sec_value.yml 注入子进程环境，不落盘
+密钥（密码/token）→ 运行时由 gops run start 从 ~/.galaxy/sec_value.yml 注入子进程环境，不落盘
 ```
 
 **规则**：`.env = 系统默认值（merged_vars.yml）+ values/sys_value.yml + values/value.yml`（后两者只需写要覆盖的项，仅非密钥配置）；密钥用 `${SEC_xxx}` 占位，不写进 `.env`。
@@ -197,17 +197,17 @@ cat web.conf                     # server { listen 8081; }：阶段流程读到�
 
 本示例的 `_gal/work.gxl` 就用它**幂等地**写了一份 `web.conf`（`test -f web.conf || …`，存在即跳过）——这正是「证书/密钥必须生成一次即稳定」的写法。详见 [`../src/system/README.md`](../src/system/README.md)。
 
-该系统的 `sys/sys_model.yml` 已标记 `kind: docker-compose`，因此 `gops sys` 的部署命令会自动映射到 `docker compose`，无需安装 gx：
+该系统的 `sys/sys_model.yml` 已标记 `kind: docker-compose`，因此 `gops run` 的部署命令会自动映射到 `docker compose`，无需安装 gx：
 
 ```bash
-gops sys diagnose   # = docker compose config（校验并展示解析后的 compose）
-gops sys start      # = docker compose up -d
-gops sys status     # = docker compose ps
-gops sys stop       # = docker compose stop
-gops sys uninstall  # = docker compose down
+gops run diagnose   # = docker compose config（校验并展示解析后的 compose）
+gops run start      # = docker compose up -d
+gops run status     # = docker compose ps
+gops run stop       # = docker compose stop
+gops run uninstall  # = docker compose down
 ```
 
-`.env` 由 `export_env_file` 生成（`src/project.rs`）：键大写、简单标量原样输出、含空格/特殊字符的值用双引号包裹，嵌套对象/列表序列化为 JSON。密钥不落盘：`gops sys start` 通过 `orion_sec::load_sec_dict()` 读 `~/.galaxy/sec_value.yml`，以 `SEC_*` 环境变量注入 `docker compose` 子进程（`app/gops/commands/sys_cmd.rs`）。
+`.env` 由 `export_env_file` 生成（`src/project.rs`）：键大写、简单标量原样输出、含空格/特殊字符的值用双引号包裹，嵌套对象/列表序列化为 JSON。密钥不落盘：`gops run start` 通过 `orion_sec::load_sec_dict()` 读 `~/.galaxy/sec_value.yml`，以 `SEC_*` 环境变量注入 `docker compose` 子进程（`app/gops/commands/run_cmd.rs`）。
 
 ## 关键流程与前置条件（实测）
 
@@ -228,7 +228,7 @@ gops sys uninstall  # = docker compose down
    gops prj import --path ../web-stack-0.1.0.tar.gz
    ```
 
-6. **`gops sys download/install/start/stop/status/diagnose`**：按 `sys/sys_model.yml` 的 `kind` 字段分派：
+6. **`gops run download/install/start/stop/status/diagnose`**：按 `sys/sys_model.yml` 的 `kind` 字段分派：
    - `kind: gxl`（默认，兼容旧系统）：委托给外部 `gx` 执行（`$HOME/bin/gx`，即 `gx run -e <env> -d <n> <cmd>`），要求 `gx >= 0.13.0`。
    - `kind: docker-compose`：直接映射到 `docker compose` 子命令（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`），无需安装 `gx`。
 

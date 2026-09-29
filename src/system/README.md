@@ -68,15 +68,19 @@ src/system/
 ## 与 CLI 的对应
 
 ```text
+# gops sys —— 定义 / 交付 / 工件
 gops sys new [--kind gxl|docker-compose]
 gops sys update
 gops sys package
 gops sys localize
 gops sys setting
-gops sys download/install/uninstall/start/stop/status/diagnose
+gops sys check
+
+# gops run —— 运行时运维
+gops run download/install/uninstall/start/stop/status/diagnose
 ```
 
-`download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
+`gops run download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
 
 - `gxl`（默认）：委托给外部 `gx`（`$HOME/bin/gx`，即 `gx run <cmd>`）。
 - `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`）。

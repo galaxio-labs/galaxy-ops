@@ -35,10 +35,11 @@ Module -> System -> Ops Project
 
 ## What It Does
 
-当前仓库中的 `gops` CLI 主要提供四组能力：
+当前仓库中的 `gops` CLI 主要提供五组能力：
 
 - `gops mod`：创建模块、生成示例、更新引用、本地化模块配置。
-- `gops sys`：创建系统、更新系统、生成环境本地化结果，并执行下载、安装、启动、停止、状态查询等系统操作。
+- `gops sys`：系统**定义与交付**——创建系统、更新/解析、本地化、打包、漂移检查。
+- `gops run`：**运行时运维**——在目标环境下载/安装/卸载组件、启动/停止服务、查询状态、诊断。
 - `gops prj`：创建运维工程、导入系统、更新本地项目引用。
 - `gops self`：检查与升级 `gops` 自身（自升级）。
 
@@ -59,6 +60,7 @@ gops <COMMAND>
 
 - `gops mod`
 - `gops sys`
+- `gops run`
 - `gops prj`
 - `gops self`
 
@@ -80,6 +82,10 @@ gops sys update
 # 解析变量并打包系统为 .tar.gz
 cd web-stack
 gops sys package
+
+# 在目标环境运维（下载/安装/启停/状态/诊断）
+gops run install
+gops run start
 
 # 创建运维工程
 gops prj new --name customer-a
@@ -104,6 +110,7 @@ gops self update --channel alpha --yes
 gops --help
 gops mod --help
 gops sys --help
+gops run --help
 gops prj --help
 gops self --help
 ```
@@ -182,7 +189,7 @@ gops sys new --name web-stack
 
 系统用于组合多个模块，并形成一个更接近交付视角的系统定义。
 
-默认是模块式（GXL）系统；也支持纯 docker-compose 系统：`gops sys new --name web-stack --kind docker-compose`。此时 `sys start/stop/status/...` 自动映射到 `docker compose`，密钥用 `${SEC_xxx}` 占位、运行时从 `~/.galaxy/sec_value.yml` 注入（详见 [example/README.md](./example/README.md) 与 [src/system/README.md](./src/system/README.md)）。
+默认是模块式（GXL）系统；也支持纯 docker-compose 系统：`gops sys new --name web-stack --kind docker-compose`。此时 `gops run start/stop/status/...` 自动映射到 `docker compose`，密钥用 `${SEC_xxx}` 占位、运行时从 `~/.galaxy/sec_value.yml` 注入（详见 [example/README.md](./example/README.md) 与 [src/system/README.md](./src/system/README.md)）。
 
 ### 3. Package the System
 

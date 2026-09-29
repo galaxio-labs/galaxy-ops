@@ -102,4 +102,19 @@ mod tests {
         let cmd = GInsCmd::try_parse_from(["gops", "self", "status"]).expect("parse self status");
         assert!(matches!(cmd, GInsCmd::SelfUpdate(SelfCmd::Status)));
     }
+
+    #[test]
+    fn diff_subcommands_parse() {
+        let sys = GInsCmd::try_parse_from(["gops", "sys", "diff", "--json"])
+            .expect("parse sys diff --json");
+        assert!(matches!(sys, GInsCmd::Sys(_)));
+        let sys_plain = GInsCmd::try_parse_from(["gops", "sys", "diff"]).expect("parse sys diff");
+        assert!(matches!(sys_plain, GInsCmd::Sys(_)));
+
+        let m = GInsCmd::try_parse_from(["gops", "mod", "diff"]).expect("parse mod diff");
+        assert!(matches!(m, GInsCmd::Mod(_)));
+        let m_json = GInsCmd::try_parse_from(["gops", "mod", "diff", "--json"])
+            .expect("parse mod diff --json");
+        assert!(matches!(m_json, GInsCmd::Mod(_)));
+    }
 }

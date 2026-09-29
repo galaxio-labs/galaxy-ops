@@ -1,12 +1,14 @@
 use clap::{Args, Parser};
 use derive_getters::Getters;
 use galaxy_ops::const_vars::VALUE_DIR;
+use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
-use galaxy_ops::module::operator::ModOperator;
+use galaxy_ops::module::operator::{ModOperator, ModValuePaths};
 use galaxy_ops::module::spec::make_mod_spec_example;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
+use galaxy_ops::project::load_value_file;
+use galaxy_ops::report;
 use galaxy_ops::types::{LocalizeOptions, ModuleLocalizable, RefUpdateable};
-use galaxy_ops::{error::MainResult, module::operator::ModValuePaths};
 use orion_conf::FilePersist;
 use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{OriginDict, ValueDict};
@@ -52,6 +54,15 @@ pub struct ModLocalizeArgs {
     pub localize: LocalizeArgs,
 }
 
+#[derive(Debug, Args, Getters)]
+pub struct ModDiffArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+
+    #[arg(long, help = "以 JSON 输出（便于脚本消费）")]
+    pub json: bool,
+}
+
 #[derive(Debug, Parser)]
 pub enum ModCmd {
     /// 创建示例模块结构 (Create Example Module Structure)
@@ -85,6 +96,15 @@ pub enum ModCmd {
                      Generate localized configuration files for the module based on environment-specific values. Useful for adapting modules to different deployment environments."
     )]
     Localize(ModLocalizeArgs),
+
+    /// 展示模块值变更 (Show Module Value Diff)
+    #[command(
+        about = "展示模块值变更 (Show Module Value Diff)",
+        long_about = "只读展示：比对模块默认值与客户覆盖后的生效值，按模型列出每个键的初始值、生效值、来源与可变性。\n\
+                     用于回答“哪些值被覆盖、被哪一层覆盖”。`--json` 输出机器可读结果。\n\
+                     Usage: gops mod diff [--json]"
+    )]
+    Diff(ModDiffArgs),
 }
 
 // === DfxArgsGetter 实现 ===
@@ -117,6 +137,15 @@ impl DfxArgsGetter for ModUpdateArgs {
 }
 
 impl DfxArgsGetter for ModLocalizeArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
+impl DfxArgsGetter for ModDiffArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -173,9 +202,25 @@ impl ModCommandHandler {
         let operator = ModOperator::load(&current_dir).err_conv()?;
         let val_path = ModValuePaths::from(current_dir).join(VALUE_DIR);
         operator
-            .mod_localize(val_path, LocalizeOptions::new(OriginDict::default()))
+            .mod_localize(
+                val_path.clone(),
+                LocalizeOptions::new(OriginDict::default()),
+            )
             .await
             .err_conv()?;
+        let changes = mod_value_changes(&operator, &val_path)?;
+        print_mod_changes(&changes, false);
+        Ok(())
+    }
+
+    pub async fn handle_diff(args: ModDiffArgs) -> MainResult<()> {
+        let current_dir = std::env::current_dir().expect("无法获取当前目录");
+        galaxy_ops::infra::configure_dfx_logging(&args);
+
+        let operator = ModOperator::load(&current_dir).err_conv()?;
+        let val_path = ModValuePaths::from(current_dir).join(VALUE_DIR);
+        let changes = mod_value_changes(&operator, &val_path)?;
+        print_mod_changes(&changes, args.json);
         Ok(())
     }
 
@@ -185,7 +230,62 @@ impl ModCommandHandler {
             ModCmd::New(args) => Self::handle_new(args).await,
             ModCmd::Update(args) => Self::handle_update(args).await,
             ModCmd::Localize(args) => Self::handle_localize(args).await,
+            ModCmd::Diff(args) => Self::handle_diff(args).await,
         }
+    }
+}
+
+/// 每个模型目标的值变更：
+/// 初始层 = 模块默认值（`mod/<model>/vars.yml`，`origin=mod-default`）；
+/// 生效层 = 默认值 ⊕ `values/<model>/sys_value.yml`(`sys-setting`) ⊕ 客户值(`mod-cust`) ⊕ `mod_value.yml`(`mod-setting`)，
+/// 后者直接复用 `project::mix_used_value_raw` 以保证与 `localize` 写出的值一致（均为未展开值）。
+fn mod_value_changes(
+    operator: &ModOperator,
+    val_path: &ModValuePaths,
+) -> MainResult<Vec<(String, Vec<report::ValueRow>)>> {
+    let mut out = Vec::new();
+    for (model, mm) in operator.mod_spec().targets() {
+        let model_path = val_path.clone().join(model.to_string());
+        let initial = OriginDict::from(mm.vars().clone()).with_origin("mod-default");
+
+        let mut sys_vars = OriginDict::default();
+        if model_path.sys_value_file().exists() {
+            sys_vars = OriginDict::from(load_value_file(&model_path.sys_value_file())?);
+            sys_vars.set_source("sys-setting");
+        }
+        let effective = galaxy_ops::project::mix_used_value_raw(
+            LocalizeOptions::new(sys_vars),
+            mm.vars(),
+            &model_path.mod_value_file(),
+        )?;
+
+        let rows = report::diff_layers(&initial, &effective)
+            .into_iter()
+            .filter(|r| r.state() != report::ValueState::Same)
+            .collect();
+        out.push((model.to_string(), rows));
+    }
+    Ok(out)
+}
+
+/// 统一的变更呈现：`json` 为真输出分组 JSON；否则逐模型打印变更表，均无变更时打 `[OK]`。
+fn print_mod_changes(changes: &[(String, Vec<report::ValueRow>)], json: bool) {
+    if json {
+        println!("{}", report::render_json_models(changes));
+        return;
+    }
+    let color = report::use_color();
+    let mut any = false;
+    for (model, rows) in changes {
+        if rows.is_empty() {
+            continue;
+        }
+        any = true;
+        println!("[{model}] 值变更 ({} 项):", rows.len());
+        print!("{}", report::render_table(rows, color));
+    }
+    if !any {
+        println!("[OK] 值无覆盖（全部取模块默认值）");
     }
 }
 

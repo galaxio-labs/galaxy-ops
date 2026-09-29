@@ -10,6 +10,7 @@ use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::ModelSTD;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::project::load_value_file;
+use galaxy_ops::report;
 use galaxy_ops::system::drift::{DriftStatus, detect_drift};
 use galaxy_ops::system::lock::DeliverLock;
 use galaxy_ops::system::operator::SysOperator;
@@ -110,6 +111,15 @@ pub struct SysCheckArgs {
     pub debug_log: DebugLogArgs,
 }
 
+#[derive(Debug, Args, Getters)]
+pub struct SysDiffArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+
+    #[arg(long, help = "以 JSON 输出（便于脚本消费）")]
+    pub json: bool,
+}
+
 #[derive(Debug, Parser)]
 pub enum SysCmd {
     /// 创建新的系统操作符 (Create New System Operator)
@@ -163,6 +173,15 @@ pub enum SysCmd {
                      Usage: gops sys check"
     )]
     Check(SysCheckArgs),
+
+    /// 展示系统值变更 (Show System Value Diff)
+    #[command(
+        about = "展示系统值变更 (Show System Value Diff)",
+        long_about = "只读展示：比对系统默认值与客户覆盖后的生效值，列出每个键的初始值、生效值、来源与可变性。\n\
+                     用于回答“哪些值被覆盖、被哪一层覆盖”。`--json` 输出机器可读结果。\n\
+                     Usage: gops sys diff [--json]"
+    )]
+    Diff(SysDiffArgs),
 }
 
 // === DfxArgsGetter 实现 ===
@@ -203,6 +222,14 @@ impl DfxArgsGetter for SysLocalizeArgs {
     }
 }
 impl DfxArgsGetter for SysCheckArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+impl DfxArgsGetter for SysDiffArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -369,26 +396,8 @@ impl SysCommandHandler {
         // 确保本地化值文件存在（生成 sys_value.yml 注释模板）；变量未解析时会报错
         spec.init_setting_value_in(val_path.clone())?;
 
-        // 基线：系统解析出的默认值（sys/merged_vars.yml 的 system 段），
-        // 使值文件只需写“需要修改的项”，其余取系统默认值。
-        let mut dict = OriginDict::from(spec.system_default_values().err_conv()?);
-        dict.set_source("sys-defaults");
-
-        // 叠加值文件（可选，可为部分覆盖；全注释模板等价于空覆盖）
-        let value_file = val_path.sys_value_file();
-        if value_file.exists() {
-            let mut sys_dict = OriginDict::from(load_value_file(&value_file)?);
-            sys_dict.set_source("sys-setting");
-            dict.merge(&sys_dict);
-        }
-
-        // 叠加客户覆盖值 values/value.yml（若存在），优先于系统默认与值文件
-        let user_value_file = val_path.root().join(USER_VALUE_FILE);
-        if user_value_file.exists() {
-            let mut user_dict = OriginDict::from(load_value_file(&user_value_file)?);
-            user_dict.set_source("customer");
-            dict.merge(&user_dict);
-        }
+        // 合并顺序与“初始层 / 生效层”的划分集中在此，供 diff 与 localize 共用。
+        let (initial, dict) = Self::sys_value_layers(&spec, &val_path)?;
 
         let no_flow = args.no_flow;
         let debug = args.debug_level();
@@ -397,6 +406,11 @@ impl SysCommandHandler {
         // 供随后的阶段流程注入子进程。
         let options = LocalizeOptions::new(dict).with_only_mod(args.module);
         let stage_env = galaxy_ops::project::env_pairs(options.evaled_value());
+        // 比对初始层（未展开）与生效层（未展开）：避免 `${VAR}` 展开带来伪变更。
+        let changes = report::diff_layers(&initial, options.raw_value())
+            .into_iter()
+            .filter(|r| r.state() != report::ValueState::Same)
+            .collect::<Vec<_>>();
 
         spec.localize(val_path, options).await.err_conv()?;
 
@@ -412,6 +426,65 @@ impl SysCommandHandler {
             )
             .await?;
         }
+        Self::print_changes(&changes, false);
+        Ok(())
+    }
+
+    /// 复现 `sys localize` 的层合并：
+    /// - 初始层 = 系统默认值（`sys/merged_vars.yml` 的 `system:` 段，`origin=sys-defaults`）；
+    /// - 生效层 = 初始层 ⊕ `values/sys_value.yml`(`sys-setting`) ⊕ `values/value.yml`(`customer`)。
+    ///
+    /// 返回的均为**未展开**值，直接可比对。
+    fn sys_value_layers(
+        spec: &SysOperator,
+        val_path: &SysValuePaths,
+    ) -> MainResult<(OriginDict, OriginDict)> {
+        let initial =
+            OriginDict::from(spec.system_default_values().err_conv()?).with_origin("sys-defaults");
+        let mut dict = initial.clone();
+
+        let value_file = val_path.sys_value_file();
+        if value_file.exists() {
+            let mut sys_dict = OriginDict::from(load_value_file(&value_file)?);
+            sys_dict.set_source("sys-setting");
+            dict.merge(&sys_dict);
+        }
+
+        let user_value_file = val_path.root().join(USER_VALUE_FILE);
+        if user_value_file.exists() {
+            let mut user_dict = OriginDict::from(load_value_file(&user_value_file)?);
+            user_dict.set_source("customer");
+            dict.merge(&user_dict);
+        }
+        Ok((initial, dict))
+    }
+
+    /// 统一的变更呈现：`json` 为真输出 JSON；否则无变更打 `[OK]`、有变更打印表格。
+    fn print_changes(changes: &[report::ValueRow], json: bool) {
+        if json {
+            println!("{}", report::render_json(changes));
+            return;
+        }
+        if changes.is_empty() {
+            println!("[OK] 值无覆盖（全部取系统默认值）");
+            return;
+        }
+        println!("值变更 ({} 项):", changes.len());
+        print!("{}", report::render_table(changes, report::use_color()));
+    }
+
+    pub async fn handle_diff(args: SysDiffArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().expect("无法获取当前目录");
+
+        let spec = SysOperator::load(&current_dir).err_conv()?;
+        let val_path = resolve_sys_value_path(&current_dir);
+        let (initial, effective) = Self::sys_value_layers(&spec, &val_path)?;
+        let changes = report::diff_layers(&initial, &effective)
+            .into_iter()
+            .filter(|r| r.state() != report::ValueState::Same)
+            .collect::<Vec<_>>();
+        Self::print_changes(&changes, args.json);
         Ok(())
     }
 
@@ -535,6 +608,7 @@ impl SysCommandHandler {
             SysCmd::Localize(args) => Self::handle_localize(args).await,
             SysCmd::Setting(args) => Self::handle_setting(args).await,
             SysCmd::Check(args) => Self::handle_check(args).await,
+            SysCmd::Diff(args) => Self::handle_diff(args).await,
         }
     }
 }
@@ -1120,6 +1194,78 @@ exit 0
             assert!(result.is_err(), "--only should fail without resolved vars");
             let err = format!("{:?}", result.unwrap_err());
             assert!(err.contains("系统变量未解析"), "unexpected error: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sys_diff_lists_overrides_from_value_file() {
+        once_init_log();
+        let temp_dir = tempdir().unwrap();
+
+        // 项目下创建 docker-compose 系统并解析变量
+        {
+            let _wd = WorkDirWithLock::change(temp_dir.path()).unwrap();
+            SysCommandHandler::handle_new(SysNewArgs {
+                name: "diff_demo".to_string(),
+                kind: Some("docker-compose".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+
+        let sys_dir = temp_dir.path().join("diff_demo");
+        {
+            let _wd = WorkDirWithLock::change(&sys_dir).unwrap();
+            SysCommandHandler::handle_update(SysUpdateArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                force: false,
+            })
+            .await
+            .unwrap();
+        }
+
+        // 客户覆盖层只写需要改的项
+        std::fs::write(
+            sys_dir.join("values/value.yml"),
+            "SERVICE_IMAGE: custom:1\n",
+        )
+        .unwrap();
+
+        let spec = SysOperator::load(&sys_dir).unwrap();
+        let val_path = resolve_sys_value_path(&sys_dir);
+        let (initial, effective) = SysCommandHandler::sys_value_layers(&spec, &val_path).unwrap();
+        let rows: Vec<_> = report::diff_layers(&initial, &effective)
+            .into_iter()
+            .filter(|r| r.state() != report::ValueState::Same)
+            .collect();
+
+        let row = rows
+            .iter()
+            .find(|r| r.key() == "SERVICE_IMAGE")
+            .expect("SERVICE_IMAGE override row");
+        assert_eq!(row.initial(), Some("nginx:alpine"));
+        assert_eq!(row.effective(), Some("custom:1"));
+        assert_eq!(row.origin(), Some("customer"));
+        assert_eq!(row.state(), report::ValueState::Changed);
+
+        // 未被覆盖的默认值不出现
+        assert!(!rows.iter().any(|r| r.key() == "REPLICAS"));
+
+        // handle_diff 端到端可跑通（含 --json 分支）
+        {
+            let _wd = WorkDirWithLock::change(&sys_dir).unwrap();
+            SysCommandHandler::handle_diff(SysDiffArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                json: true,
+            })
+            .await
+            .unwrap();
         }
     }
 }

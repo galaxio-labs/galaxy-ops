@@ -75,10 +75,32 @@ gops sys package
 gops sys localize
 gops sys setting
 gops sys check
+gops sys diff
 
 # gops run —— 运行时运维
 gops run download/install/uninstall/start/stop/status/diagnose
 ```
+
+## 值变更表（`sys diff` / `localize` 末尾）
+
+与 `check` 关注的“`.env` 漂移”不同，`diff` 回答的是“**哪些值被覆盖、被哪一层覆盖**”：
+
+```text
+gops sys diff [--json]
+```
+
+比对「初始层」（`merged_vars.yml` 的系统默认值，`origin=sys-defaults`）与「生效层」（⊕ `values/sys_value.yml`(`sys-setting`) ⊕ `values/value.yml`(`customer`)，均为**未展开**值，避免 `${VAR}` 带来伪变更），逐键列出：
+
+| 列 | 含义 |
+|---|---|
+| `KEY` | 变量名 |
+| `INITIAL` | 初始层取值（`-` 表示初始层无此键） |
+| `EFFECTIVE` | 生效值 |
+| `ORIGIN` | 生效值来自哪一层（`sys-defaults` / `sys-setting` / `customer`） |
+| `MUTABILITY` | 生效值的可变性（`merged_vars.yml` 不序列化可变性，故目前多为 `module`） |
+| `STATE` | `same` / `changed` / `added` / `removed`（表格只列非 `same` 行） |
+
+`localize` 结束时也会打印同一张表（无覆盖时打 `[OK] 值无覆盖`）。`gops mod diff` 同理，但按模型分组，初始层为 `mod/<model>/vars.yml`（`mod-default`），来源另有 `mod-setting`（`mod_value.yml`）与 `global`。
 
 `gops run download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
 

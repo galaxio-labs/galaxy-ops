@@ -15,6 +15,7 @@ pub mod localize;
 pub mod ops_prj;
 pub mod prelude;
 pub mod project;
+pub mod report;
 pub mod self_update;
 pub mod types;
 //pub mod update;

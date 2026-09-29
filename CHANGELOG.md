@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.5] - 2026-09-30
+
+### 新增功能
+- **值变更表（`gops sys diff` / `gops mod diff`）**：逐键呈现「初始值 → 生效值」，回答“哪些值被覆盖、被哪一层覆盖”。列为 `KEY` / `INITIAL` / `EFFECTIVE` / `ORIGIN` / `MUTABILITY` / `STATE`（`same|changed|added|removed`，只列非 `same` 行）；`--json` 输出机器可读结果。
+- **`localize` 末尾附带变更表**：`gops sys localize` 与 `gops mod localize` 完成后打印同一张表（无覆盖时打 `[OK] 值无覆盖`），不必再跑一次 `diff`。
+
+### 说明
+- **比对用「未展开」值**：两侧均为 env 展开前的原始值，避免 `${VAR}` 展开名造成伪变更。
+- `mod` 的 `MUTABILITY` 取自 `VarCollection`（`immutable`/`system`/`module`）；`sys` 的 `merged_vars.yml` 不序列化可变性，故目前多为 `module`。
+- `gops prj diff` 暂不提供（prj 视角即逐系统的 `sys` 表）。
+
 ## [2.0.4] - 2026-09-29
 
 ### 重大变更

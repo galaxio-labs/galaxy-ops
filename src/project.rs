@@ -70,6 +70,15 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
     Ok(sys_dict)
 }
 
+/// 读取值文件；文件不存在时视为**空覆盖**（而非报错），供只读比对等场景使用。
+pub fn load_value_file_opt(path: &Path) -> MainResult<ValueDict> {
+    if path.exists() {
+        load_value_file(path)
+    } else {
+        Ok(ValueDict::default())
+    }
+}
+
 /// 读取值文件（YAML 映射）。
 ///
 /// 允许“全注释/空”文件：值文件模板把可用变量以注释形式列出，未取消注释时内容全为注释，
@@ -93,6 +102,18 @@ pub fn mix_used_value(
     vars: &VarCollection,
     mod_value: &Path,
 ) -> MainResult<OriginDict> {
+    let used = mix_used_value_raw(options, vars, mod_value)?;
+    Ok(used.env_eval(&EnvDict::default()))
+}
+
+/// 与 [`mix_used_value`] 同一套层合并，但**不做** `${VAR}` 展开。
+///
+/// 供只读比对（`gops mod diff`）使用：与初始层同为未展开值，避免 `${VAR}` 展开带来伪变更。
+pub fn mix_used_value_raw(
+    options: LocalizeOptions,
+    vars: &VarCollection,
+    mod_value: &Path,
+) -> MainResult<OriginDict> {
     let mut used = OriginDict::default();
     let mut default = OriginDict::from(vars.clone());
     default.set_source("mod-default");
@@ -106,13 +127,12 @@ pub fn mix_used_value(
         used.merge(&user_dict);
     }
 
-    let mut mod_dict = OriginDict::from(ValueDict::load_yaml(mod_value).source_resource()?);
+    let mut mod_dict = OriginDict::from(load_value_file_opt(mod_value)?);
     mod_dict.set_source("mod-setting");
     let mut global = options.raw_value().clone();
     global.set_source("global");
     used.merge(&mod_dict);
     used.merge(&global);
-    let used = used.env_eval(&EnvDict::default());
     Ok(used)
 }
 
@@ -148,7 +168,7 @@ pub fn env_pairs(dict: &OriginDict) -> Vec<(String, String)> {
         .collect()
 }
 
-fn env_raw_value(v: &ValueType) -> String {
+pub fn env_raw_value(v: &ValueType) -> String {
     match v {
         ValueType::String(s) => s.clone(),
         ValueType::Obj(o) => serde_json::to_string(o).unwrap_or_default(),
@@ -238,6 +258,48 @@ mod tests {
             result.get("TEST_KEY"),
             Some(&OriginValue::from("default_value").with_origin("mod-default"))
         );
+    }
+
+    #[test]
+    fn test_mix_used_value_raw_keeps_unevaluated_and_origins() {
+        test_init();
+        let mut global_dict = OriginDict::new();
+        global_dict.insert("SYS_KEY".to_string(), ValueType::from("sys-value"));
+        let vars = VarCollection::define(vec![
+            VarDefinition::from(("SVR_NAME", "example")),
+            // 引用其它变量：raw 不展开
+            VarDefinition::from(("MOD_SPACE", "${PRJ_SPACE}/${SVR_NAME}")),
+        ]);
+        let temp_dir = tempdir().unwrap();
+        let mod_value_path = temp_dir.path().join(MOD_VALUE_FILE);
+        std::fs::write(&mod_value_path, "SVR_NAME: changed").unwrap();
+
+        let raw = mix_used_value_raw(
+            LocalizeOptions::new(global_dict.clone()),
+            &vars,
+            &mod_value_path,
+        )
+        .assert();
+        // 未展开：`${...}` 原样保留
+        assert_eq!(
+            raw.get("MOD_SPACE"),
+            Some(&OriginValue::from("${PRJ_SPACE}/${SVR_NAME}").with_origin("mod-default"))
+        );
+        // 覆盖层生效并保留 origin
+        assert_eq!(
+            raw.get("SVR_NAME"),
+            Some(&OriginValue::from("changed").with_origin("mod-setting"))
+        );
+        // options 传入的值 origin 为 global
+        assert_eq!(
+            raw.get("SYS_KEY"),
+            Some(&OriginValue::from("sys-value").with_origin("global"))
+        );
+
+        // 对照：非 raw 版会展开 `${PRJ_SPACE}/${SVR_NAME}`（PRJ_SPACE 未定义 → 空）
+        let evaled =
+            mix_used_value(LocalizeOptions::new(global_dict), &vars, &mod_value_path).assert();
+        assert_ne!(evaled.get("MOD_SPACE"), raw.get("MOD_SPACE"));
     }
 
     #[test]

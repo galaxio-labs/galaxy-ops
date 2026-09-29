@@ -60,7 +60,10 @@ gops mod example
 gops mod new
 gops mod update
 gops mod localize
+gops mod diff [--json]
 ```
+
+`gops mod diff` 按模型比对「模块默认值」（`mod/<model>/vars.yml`，`origin=mod-default`）与生效值，逐键列出 `INITIAL` / `EFFECTIVE` / `ORIGIN` / `MUTABILITY` / `STATE`；`localize` 末尾也会打印同一张表。
 
 ## 输出对象
 

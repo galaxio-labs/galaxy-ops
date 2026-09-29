@@ -37,8 +37,8 @@ Module -> System -> Ops Project
 
 当前仓库中的 `gops` CLI 主要提供五组能力：
 
-- `gops mod`：创建模块、生成示例、更新引用、本地化模块配置。
-- `gops sys`：系统**定义与交付**——创建系统、更新/解析、本地化、打包、漂移检查。
+- `gops mod`：创建模块、生成示例、更新引用、本地化模块配置、查看值变更。
+- `gops sys`：系统**定义与交付**——创建系统、更新/解析、本地化、打包、漂移检查、值变更。
 - `gops run`：**运行时运维**——在目标环境下载/安装/卸载组件、启动/停止服务、查询状态、诊断。
 - `gops prj`：创建运维工程、导入系统、更新本地项目引用。
 - `gops self`：检查与升级 `gops` 自身（自升级）。
@@ -73,11 +73,17 @@ gops mod new --name nginx
 # 本地化模块配置
 gops mod localize
 
+# 查看模块值变更（哪些值被覆盖、被哪一层覆盖）
+gops mod diff
+
 # 创建系统
 gops sys new --name web-stack
 
 # 更新系统引用
 gops sys update
+
+# 查看系统值变更（初始值 / 生效值 / 来源 / 可变性；--json 机器可读）
+gops sys diff
 
 # 解析变量并打包系统为 .tar.gz
 cd web-stack

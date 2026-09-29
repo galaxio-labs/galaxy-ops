@@ -81,6 +81,11 @@ gops sys diff
 gops run download/install/uninstall/start/stop/status/diagnose
 ```
 
+`gops run download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
+
+- `gxl`（默认）：委托给外部 `gx`（`$HOME/bin/gx`，即 `gx run <cmd>`）。
+- `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`）。
+
 ## 值变更表（`sys diff` / `localize` 末尾）
 
 与 `check` 关注的“`.env` 漂移”不同，`diff` 回答的是“**哪些值被覆盖、被哪一层覆盖**”：
@@ -102,10 +107,21 @@ gops sys diff [--json]
 
 `localize` 结束时也会打印同一张表（无覆盖时打 `[OK] 值无覆盖`）。`gops mod diff` 同理，但按模型分组，初始层为 `mod/<model>/vars.yml`（`mod-default`），来源另有 `mod-setting`（`mod_value.yml`）与 `global`。
 
-`gops run download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
+## 文件变更表（`localize` 末尾）
 
-- `gxl`（默认）：委托给外部 `gx`（`$HOME/bin/gx`，即 `gx run <cmd>`）。
-- `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`）。
+`localize` 除写值与 `.env` 外，还会**渲染文件**（sys setting 模板 `src` → `dst`；mod 为 `spec/` → `local/`）。落地后打印本次**新增 / 替换**的文件表：
+
+```text
+文件变更 (2 项) @ arm-mac14-host/local:
+FILE          STATE
+----------------------
+artifact.yml  created
+depends.yml   replaced
+```
+
+- 用 localize **前后内容指纹（sha256）比对**：清空输出树再重建不会把内容未变的文件误报为变更。
+- 只报 `created` / `replaced`；**删除不报**（重建输出树时属常态）。
+- 需前后基线，故只在 `localize` 呈现；`diff` 仍只呈现值。
 
 ## 可选阶段流程（`localize` 扩展点）
 

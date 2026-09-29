@@ -278,7 +278,9 @@ impl ModuleLocalizable<ModValuePaths> for MMOperator {
         //let value_paths = TargetValuePaths::from(&val_path);
         let local_path = mod_root.join(LOCAL_DIR);
         ctx.record("local", local_path.display());
-        debug!( target:"spec/mod/target", "localize mod-target begin: {}" ,local_path.display() );
+        debug!( target:"spec/mod/target", "localize mod-target begin: {} " ,local_path.display() );
+        // 先快照再清空 `local/`：这样才能分辨哪些输出文件是本次**新增/替换**（而非全部重建）
+        let file_before = crate::report::snapshot_tree(&local_path);
         make_clean_path(&local_path).source_logic()?;
 
         let used = self.build_used_value(options, &val_path.mod_value_file())?;
@@ -313,6 +315,11 @@ impl ModuleLocalizable<ModValuePaths> for MMOperator {
         localizer
             .render_path(&spec_tpl, &local_path, &used_value_file, &tpl_path)
             .with(&ctx)?;
+        crate::report::print_file_changes(
+            &format!("{}/local", self.model()),
+            &file_before,
+            &crate::report::snapshot_tree(&local_path),
+        );
         ctx.mark_suc();
         Ok(())
     }

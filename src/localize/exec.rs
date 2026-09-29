@@ -129,9 +129,15 @@ impl ModuleLocalizable<PathBuf> for LocalizeExecPath {
             } else {
                 LocalizeTemplate::default()
             };
+            let file_before = crate::report::snapshot_tree(self.dst());
             localizer
                 .render_path(self.src(), &self.dst, &value_file, &tpl_path)
                 .with(&ctx)?;
+            crate::report::print_file_changes(
+                &self.dst.display().to_string(),
+                &file_before,
+                &crate::report::snapshot_tree(self.dst()),
+            );
         } else {
             return Err(MainReason::resource_detail("sys value file miss"));
         }

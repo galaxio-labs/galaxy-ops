@@ -65,6 +65,8 @@ gops mod diff [--json]
 
 `gops mod diff` 按模型比对「模块默认值」（`mod/<model>/vars.yml`，`origin=mod-default`）与生效值，逐键列出 `INITIAL` / `EFFECTIVE` / `ORIGIN` / `MUTABILITY` / `STATE`；`localize` 末尾也会打印同一张表。
 
+`gops mod localize` 渲染 `spec/` → `local/` 后，还会打印**文件变更表**（`FILE | STATE`，`created` / `replaced`），用前后内容指纹比对（清空 `local/` 重建不会误报未变文件）。
+
 ## 输出对象
 
 当前模块层最终管理的是这种对象结构：

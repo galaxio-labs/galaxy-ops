@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.6] - 2026-09-30
+
+### 新增功能
+- **`localize` 打印文件变更表（新增 / 替换）**：`gops mod localize`（渲染 `spec/` → `local/`）与 `gops sys localize`（sys setting 模板 `src` → `dst`）在落地文件后，打印本次**新增 / 替换**的文件表 `FILE | STATE`（`created` / `replaced`）。
+
+### 说明
+- 用 localize **前后内容指纹（sha256）比对**，所以「先清空 `local/` 再重建」不会把内容未变的文件误报为变更；**删除不报**（重建输出树时属常态，非信号）。
+- 文件变更表只在 **`localize`**（有前后基线时）呈现；`gops sys diff` / `gops mod diff` 仍只呈现**值**（新增/替换文件需基线，无法从只读状态推断）。
+- `mod/<model>/local/` 内运行时产物（`bin/`、`cache/` 等）被 localize 清掉属预期，不计入。
+
 ## [2.0.5] - 2026-09-30
 
 ### 新增功能

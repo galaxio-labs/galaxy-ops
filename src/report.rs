@@ -6,6 +6,10 @@
 use crate::internal_prelude::*;
 use orion_vars::vars::{Mutability, ValueType};
 
+use std::collections::BTreeMap;
+
+use sha2::{Digest, Sha256};
+
 use crate::project::env_raw_value;
 
 /// 单元格最大字符数，超出以 `…` 截断，避免长值撑破表格。
@@ -173,12 +177,18 @@ pub fn render_table(rows: &[ValueRow], color: bool) -> String {
 
     let sep: String = "-".repeat(widths.iter().sum::<usize>() + 2 * (HEADERS.len() - 1));
     let mut out = String::new();
-    out.push_str(&join_cells(&HEADERS.map(String::from), &widths));
+    out.push_str(&join_row(
+        &HEADERS.map(String::from),
+        &widths,
+        None,
+        false,
+        5,
+    ));
     out.push('\n');
     out.push_str(&sep);
     out.push('\n');
     for (row, raw) in rows.iter().zip(cells.iter()) {
-        out.push_str(&render_row(raw, &widths, row.state(), color));
+        out.push_str(&join_row(raw, &widths, row.state.ansi(), color, 5));
         out.push('\n');
     }
     out
@@ -220,6 +230,183 @@ fn display_value(v: &ValueType) -> String {
     env_raw_value(v)
 }
 
+/// 文件级变更状态（只区分「新增 / 替换」）。
+///
+/// localize 会**重建**输出树（`mod/<model>/local/` 先清空再渲染），所以“删除”是常态而非信号，
+/// 不报；只报内容真正新增或改变的文件。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileState {
+    /// 输出树中新增（此前快照无此文件）。
+    Created,
+    /// 已存在但内容变化（替换）。
+    Replaced,
+}
+
+impl FileState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FileState::Created => "created",
+            FileState::Replaced => "replaced",
+        }
+    }
+
+    fn ansi(&self) -> &'static str {
+        match self {
+            FileState::Created => "\x1b[32m",  // 绿：新增
+            FileState::Replaced => "\x1b[33m", // 黄：替换
+        }
+    }
+}
+
+impl std::fmt::Display for FileState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 一行的文件变更记录（`path` 为相对快照根、以 `/` 分隔）。
+#[derive(Clone, Debug)]
+pub struct FileRow {
+    path: String,
+    state: FileState,
+}
+
+impl FileRow {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn state(&self) -> FileState {
+        self.state
+    }
+
+    /// 机器可读形式（用于 `--json`）。
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "path": self.path, "state": self.state.as_str() })
+    }
+}
+
+/// 输出树快照：相对路径（`/` 分隔）→ 内容 sha256（十六进制）。
+///
+/// 根不存在或不是目录时返回空。用于 localize 前后比对，得知哪些文件**新增/替换**。
+pub fn snapshot_tree(root: &Path) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    if !root.is_dir() {
+        return map;
+    }
+    for entry in walkdir::WalkDir::new(root) {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Ok(bytes) = std::fs::read(path) {
+            map.insert(rel, hash_bytes(&bytes));
+        }
+    }
+    map
+}
+
+/// 比对两次快照，返回**新增 / 替换**的文件（内容相同不报；“删除”不报，见 [`FileState`]）。
+pub fn diff_files(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Vec<FileRow> {
+    let mut rows = Vec::new();
+    for (rel, hash) in after {
+        match before.get(rel) {
+            Some(b) if b == hash => {}
+            Some(_) => rows.push(FileRow {
+                path: rel.clone(),
+                state: FileState::Replaced,
+            }),
+            None => rows.push(FileRow {
+                path: rel.clone(),
+                state: FileState::Created,
+            }),
+        }
+    }
+    rows
+}
+
+/// 渲染文件变更表（表头 + 各行）。`color` 为真时按状态给 `STATE` 单元格上色。
+pub fn render_file_table(rows: &[FileRow], color: bool) -> String {
+    const HEADERS: [&str; 2] = ["FILE", "STATE"];
+    let cells: Vec<[String; 2]> = rows
+        .iter()
+        .map(|r| [truncate(&r.path), r.state.as_str().to_string()])
+        .collect();
+
+    let mut widths: [usize; 2] = HEADERS.map(char_len);
+    for row in &cells {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(char_len(cell));
+        }
+    }
+
+    let sep: String = "-".repeat(widths.iter().sum::<usize>() + 2 * (HEADERS.len() - 1));
+    let mut out = String::new();
+    out.push_str(&join_row(
+        &HEADERS.map(String::from),
+        &widths,
+        None,
+        false,
+        1,
+    ));
+    out.push('\n');
+    out.push_str(&sep);
+    out.push('\n');
+    for (row, raw) in rows.iter().zip(cells.iter()) {
+        out.push_str(&join_row(raw, &widths, Some(row.state.ansi()), color, 1));
+        out.push('\n');
+    }
+    out
+}
+
+/// 文件变更的平铺 JSON 数组。
+pub fn render_files_json(rows: &[FileRow]) -> String {
+    let arr: Vec<serde_json::Value> = rows.iter().map(FileRow::to_json).collect();
+    serde_json::to_string_pretty(&arr).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// 在 localize 前后各取一次快照，打印文件变更表；返回变更项数（0 则不打任何东西）。
+///
+/// `label` 非空时拼在表头（如模型名 / 输出目录），便于同一次 localize 多个目标时区分。
+pub fn print_file_changes(
+    label: &str,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> usize {
+    let rows = diff_files(before, after);
+    if rows.is_empty() {
+        return 0;
+    }
+    if label.is_empty() {
+        println!("文件变更 ({} 项):", rows.len());
+    } else {
+        println!("文件变更 ({} 项) @ {label}:", rows.len());
+    }
+    print!("{}", render_file_table(&rows, use_color()));
+    rows.len()
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    let mut s = String::with_capacity(out.len() * 2);
+    for b in out.iter() {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 fn mutability_str(m: &Mutability) -> &'static str {
     match m {
         Mutability::Immutable => "immutable",
@@ -241,27 +428,22 @@ fn truncate(s: &str) -> String {
     out
 }
 
-fn join_cells(cells: &[String; 6], widths: &[usize; 6]) -> String {
-    let mut line = String::new();
-    for i in 0..cells.len() {
-        if i > 0 {
-            line.push_str("  ");
-        }
-        line.push_str(&cells[i]);
-        line.push_str(&" ".repeat(widths[i].saturating_sub(char_len(&cells[i]))));
-    }
-    line.trim_end().to_string()
-}
-
-fn render_row(cells: &[String; 6], widths: &[usize; 6], state: ValueState, color: bool) -> String {
+/// 把一行单元格按宽度用两空格拼接；`color_ansi` 非空且 `color` 为真时给 `color_col` 列上色。
+fn join_row(
+    cells: &[String],
+    widths: &[usize],
+    color_ansi: Option<&'static str>,
+    color: bool,
+    color_col: usize,
+) -> String {
     let mut line = String::new();
     for i in 0..cells.len() {
         if i > 0 {
             line.push_str("  ");
         }
         let pad = " ".repeat(widths[i].saturating_sub(char_len(&cells[i])));
-        match (color, i == 5, state.ansi()) {
-            (true, true, Some(code)) => {
+        match (color, color_ansi, i == color_col) {
+            (true, Some(code), true) => {
                 line.push_str(&format!("{code}{}\x1b[0m{pad}", cells[i]));
             }
             _ => {
@@ -417,5 +599,87 @@ mod tests {
     fn empty_rows_render_header_only() {
         let table = render_table(&[], false);
         assert_eq!(table.lines().count(), 2);
+    }
+
+    #[test]
+    fn snapshot_of_missing_root_is_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("nope");
+        assert!(snapshot_tree(&missing).is_empty());
+    }
+
+    #[test]
+    fn diff_files_reports_created_and_replaced_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.yml"), "1").unwrap();
+        std::fs::write(root.join("sub/b.yml"), "2").unwrap();
+        std::fs::write(root.join("gone.yml"), "x").unwrap();
+        let before = snapshot_tree(root);
+
+        // 改 a、删 gone、新增 c（含子目录）
+        std::fs::write(root.join("a.yml"), "1-changed").unwrap();
+        std::fs::remove_file(root.join("gone.yml")).unwrap();
+        std::fs::write(root.join("sub/c.yml"), "3").unwrap();
+        let after = snapshot_tree(root);
+
+        let rows = diff_files(&before, &after);
+        let by: std::collections::BTreeMap<&str, FileState> =
+            rows.iter().map(|r| (r.path(), r.state())).collect();
+        assert_eq!(by.get("a.yml"), Some(&FileState::Replaced));
+        assert_eq!(by.get("sub/c.yml"), Some(&FileState::Created));
+        // 内容未变的文件不报；被删除的文件不报
+        assert!(!by.contains_key("sub/b.yml"));
+        assert!(!by.contains_key("gone.yml"));
+        assert_eq!(rows.len(), 2);
+        // 输出按路径排序
+        assert_eq!(rows[0].path(), "a.yml");
+        assert_eq!(rows[1].path(), "sub/c.yml");
+    }
+
+    #[test]
+    fn identical_tree_produces_no_rows() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a"), "same").unwrap();
+        let before = snapshot_tree(tmp.path());
+        let after = snapshot_tree(tmp.path());
+        assert!(diff_files(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn file_table_has_header_and_colors() {
+        let rows = vec![
+            FileRow {
+                path: "local/a.yml".into(),
+                state: FileState::Created,
+            },
+            FileRow {
+                path: "local/b.yml".into(),
+                state: FileState::Replaced,
+            },
+        ];
+        let plain = render_file_table(&rows, false);
+        let lines: Vec<&str> = plain.lines().collect();
+        assert!(lines[0].starts_with("FILE"));
+        assert!(lines[0].contains("STATE"));
+        assert!(!plain.contains('\x1b'));
+        assert!(lines[2].contains("created"));
+        assert!(lines[3].contains("replaced"));
+
+        let colored = render_file_table(&rows, true);
+        assert!(colored.contains("\x1b[32m"));
+        assert!(colored.contains("\x1b[33m"));
+    }
+
+    #[test]
+    fn files_json_has_path_and_state() {
+        let rows = vec![FileRow {
+            path: "local/a.yml".into(),
+            state: FileState::Created,
+        }];
+        let parsed: serde_json::Value = serde_json::from_str(&render_files_json(&rows)).unwrap();
+        assert_eq!(parsed[0]["path"], "local/a.yml");
+        assert_eq!(parsed[0]["state"], "created");
     }
 }

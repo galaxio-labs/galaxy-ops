@@ -398,6 +398,12 @@ impl SysCommandHandler {
 
         // 合并顺序与“初始层 / 生效层”的划分集中在此，供 diff 与 localize 共用。
         let (initial, dict) = Self::sys_value_layers(&spec, &val_path)?;
+        // 系统层 + 各模块层（`sys/mod_list.yml`）：localize 会逐模块消费 `values/<mod>/`
+        let sys_rows = Self::value_rows(&initial, &dict);
+        let mut module_rows = Self::sys_module_value_changes(&spec, &val_path, &dict)?;
+        if let Some(only) = &args.module {
+            module_rows.retain(|(name, _)| name == only);
+        }
 
         let no_flow = args.no_flow;
         let debug = args.debug_level();
@@ -406,11 +412,6 @@ impl SysCommandHandler {
         // 供随后的阶段流程注入子进程。
         let options = LocalizeOptions::new(dict).with_only_mod(args.module);
         let stage_env = galaxy_ops::project::env_pairs(options.evaled_value());
-        // 比对初始层（未展开）与生效层（未展开）：避免 `${VAR}` 展开带来伪变更。
-        let changes = report::diff_layers(&initial, options.raw_value())
-            .into_iter()
-            .filter(|r| r.state() != report::ValueState::Same)
-            .collect::<Vec<_>>();
 
         spec.localize(val_path, options).await.err_conv()?;
 
@@ -426,7 +427,7 @@ impl SysCommandHandler {
             )
             .await?;
         }
-        Self::print_changes(&changes, false);
+        Self::print_value_changes(&sys_rows, &module_rows, false);
         Ok(())
     }
 
@@ -459,18 +460,81 @@ impl SysCommandHandler {
         Ok((initial, dict))
     }
 
-    /// 统一的变更呈现：`json` 为真输出 JSON；否则无变更打 `[OK]`、有变更打印表格。
-    fn print_changes(changes: &[report::ValueRow], json: bool) {
+    /// 统一的变更呈现：`json` 为真输出 JSON；否则无变更打 `[OK]`、有变更分范围打印表格。
+    fn print_value_changes(
+        sys_rows: &[report::ValueRow],
+        modules: &[(String, Vec<report::ValueRow>)],
+        json: bool,
+    ) {
         if json {
-            println!("{}", report::render_json(changes));
+            println!("{}", report::render_sys_diff_json(sys_rows, modules));
             return;
         }
-        if changes.is_empty() {
+        let color = report::use_color();
+        let has_module = modules.iter().any(|(_, rows)| !rows.is_empty());
+        if sys_rows.is_empty() && !has_module {
             println!("[OK] 值无覆盖（全部取系统默认值）");
             return;
         }
-        println!("值变更 ({} 项):", changes.len());
-        print!("{}", report::render_table(changes, report::use_color()));
+        if !sys_rows.is_empty() {
+            println!("[sys] 值变更 ({} 项):", sys_rows.len());
+            print!("{}", report::render_table(sys_rows, color));
+        }
+        for (name, rows) in modules {
+            if rows.is_empty() {
+                continue;
+            }
+            println!("[mod: {name}] 值变更 ({} 项):", rows.len());
+            print!("{}", report::render_table(rows, color));
+        }
+    }
+
+    /// 取「非未变更」的值行（供 diff / localize 复用）。
+    fn value_rows(initial: &OriginDict, effective: &OriginDict) -> Vec<report::ValueRow> {
+        report::diff_layers(initial, effective)
+            .into_iter()
+            .filter(|r| r.state() != report::ValueState::Same)
+            .collect()
+    }
+
+    /// 系统内各模块（`sys/mod_list.yml`）的值变更。
+    ///
+    /// 初始层 = 模块默认值（`sys/<model>/mods/<mod>/vars.yml`，`mod-default`）；
+    /// 生效层 = 默认值 ⊕ `values/<mod>/value.yml`(`mod-cust`) ⊕ `values/<mod>/mod_value.yml`(`mod-setting`)
+    ///          ⊕ 系统层 `sys_dict`（按其自身 origin 并入，只影响同名键）。
+    ///
+    /// 与 `ModuleSpecRef::sys_localize` 的消费路径一致（见 `src/module/refs.rs`）。
+    fn sys_module_value_changes(
+        spec: &SysOperator,
+        val_path: &SysValuePaths,
+        sys_dict: &OriginDict,
+    ) -> MainResult<Vec<(String, Vec<report::ValueRow>)>> {
+        let mut out = Vec::new();
+        for mref in spec.sys_spec().mod_list().mods() {
+            if !mref.is_enable() {
+                continue;
+            }
+            if mref.content_dir().is_none() {
+                eprintln!(
+                    "[WARN] 模块 {} 尚无内容（未下载？先 `gops sys update`）；跳过其值变更",
+                    mref.name()
+                );
+                continue;
+            }
+            let mm = match mref.get_target_spec() {
+                Ok(Some(mm)) => mm,
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!("[WARN] 模块 {} 加载失败：{e}；跳过其值变更", mref.name());
+                    continue;
+                }
+            };
+            let mod_root = val_path.root().join(mref.name());
+            let (initial, effective) =
+                galaxy_ops::project::mod_value_layers(mm.vars(), &mod_root, sys_dict.clone())?;
+            out.push((mref.name().clone(), Self::value_rows(&initial, &effective)));
+        }
+        Ok(out)
     }
 
     pub async fn handle_diff(args: SysDiffArgs) -> MainResult<()> {
@@ -480,11 +544,9 @@ impl SysCommandHandler {
         let spec = SysOperator::load(&current_dir).err_conv()?;
         let val_path = resolve_sys_value_path(&current_dir);
         let (initial, effective) = Self::sys_value_layers(&spec, &val_path)?;
-        let changes = report::diff_layers(&initial, &effective)
-            .into_iter()
-            .filter(|r| r.state() != report::ValueState::Same)
-            .collect::<Vec<_>>();
-        Self::print_changes(&changes, args.json);
+        let sys_rows = Self::value_rows(&initial, &effective);
+        let module_rows = Self::sys_module_value_changes(&spec, &val_path, &effective)?;
+        Self::print_value_changes(&sys_rows, &module_rows, args.json);
         Ok(())
     }
 

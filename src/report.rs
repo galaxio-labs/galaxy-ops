@@ -203,9 +203,11 @@ pub fn render_json(rows: &[ValueRow]) -> String {
 }
 
 /// 分组 JSON：`[{ "model": ..., "changes": [ ... ] }]`（`gops mod diff --json`）。
+/// 只含**有变更**的分组（与人类可读输出一致）。
 pub fn render_json_models(changes: &[(String, Vec<ValueRow>)]) -> String {
     let arr: Vec<serde_json::Value> = changes
         .iter()
+        .filter(|(_, rows)| !rows.is_empty())
         .map(|(model, rows)| {
             serde_json::json!({
                 "model": model,
@@ -214,6 +216,27 @@ pub fn render_json_models(changes: &[(String, Vec<ValueRow>)]) -> String {
         })
         .collect();
     serde_json::to_string_pretty(&arr).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// `gops sys diff --json`：`{ "system": [...], "modules": [{ "module": ..., "changes": [...] }] }`。
+///
+/// 系统层与各模块分组分开，便于脚本按范围消费。
+pub fn render_sys_diff_json(system: &[ValueRow], modules: &[(String, Vec<ValueRow>)]) -> String {
+    let modules_json: Vec<serde_json::Value> = modules
+        .iter()
+        .filter(|(_, rows)| !rows.is_empty())
+        .map(|(name, rows)| {
+            serde_json::json!({
+                "module": name,
+                "changes": rows.iter().map(ValueRow::to_json).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let out = serde_json::json!({
+        "system": system.iter().map(ValueRow::to_json).collect::<Vec<_>>(),
+        "modules": modules_json,
+    });
+    serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// 是否给终端输出上色：仅当 stdout 是终端且 `NO_COLOR` 为空/未设置（遵循 NO_COLOR spec）。
@@ -595,6 +618,61 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed[0]["model"], "arm-mac14-host");
         assert_eq!(parsed[0]["changes"][0]["key"], "K");
+    }
+
+    #[test]
+    fn json_models_filters_empty_groups() {
+        let empty = vec![
+            ("m1".to_string(), Vec::new()),
+            (
+                "m2".to_string(),
+                vec![ValueRow {
+                    key: "K".into(),
+                    initial: Some("1".into()),
+                    effective: Some("2".into()),
+                    origin: None,
+                    mutability: Some("module".into()),
+                    state: ValueState::Changed,
+                }],
+            ),
+        ];
+        let parsed: serde_json::Value = serde_json::from_str(&render_json_models(&empty)).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+        assert_eq!(parsed[0]["model"], "m2");
+    }
+
+    #[test]
+    fn sys_diff_json_groups_system_and_modules() {
+        let system = vec![ValueRow {
+            key: "A".into(),
+            initial: None,
+            effective: Some("1".into()),
+            origin: Some("customer".into()),
+            mutability: Some("module".into()),
+            state: ValueState::Added,
+        }];
+        let modules = vec![
+            ("clean-mod".to_string(), Vec::new()),
+            (
+                "warp-parse".to_string(),
+                vec![ValueRow {
+                    key: "CPU".into(),
+                    initial: Some("1000".into()),
+                    effective: Some("2000".into()),
+                    origin: Some("mod-setting".into()),
+                    mutability: Some("module".into()),
+                    state: ValueState::Changed,
+                }],
+            ),
+        ];
+        let parsed: serde_json::Value =
+            serde_json::from_str(&render_sys_diff_json(&system, &modules)).unwrap();
+        assert_eq!(parsed["system"][0]["key"], "A");
+        // 空分组被过滤，只留 warp-parse
+        let mods = parsed["modules"].as_array().unwrap();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0]["module"], "warp-parse");
+        assert_eq!(mods[0]["changes"][0]["key"], "CPU");
     }
 
     #[test]

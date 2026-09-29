@@ -21,7 +21,9 @@ pub fn load_mod_opr_value(root: &Path, model: &str) -> MainResult<OriginDict> {
         orion_conf::ConfigIO::save_conf(&sys_value, &sys_v_file).source_resource()?;
         ctx.mark_suc();
     }
-    let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).source_logic()?);
+    let mut sys_dict = OriginDict::from(normalize_value_keys(
+        ValueDict::load_yaml(&sys_v_file).source_logic()?,
+    ));
     sys_dict.set_source("sys-setting");
 
     let mod_v_file = value_root.join(model).join(MOD_VALUE_FILE);
@@ -32,7 +34,9 @@ pub fn load_mod_opr_value(root: &Path, model: &str) -> MainResult<OriginDict> {
         let mod_value = vars_vec.module_vars().to_val();
         orion_conf::ConfigIO::save_conf(&mod_value, &mod_v_file).source_resource()?;
     }
-    let mut mod_dict = OriginDict::from(ValueDict::load_yaml(&mod_v_file).source_logic()?);
+    let mut mod_dict = OriginDict::from(normalize_value_keys(
+        ValueDict::load_yaml(&mod_v_file).source_logic()?,
+    ));
     mod_dict.set_source("mod-setting");
     sys_dict.merge(&mod_dict);
     Ok(sys_dict)
@@ -65,7 +69,9 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
         orion_conf::ConfigIO::save_conf(&sys_value, &sys_v_file).source_resource()?;
         ctx.mark_suc();
     }
-    let mut sys_dict = OriginDict::from(ValueDict::load_yaml(&sys_v_file).source_logic()?);
+    let mut sys_dict = OriginDict::from(normalize_value_keys(
+        ValueDict::load_yaml(&sys_v_file).source_logic()?,
+    ));
     sys_dict.set_source("sys-setting");
     Ok(sys_dict)
 }
@@ -84,6 +90,8 @@ pub fn load_value_file_opt(path: &Path) -> MainResult<ValueDict> {
 /// 允许“全注释/空”文件：值文件模板把可用变量以注释形式列出，未取消注释时内容全为注释，
 /// 此时视为**空覆盖**（不钉住任何默认值），而不是报解析错误。
 /// 仅含 YAML 文档标记（`---`、`...`）的文件同样视为空覆盖。
+///
+/// 键统一**归一化为大写**（见 [`normalize_value_keys`]）。
 pub fn load_value_file(path: &Path) -> MainResult<ValueDict> {
     let text = std::fs::read_to_string(path).source_resource()?;
     // 仅注释 / 空 / 仅文档标记（`---`、`...`）都视为空覆盖
@@ -94,7 +102,22 @@ pub fn load_value_file(path: &Path) -> MainResult<ValueDict> {
     if !has_content {
         return Ok(ValueDict::default());
     }
-    ValueDict::load_yaml(path).source_resource()
+    ValueDict::load_yaml(path)
+        .source_resource()
+        .map(normalize_value_keys)
+}
+
+/// 值文件键归一化为**大写**。
+///
+/// [`UpperKey`](orion_vars::vars::UpperKey) 的 `From` 会大写，但其 `Deserialize`
+/// **不会**；而变量名（来自 `VarCollection`）总是大写。因此值文件里写了小写键
+/// （如 `cpu: 2000`）会与变量名（`CPU`）不匹配而被**静默忽略**——归一化避免这种“写了却不生效”。
+pub fn normalize_value_keys(dict: ValueDict) -> ValueDict {
+    let mut out = ValueDict::default();
+    for (k, v) in dict.iter() {
+        out.insert(k.as_str(), v.clone());
+    }
+    out
 }
 
 pub fn mix_used_value(
@@ -134,6 +157,28 @@ pub fn mix_used_value_raw(
     used.merge(&mod_dict);
     used.merge(&global);
     Ok(used)
+}
+
+/// 模块的「初始层 / 生效层」：
+///
+/// - 初始层 = 模块默认值（`vars.yml`，`origin=mod-default`）；
+/// - 生效层 = 默认值 ⊕客户值(`mod-cust`) ⊕ `mod_value.yml`(`mod-setting`) ⊕ `sys_layer`。
+///
+/// `val_root` 为模块值目录（`values/<model>` 或系统内的 `values/<mod>`）；
+/// `sys_layer` 为上一层已合并的值（如系统层），按其自身 origin 并入。
+/// 返回的两层均为**未展开**值，可直接用 `report::diff_layers` 比对。
+pub fn mod_value_layers(
+    vars: &VarCollection,
+    val_root: &Path,
+    sys_layer: OriginDict,
+) -> MainResult<(OriginDict, OriginDict)> {
+    let initial = OriginDict::from(vars.clone()).with_origin("mod-default");
+    let effective = mix_used_value_raw(
+        LocalizeOptions::new(sys_layer),
+        vars,
+        &val_root.join(MOD_VALUE_FILE),
+    )?;
+    Ok((initial, effective))
 }
 
 /// 把值字典渲染为 dotenv 文本（`KEY=VALUE` 行，键保持大写）。
@@ -300,6 +345,47 @@ mod tests {
         let evaled =
             mix_used_value(LocalizeOptions::new(global_dict), &vars, &mod_value_path).assert();
         assert_ne!(evaled.get("MOD_SPACE"), raw.get("MOD_SPACE"));
+    }
+
+    #[test]
+    fn test_mod_value_layers_default_vs_override_and_sys_layer() {
+        test_init();
+        let vars = VarCollection::define(vec![
+            VarDefinition::from(("cpu", 1000)).with_mut_module(),
+            VarDefinition::from(("sys_domain", "d")).with_mut_system(),
+        ]);
+        let dir = tempdir().unwrap();
+        // 故意用小写键：验证加载时归一化为大写（否则会与变量名 `CPU` 不匹配而被静默忽略）
+        std::fs::write(dir.path().join(MOD_VALUE_FILE), "cpu: 2000\n").unwrap();
+
+        let mut sys_layer = OriginDict::new();
+        sys_layer.insert("sys_domain".to_string(), ValueType::from("http://x"));
+        sys_layer.set_source("sys-setting");
+
+        let (initial, effective) = mod_value_layers(&vars, dir.path(), sys_layer).assert();
+        // 初始层 = 模块默认值（mod-default）
+        assert_eq!(
+            initial.get("CPU"),
+            Some(&OriginValue::from(ValueType::from(1000u64)).with_origin("mod-default"))
+        );
+        assert_eq!(
+            initial.get("SYS_DOMAIN"),
+            Some(
+                &OriginValue::from("d")
+                    .with_origin("mod-default")
+                    .with_mutability(Mutability::System)
+            )
+        );
+        // 生效层：mod_value.yml 覆盖（mod-setting）
+        assert_eq!(
+            effective.get("CPU"),
+            Some(&OriginValue::from(ValueType::from(2000u64)).with_origin("mod-setting"))
+        );
+        // 系统层并入并保留自身 origin（只影响同名键）
+        assert_eq!(
+            effective.get("SYS_DOMAIN"),
+            Some(&OriginValue::from("http://x").with_origin("sys-setting"))
+        );
     }
 
     #[test]
@@ -617,5 +703,13 @@ mod tests {
             dict.get("HTTP_PORT").map(|v| v.to_string()).as_deref(),
             Some("9090")
         );
+        // 小写键也归一化为大写（否则会与变量名 `HTTP_PORT` 不匹配）
+        std::fs::write(&path, "http_port: 9090\n").unwrap();
+        let dict = load_value_file(&path).assert();
+        assert_eq!(
+            dict.get("HTTP_PORT").map(|v| v.to_string()).as_deref(),
+            Some("9090")
+        );
+        assert!(!dict.contains_key("http_port"), "小写键应被归一化");
     }
 }

@@ -246,18 +246,14 @@ fn mod_value_changes(
     let mut out = Vec::new();
     for (model, mm) in operator.mod_spec().targets() {
         let model_path = val_path.clone().join(model.to_string());
-        let initial = OriginDict::from(mm.vars().clone()).with_origin("mod-default");
-
+        // mod 项目：`values/<model>/sys_value.yml` 作为上一层（origin=sys-setting）参与合并
         let mut sys_vars = OriginDict::default();
         if model_path.sys_value_file().exists() {
             sys_vars = OriginDict::from(load_value_file(&model_path.sys_value_file())?);
             sys_vars.set_source("sys-setting");
         }
-        let effective = galaxy_ops::project::mix_used_value_raw(
-            LocalizeOptions::new(sys_vars),
-            mm.vars(),
-            &model_path.mod_value_file(),
-        )?;
+        let (initial, effective) =
+            galaxy_ops::project::mod_value_layers(mm.vars(), model_path.root(), sys_vars)?;
 
         let rows = report::diff_layers(&initial, &effective)
             .into_iter()

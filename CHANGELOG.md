@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.7] - 2026-09-30
+
+### Bug 修复
+- **`sys diff` / `localize` 漏报模块层覆盖（gxl 系统）**：此前只比对「系统层」（`merged_vars.yml` ⊕ `values/sys_value.yml` ⊕ `values/value.yml`），忽略了 `sys localize` 实际消费的 `values/<mod>/mod_value.yml`。现按 `sys/mod_list.yml` **逐模块分组**呈现（`[mod: <name>]`），与 `ModuleSpecRef::sys_localize` 消费路径一致；模块内容未下载时打 `[WARN]` 提示（先 `gops sys update`）。
+- **值文件小写键被静默忽略**：`UpperKey` 的 `From` 会大写、但 `Deserialize` 不会，导致 `values/*.yml` 写小写键（如 `cpu: 2000`）与变量名（`CPU`）不匹配、覆盖失效。加载值文件时统一**归一化为大写**（`localize` / `diff` / `prj import` 均受益）。
+
+### 变更（破坏性）
+- **`gops sys diff --json` 结构变更**：由平铺数组改为对象 `{ "system": [...], "modules": [{ "module": …, "changes": [...] }] }`，按范围分组；`sys diff` / `mod diff` 的 JSON 均**只含有变更的分组**。
+
 ## [2.0.6] - 2026-09-30
 
 ### 新增功能

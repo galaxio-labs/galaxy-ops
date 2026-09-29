@@ -107,6 +107,25 @@ gops sys diff [--json]
 
 `localize` 结束时也会打印同一张表（无覆盖时打 `[OK] 值无覆盖`）。`gops mod diff` 同理，但按模型分组，初始层为 `mod/<model>/vars.yml`（`mod-default`），来源另有 `mod-setting`（`mod_value.yml`）与 `global`。
 
+### 模块分组（gxl 系统）
+
+对 gxl 系统（有 `sys/mod_list.yml`），`sys localize` 会逐模块消费 `values/<mod>/mod_value.yml`，因此 `sys diff` / `localize` 也会**按模块分组**呈现（与 `ModuleSpecRef::sys_localize` 一致）：
+
+```text
+[sys] 值变更 (1 项):
+KEY        INITIAL      EFFECTIVE    ORIGIN    MUTABILITY  STATE
+------------------------------------------------------------------
+NGINX_TAG  1.25-alpine  1.27-alpine  customer  module      changed
+[mod: warp-parse] 值变更 (1 项):
+KEY  INITIAL  EFFECTIVE  ORIGIN       MUTABILITY  STATE
+---------------------------------------------------------
+CPU  1000     2000       mod-setting  module      changed
+```
+
+- 初始层 = 模块默认值（`sys/<model>/mods/<mod>/vars.yml`）；生效层 = 默认值 ⊕ `values/<mod>/value.yml`(`mod-cust`) ⊕ `values/<mod>/mod_value.yml`(`mod-setting`) ⊕ 系统层。
+- 模块内容未下载（`sys/<model>/mods/<mod>` 缺失）时打 `[WARN]` 并跳过——先 `gops sys update`。
+- 值文件键**大小写不敏感**（加载时归一化为大写）；`sys diff --json` 为 `{ "system": [...], "modules": [{ "module": …, "changes": [...] }] }`，只含有变更的分组。
+
 ## 文件变更表（`localize` 末尾）
 
 `localize` 除写值与 `.env` 外，还会**渲染文件**（sys setting 模板 `src` → `dst`；mod 为 `spec/` → `local/`）。落地后打印本次**新增 / 替换**的文件表：

@@ -101,6 +101,40 @@ gops sys --help
 gops prj --help
 ```
 
+## 安装说明 / Installation
+
+### 1. 一键安装（推荐）
+
+```bash
+curl -sSf https://get.warpparse.ai/inst-x.sh | bash -s -- gops
+```
+
+默认安装到：`$HOME/bin`
+
+可选参数：
+
+```bash
+# alpha channel
+curl -sSf https://get.warpparse.ai/inst-x.sh | bash -s -- gops alpha
+
+# custom install dir
+curl -sSf https://get.warpparse.ai/inst-x.sh | WP_INST_INSTALL_DIR=/usr/local/bin bash -s -- gops
+```
+
+安装后验证：
+
+```bash
+# 需要 PATH 里有 $HOME/bin（galaxy-ops 调用 galaxy-flow 的 gx 来完成系统操作）
+gops --version
+gx --version
+```
+
+如果提示命令不存在，请把安装目录加入 `PATH`（例如 `$HOME/bin`）。
+
+### 2. 从源码构建
+
+见下方 Quick Start。
+
 ## Quick Start
 
 ### Build

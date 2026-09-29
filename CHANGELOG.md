@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.2] - 2026-09-29
+
+### 新增功能
+- **`gops self` 自升级**：与 `gx self` 对齐，新增 `gops self status|check|update|rollback`——`check` 查询通道最新版本（支持 `--json` 机器可读输出），`update` 下载/校验/安装并备份旧版本，`rollback` 回到备份版本。制品清单来自 `galaxio-labs/get` 的 `updates/gops` 通道（与 `inst-x.sh gops <channel>` 同一来源）；实现复用 `wp-self-update`。状态与备份存放于 `~/.galaxy/self_update/gops`，与 `gx` 的同名目录隔离。
+
+### 改进优化
+- **输出流对齐 `gx`**：版本横幅由 stdout 改到 **stderr**（并仅在人类可读模式打印，`self check --json` 时不打印）；错误报告 `report_error` 由 `println!` 改为 **`eprintln!`**——保证 `--json` 场景下 stdout 始终干净（失败时 stdout 为空、错误在 stderr）。
+- **自升级健壮性**：`self rollback` 改为**临时文件 + rename 原子替换**安装目录下的可执行文件（直接就地覆盖运行中的二进制在 Linux 会 `ETXTBSY` 失败）；升级前先备份当前二进制（否则回滚无文件可恢复，这是相对 `gx self` 的修正）；同秒重复升级时备份 id 顺延避免覆盖；升级成功后只保留最近 5 个备份。
+
 ## [2.0.1] - 2026-09-29
 
 ### 变更

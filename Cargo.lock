@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-ops"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -951,6 +951,7 @@ dependencies = [
  "home",
  "indexmap",
  "indicatif",
+ "libc",
  "log",
  "mockall",
  "mockito",
@@ -966,6 +967,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "scopeguard",
+ "semver",
  "serde",
  "serde_derive",
  "serde_ini",
@@ -982,6 +984,7 @@ dependencies = [
  "url",
  "walkdir",
  "wildmatch",
+ "wp-self-update",
 ]
 
 [[package]]
@@ -1137,6 +1140,12 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "home"
@@ -3493,6 +3502,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
+name = "uuid"
+version = "1.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3831,6 +3851,29 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wp-self-update"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a61b7059d60020bb3fac9e44973a0ba086cf25d38ae8baff6328a781a59ae61"
+dependencies = [
+ "derive_more",
+ "flate2",
+ "hex",
+ "indicatif",
+ "libc",
+ "orion-error",
+ "reqwest 0.13.5",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tokio",
+ "uuid",
+ "walkdir",
+]
 
 [[package]]
 name = "writeable"

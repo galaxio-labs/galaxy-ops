@@ -35,11 +35,12 @@ Module -> System -> Ops Project
 
 ## What It Does
 
-当前仓库中的 `gops` CLI 主要提供三组能力：
+当前仓库中的 `gops` CLI 主要提供四组能力：
 
 - `gops mod`：创建模块、生成示例、更新引用、本地化模块配置。
 - `gops sys`：创建系统、更新系统、生成环境本地化结果，并执行下载、安装、启动、停止、状态查询等系统操作。
 - `gops prj`：创建运维工程、导入系统、更新本地项目引用。
+- `gops self`：检查与升级 `gops` 自身（自升级）。
 
 这意味着 `galaxy-ops` 负责交付组织层，而不是直接替代工作流执行引擎：
 
@@ -59,6 +60,7 @@ gops <COMMAND>
 - `gops mod`
 - `gops sys`
 - `gops prj`
+- `gops self`
 
 常用子命令：
 
@@ -90,6 +92,10 @@ gops prj update
 
 # 重新导入系统（保留 values/ 客户值）
 gops prj reimport
+
+# 检查 / 升级 gops 自身
+gops self check --channel alpha
+gops self update --channel alpha --yes
 ```
 
 查看完整帮助：
@@ -99,6 +105,7 @@ gops --help
 gops mod --help
 gops sys --help
 gops prj --help
+gops self --help
 ```
 
 ## 安装说明 / Installation
@@ -130,6 +137,15 @@ gx --version
 ```
 
 如果提示命令不存在，请把安装目录加入 `PATH`（例如 `$HOME/bin`）。
+
+安装后可用 `gops self` 自升级，无需重跑安装脚本：
+
+```bash
+gops self status                          # 当前版本与安装目录
+gops self check --channel alpha           # 查询通道最新版本（--json 机器可读）
+gops self update --channel alpha --yes    # 升级到最新版
+gops self rollback                        # 回滚到上一版本
+```
 
 ### 2. 从源码构建
 

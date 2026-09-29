@@ -188,28 +188,28 @@ pub type MainError = StructError<MainReason>;
 pub const PATH_NOT_EXIST: &str = "path not exists";
 
 pub fn report_error(e: StructError<MainReason>) {
-    println!("Run Error (Code: {})", e.reason().error_code());
-    println!("--------------------------");
+    eprintln!("Run Error (Code: {})", e.reason().error_code());
+    eprintln!("--------------------------");
     if let Some(target) = e.target_path() {
-        println!("[TARGET]:\n{target}\n",);
+        eprintln!("[TARGET]:\n{target}\n",);
     }
-    println!("[REASON]:");
+    eprintln!("[REASON]:");
     match e.reason() {
         MainReason::Accessor(addr_reason) => match addr_reason {
             AddrReason::Brief(msg) => {
-                println!("ACCESSOR ERROR: {msg}\n");
+                eprintln!("ACCESSOR ERROR: {msg}\n");
             }
             AddrReason::Unified(uvs_reason) => {
-                println!("ACCESSOR ERROR: {uvs_reason}\n");
+                eprintln!("ACCESSOR ERROR: {uvs_reason}\n");
             }
             AddrReason::OperationTimeoutExceeded { timeout, attempts } => {
-                println!("ACCESSOR TIMEOUT: timeout={timeout:?}, attempts={attempts}\n");
+                eprintln!("ACCESSOR TIMEOUT: timeout={timeout:?}, attempts={attempts}\n");
             }
             AddrReason::TotalTimeoutExceeded {
                 total_timeout,
                 elapsed,
             } => {
-                println!(
+                eprintln!(
                     "ACCESSOR TIMEOUT: total_timeout={total_timeout:?}, elapsed={elapsed:?}\n"
                 );
             }
@@ -217,78 +217,78 @@ pub fn report_error(e: StructError<MainReason>) {
                 attempts,
                 last_error,
             } => {
-                println!(
+                eprintln!(
                     "ACCESSOR RETRY EXHAUSTED: attempts={attempts}, last_error={last_error}\n"
                 );
             }
         },
         MainReason::Uvs(uvs_reason) => match uvs_reason {
             UvsReason::LogicError => {
-                println!("LOGIC ERROR\n");
+                eprintln!("LOGIC ERROR\n");
             }
             UvsReason::BusinessError => {
-                println!("BIZ ERROR\n");
+                eprintln!("BIZ ERROR\n");
             }
             UvsReason::DataError => {
-                println!("DATA ERROR\n");
+                eprintln!("DATA ERROR\n");
             }
             UvsReason::SystemError => {
-                println!("SYS ERROR\n");
+                eprintln!("SYS ERROR\n");
             }
             UvsReason::ResourceError => {
-                println!("RES ERROR\n");
+                eprintln!("RES ERROR\n");
             }
             UvsReason::ConfigError(e) => {
-                println!("CONF ERROR: {e}\n");
+                eprintln!("CONF ERROR: {e}\n");
             }
             UvsReason::ValidationError => {
-                println!("VALIDATION ERROR\n");
+                eprintln!("VALIDATION ERROR\n");
             }
             UvsReason::NotFoundError => {
-                println!("NOT FOUND ERROR\n");
+                eprintln!("NOT FOUND ERROR\n");
             }
             UvsReason::PermissionError => {
-                println!("PERMISSION ERROR\n");
+                eprintln!("PERMISSION ERROR\n");
             }
             UvsReason::NetworkError => {
-                println!("NETWORK ERROR\n");
+                eprintln!("NETWORK ERROR\n");
             }
             UvsReason::TimeoutError => {
-                println!("TIMEOUT ERROR\n");
+                eprintln!("TIMEOUT ERROR\n");
             }
             UvsReason::ExternalError => {
-                println!("EXTERNAL ERROR\n");
+                eprintln!("EXTERNAL ERROR\n");
             }
             UvsReason::RunRuleError => {
-                println!("RUN RULE ERROR\n");
+                eprintln!("RUN RULE ERROR\n");
             }
         },
 
         MainReason::Localize(e) => {
-            println!("Localize ERROR: {e}\n",);
+            eprintln!("Localize ERROR: {e}\n",);
         }
         MainReason::Element(e) => {
-            println!("Element ERROR: {e}\n",);
+            eprintln!("Element ERROR: {e}\n",);
         }
         MainReason::UnKnow => {
-            println!("Unknow Error!\n");
+            eprintln!("Unknow Error!\n");
         }
         MainReason::Mod(e) => {
-            println!("Mod Error: \n{e} !");
+            eprintln!("Mod Error: \n{e} !");
         }
         MainReason::Sys(e) => {
-            println!("Sys Error: \n{e}");
+            eprintln!("Sys Error: \n{e}");
         }
         MainReason::Ops(e) => {
-            println!("Operator Error: \n{e}");
+            eprintln!("Operator Error: \n{e}");
         }
     }
     if let Some(detail) = e.detail() {
-        println!("\n[DETAIL]:\n{detail}",);
+        eprintln!("\n[DETAIL]:\n{detail}",);
     }
-    println!("\n[CONTEXT]:\n");
+    eprintln!("\n[CONTEXT]:\n");
     for x in e.contexts().iter() {
-        println!("{x}",)
+        eprintln!("{x}",)
     }
 }
 

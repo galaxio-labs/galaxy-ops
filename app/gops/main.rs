@@ -3,7 +3,7 @@ extern crate log;
 mod commands;
 
 use clap::Parser;
-use commands::{CommandDispatcher, GInsCmd};
+use commands::{CommandDispatcher, GInsCmd, OutputMode};
 use galaxy_ops::error::{MainResult, report_error};
 use galaxy_ops::prelude::ErrorOwe;
 use orion_vars::vars::setup_start_env_vars;
@@ -29,7 +29,10 @@ impl GxOps {
         // 因此只在此处设置一次，各命令实现里不要再重复设置。
         setup_start_env_vars().source_resource()?;
         let cmd = GInsCmd::parse();
-        println!("gops: {}", env!("CARGO_PKG_VERSION"));
+        // 版本横幅走 stderr，且机器可读模式（如 `self check --json`）不打印，保证 stdout 干净。
+        if CommandDispatcher::output_mode(&cmd) == OutputMode::Human {
+            eprintln!("gops: {}", env!("CARGO_PKG_VERSION"));
+        }
         CommandDispatcher::dispatch(cmd).await?;
         Ok(())
     }
@@ -50,12 +53,14 @@ mod tests {
         let mut found_mod = false;
         let mut found_sys = false;
         let mut found_prj = false;
+        let mut found_self = false;
 
         for subcommand in &subcommands_vec {
             match subcommand.get_name() {
                 "mod" => found_mod = true,
                 "sys" => found_sys = true,
                 "prj" => found_prj = true,
+                "self" => found_self = true,
                 _ => {}
             }
         }
@@ -63,9 +68,10 @@ mod tests {
         assert!(found_mod, "Mod subcommand should be available");
         assert!(found_sys, "Sys subcommand should be available");
         assert!(found_prj, "Prj subcommand should be available");
+        assert!(found_self, "Self subcommand should be available");
 
         // Verify no other subcommands exist
-        let expected_commands = vec!["mod", "sys", "prj"];
+        let expected_commands = vec!["mod", "sys", "prj", "self"];
         let actual_commands: Vec<&str> = subcommands_vec.iter().map(|cmd| cmd.get_name()).collect();
 
         for expected_cmd in &expected_commands {

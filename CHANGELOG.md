@@ -5,6 +5,11 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.13] - 2026-09-30
+
+### Bug 修复
+- `gops self skill install`（整包）的目标目录名改为**按来源推导**（远程 URL 末段 / 本地目录名），不再固定为 `gops-skills` —— 修复 `--source galaxio-labs/gx-skills` 被装成 `gops-skills` 的问题。
+
 ## [2.0.12] - 2026-09-30
 
 ### 新增功能

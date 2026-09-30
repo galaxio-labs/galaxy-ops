@@ -15,8 +15,8 @@ use walkdir::WalkDir;
 use super::model::{ResolvedTarget, SkillInstallReport, SkillPlatform, SkillSource, SkillTarget};
 use super::prelude::*;
 
-/// 整包安装时的目标目录名。
-pub const COLLECTION_NAME: &str = "gops-skills";
+/// 整包安装时无法从来源推导名字时的兜底目标名。
+pub const DEFAULT_COLLECTION_NAME: &str = "gops-skills";
 
 /// 安装请求。
 #[derive(Clone, Debug)]
@@ -96,7 +96,7 @@ impl SkillService {
         let name = req
             .skill
             .clone()
-            .unwrap_or_else(|| COLLECTION_NAME.to_string());
+            .unwrap_or_else(|| collection_name(&req.source));
 
         let targets = self.resolve_targets(req)?;
         confirm_overwrite(&targets, &name, req.yes)?;
@@ -248,6 +248,26 @@ fn confirm_overwrite(targets: &[ResolvedTarget], name: &str, yes: bool) -> MainR
         Ok(())
     } else {
         Err(MainReason::logic_detail("aborted by user"))
+    }
+}
+
+/// 整包安装时的目标名：取来源仓库名（远程 URL 的最后一段 / 本地目录 basename）。
+fn collection_name(source: &SkillSource) -> String {
+    let name = match source {
+        SkillSource::Remote { url, .. } => {
+            let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
+            trimmed.rsplit(['/', ':']).next().unwrap_or("").to_string()
+        }
+        SkillSource::Local { path } => path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    if name.trim().is_empty() {
+        DEFAULT_COLLECTION_NAME.to_string()
+    } else {
+        name
     }
 }
 
@@ -476,7 +496,7 @@ impl Drop for TempDir {
 #[cfg(test)]
 mod tests {
     use super::{
-        COLLECTION_NAME, InstallRequest, SkillService, collect_skill_files, extract_frontmatter,
+        InstallRequest, SkillService, collect_skill_files, collection_name, extract_frontmatter,
         validate_frontmatter, validate_skills,
     };
     use crate::skills::model::{SkillSource, SkillTarget};
@@ -493,7 +513,7 @@ mod tests {
 
     /// 造一个「仓库」：顶层 collection skill + `skills/foo`，带一个假的 `.git`。
     fn fake_repo(root: &Path) {
-        write_skill(root, COLLECTION_NAME, "collection router");
+        write_skill(root, "gops-skills", "collection router");
         write_skill(&root.join("skills/foo"), "foo", "the foo skill");
         std::fs::create_dir_all(root.join(".git")).expect("mk git");
         std::fs::write(root.join(".git/config"), "junk").expect("write git config");
@@ -576,9 +596,9 @@ mod tests {
     }
 
     #[test]
-    fn install_collection_uses_collection_name() {
+    fn install_collection_name_derives_from_source_repo() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let repo = tmp.path().join("repo");
+        let repo = tmp.path().join("gx-skills");
         fake_repo(&repo);
         let target = tmp.path().join("target");
         let svc = SkillService::with_home(tmp.path().join("home"));
@@ -587,16 +607,39 @@ mod tests {
             .install(&local_req(&repo, None, &target, false))
             .expect("install");
 
-        assert_eq!(report.name, COLLECTION_NAME);
+        assert_eq!(report.name, "gx-skills");
         assert_eq!(report.skill_files.len(), 2);
-        assert!(target.join(COLLECTION_NAME).join("SKILL.md").is_file());
+        assert!(target.join("gx-skills").join("SKILL.md").is_file());
         assert!(
             target
-                .join(COLLECTION_NAME)
+                .join("gx-skills")
                 .join("skills/foo/SKILL.md")
                 .is_file()
         );
-        assert!(!target.join(COLLECTION_NAME).join(".git").exists());
+        assert!(!target.join("gx-skills").join(".git").exists());
+    }
+
+    #[test]
+    fn collection_name_derives_from_source() {
+        let remote = |url: &str| SkillSource::Remote {
+            url: url.to_string(),
+            git_ref: "main".to_string(),
+        };
+        assert_eq!(
+            collection_name(&remote("https://github.com/galaxio-labs/gx-skills.git")),
+            "gx-skills"
+        );
+        assert_eq!(
+            collection_name(&remote("git@github.com:galaxio-labs/gops-skills.git")),
+            "gops-skills"
+        );
+        assert_eq!(collection_name(&remote("https://github.com/a/b")), "b");
+        assert_eq!(
+            collection_name(&SkillSource::Local {
+                path: std::path::PathBuf::from("/tmp/a/gops-skills"),
+            }),
+            "gops-skills"
+        );
     }
 
     #[test]

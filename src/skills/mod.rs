@@ -7,5 +7,5 @@ mod installer;
 mod model;
 mod prelude;
 
-pub use installer::{COLLECTION_NAME, InstallRequest, SkillService};
+pub use installer::{DEFAULT_COLLECTION_NAME, InstallRequest, SkillService};
 pub use model::{ResolvedTarget, SkillInstallReport, SkillPlatform, SkillSource, SkillTarget};

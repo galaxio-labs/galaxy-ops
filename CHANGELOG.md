@@ -31,19 +31,19 @@
 
 ## [2.0.0] - 2026-09-29
 
-> **破坏性变更**：系统模块布局重构，与 1.x 不完全兼容。新 gops 请配合 `galaxio-hub/ops-gxl` 的 `2.0` 通道使用。
+> **破坏性**：系统模块布局重构，与 1.x 不完全兼容；请配合 `galaxio-hub/ops-gxl` 的 `2.0` 通道。
 
 ### 新增功能
-- **`gops sys package` 默认只含入库文件**：默认按 `git ls-files` 打包（等价 `git archive` 的“只含入库文件”，需在 git 仓库内运行），自然排除 `.gitignore` 忽略的产物（`sys/*/mods/`、`**/local`、`.env` 等）；`--no-git` 才打包当前目录全部（仅跳过 `.git/`）。`deliver.lock` 作为交付清单始终随包分发；符号链接按 `git archive` 语义**保留为链接**（不解引用），打包过程带进度显示。
-- **`localize` 阶段扩展点（docker-compose）**：`gops sys localize` 写完 `.env` 后，若项目在 `_gal/work.gxl` 定义了同名 gx 流程 `localize` 则执行它（`gx run localize`），否则跳过——给 compose 系统补上「本地化后自定义动作」（渲染配置模板、生成证书/密钥等）的扩展点，与 gxl 系统统一。存在性判定用 `gx run --exists`（依赖 galaxy-flow ≥ 0.14），gx 缺失 / 版本过旧 / 无该流程时**静默跳过**，保持 compose「无需 gx」的默认；流程非零退出则 localize 整体失败。新增 `--no-flow` 跳过该阶段。
+- **`gops sys package` 默认只含入库文件**：按 `git ls-files` 打包（需在 git 仓库内），自动排除 `sys/*/mods/`、`**/local`、`.env` 等产物；`--no-git` 才打当前目录全部。`deliver.lock` 始终随包分发。
+- **`localize` 阶段扩展点（docker-compose）**：`sys localize` 写完 `.env` 后，若 `_gal/work.gxl` 有同名 `localize` 流程则执行（`gx run localize`）；gx 缺失 / 版本过旧 / 无该流程则静默跳过（保持「compose 无需 gx」）。`--no-flow` 可跳过。
 
 ### 改进优化
-- 合并后的配置（与 `.env` **完全一致**——同一份 evaled 字典、同样做过 `${}` 展开）作为**环境变量注入** gx 子进程，流程里可直接读 `${DOMAIN}` 等；注入时**保留** `PATH`/`HOME`/`LD_*`/`DYLD_*`/`GX*`/`GXL_*` 等关键变量不被覆盖；`-d 1` 会打印跳过原因（默认静默）。抽出 `project::env_pairs` 供注入复用；`gxl` 分派与阶段流程统一走同一 `gx` 调用入口（`run_gx_flow`）
-- 示例 `knowlege/docker-compose` 增加 `_gal/work.gxl` 的 `localize` 流程做**验证**（幂等写 `web.conf`），并补 `tests/sys_localize_stage_test.rs` 端到端（真实 `gops` 二进制 + 假 `$HOME/bin/gx`）
-- **host 模块制品缓存提升到 host 级**：`gops mod new` 的 host `download` 流程把制品下到 `${GXL_SHARED_LOCAL:../../local}/cache`（系统内 = `sys/<model>/local/cache`，同模型模块共享；独立运行 = `<repo>/local/cache`，可用 `GXL_SHARED_LOCAL` 覆盖）；缓存位于模块 `local/` 之外，不会被 `sys localize` 清掉。旧模块需重新生成 `workflows/operators.gxl` 才生效
+- host 模块制品缓存提升到 host 级（`sys/<model>/local/cache`，同模型模块共享；不被 `sys localize` 清掉）；旧模块需重新生成 `workflows/operators.gxl`。
+- 阶段流程注入的配置与 `.env` 完全一致，并保留 `PATH` / `HOME` / `GX*` / `GXL_*` 等关键变量。
 
-### 重大变更
-- **系统模块布局改为按模型分组**：`gops sys update` 现在把模块落到 `sys/<model>/mods/<mod>/`（原 `sys/mods/<mod>/<model>/`），同一部署目标的模块集中一处，便于按目标整体检视与打包。本地化产物路径（`sys/setting/list.yml` 的 `dst`）与脚手架 `.gitignore`（`sys/*/mods`）同步调整；系统与模块算子模板的 `extern` 统一指向权威仓库 `galaxio-hub/ops-gxl` 并改用 `2.0` 通道（`main` 保留给旧布局，供旧 gops 使用）。**兼容与迁移**：读取时优先新布局，缺失时回退旧布局 `sys/mods/<mod>/<model>`（存量项目不重跑 `update` 也能继续 `localize`）；`gops sys update` 成功后会自动清理遗留的 `sys/mods`，并给已有系统的 `.gitignore` 补上 `sys/*/mods`（旧规则只有 `sys/mods`，匹配不到新布局；幂等、只追加不改动其他行）；`sys/setting/list.yml` 里旧布局的 `dst` 会在 `update` 时**自动迁移**为 `sys/<model>/mods/<mod>/local/`（否则 localize 会把产物写回旧路径、重建 `sys/mods`）
+### 重大变更（破坏性）
+- **模块布局按模型分组**：`sys update` 把模块落到 `sys/<model>/mods/<mod>/`（原 `sys/mods/<mod>/<model>/`）；算子模板 `extern` 统一指向 `galaxio-hub/ops-gxl` 的 `2.0` 通道（`main` 留给旧布局）。
+- **兼容与迁移**：读取优先新布局、缺失回退旧布局（存量项目不重跑 `update` 也能 `localize`）；`update` 成功后清理遗留 `sys/mods`、给 `.gitignore` 补 `sys/*/mods`、并自动迁移 `sys/setting/list.yml` 里旧布局的 `dst`。
 
 ## [1.3.3] - 2026-09-28
 

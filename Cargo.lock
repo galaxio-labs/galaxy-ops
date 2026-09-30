@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-ops"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2072,9 +2072,9 @@ dependencies = [
 
 [[package]]
 name = "orion-accessor"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42cfca01052c5d919269780e6da436c2c95ea904c3631554180e3a88ff3ad09e"
+checksum = "4a050a675651f4dbc26f0e9acf9c7c4715c72df119c07fb9071e27272b30fa8c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3175,7 +3175,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

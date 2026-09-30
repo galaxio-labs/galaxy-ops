@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.11] - 2026-09-30
+
+### 依赖更新
+- `orion-accessor` 0.8.3（下载原子性）：`download` 先写 `<file>.part`，成功后原子替换；校验 `Content-Length`；对传输 / 5xx / 截断失败重试最多 3 次。`gops run download` 的缓存复用语义不变，但不再在目标位置留下半包。
+- 说明：2.0.10 的 `Cargo.lock` 仍锁 `orion-accessor 0.8.2`（已发布的二进制未含此修复），本版升至 `0.8.3`。
+
+### 文档
+- `UPGRADE.md` 补齐 2.0 破坏性变更与依赖版本对齐。
+
 ## [2.0.10] - 2026-09-30
 
 > 汇总 2.0.1 – 2.0.9（alpha 快速迭代）。

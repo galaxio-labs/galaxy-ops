@@ -5,7 +5,9 @@ use galaxy_ops::prelude::{ToStructError, UvsReason};
 use galaxy_ops::self_update::{
     CheckRequest, CheckResult, ReleaseChannel, SelfUpdateService, UpdateRequest,
 };
+use galaxy_ops::skills::{InstallRequest, SkillPlatform, SkillService, SkillSource, SkillTarget};
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use wp_self_update::{VersionRelation, compare_versions_str, relation_message};
 
 #[derive(Debug, Parser)]
@@ -21,6 +23,63 @@ pub enum SelfCmd {
 
     /// 回滚到最近一次升级前的版本 (Rollback to the previous version)
     Rollback(SelfRollbackArgs),
+
+    /// 管理 agent skills（安装 / 列出）(Manage agent skills: install / list)
+    #[command(
+        subcommand,
+        about = "管理 agent skills（安装 / 列出）(Manage agent skills)"
+    )]
+    Skill(SkillCmd),
+}
+
+#[derive(Debug, Parser)]
+pub enum SkillCmd {
+    /// 安装 skills 到 agent skills 目录 (Install skills into agent skill dirs)
+    Install(SkillInstallArgs),
+
+    /// 列出来源仓库中可安装的 skills (List installable skills)
+    List(SkillListArgs),
+}
+
+#[derive(Debug, Args, Clone, Getters)]
+pub struct SkillInstallArgs {
+    /// `skills/` 下的 skill 名；缺省安装整包（顶层路由 + `skills/`）
+    pub skill: Option<String>,
+
+    /// 来源：`owner/repo`、git URL，或本地目录
+    #[arg(long, default_value = "galaxio-labs/gops-skills")]
+    pub source: String,
+
+    /// 分支或标签
+    #[arg(long = "ref", default_value = "main")]
+    pub git_ref: String,
+
+    /// 目标平台：`codex|claude|zed|all`，可重复
+    #[arg(long, action = ArgAction::Append)]
+    pub target: Vec<String>,
+
+    /// 自定义目标目录，可重复
+    #[arg(long, action = ArgAction::Append)]
+    pub dir: Vec<PathBuf>,
+
+    /// 用符号链接替代复制（仅本地来源）
+    #[arg(long, action = ArgAction::SetTrue, default_value = "false")]
+    pub symlink: bool,
+
+    /// 跳过覆盖确认
+    #[arg(long, action = ArgAction::SetTrue, default_value = "false")]
+    pub yes: bool,
+}
+
+#[derive(Debug, Args, Clone, Getters)]
+pub struct SkillListArgs {
+    /// 来源：`owner/repo`、git URL，或本地目录
+    #[arg(long, default_value = "galaxio-labs/gops-skills")]
+    pub source: String,
+
+    /// 分支或标签
+    #[arg(long = "ref", default_value = "main")]
+    pub git_ref: String,
 }
 
 #[derive(Debug, Args, Clone, Getters)]
@@ -61,9 +120,9 @@ pub struct SelfCommandHandler;
 
 impl SelfCommandHandler {
     pub async fn execute(cmd: SelfCmd) -> MainResult<()> {
-        let svc = SelfUpdateService::new()?;
         match cmd {
             SelfCmd::Status => {
+                let svc = SelfUpdateService::new()?;
                 let status = svc.status()?;
                 println!("current_version={}", status.current_version);
                 println!("install_dir={}", status.install_dir.display());
@@ -78,6 +137,7 @@ impl SelfCommandHandler {
                 }
             }
             SelfCmd::Check(args) => {
+                let svc = SelfUpdateService::new()?;
                 let channel = parse_channel(args.channel.as_str())?;
                 let out = svc.check(CheckRequest { channel }).await?;
                 if args.json {
@@ -96,6 +156,7 @@ impl SelfCommandHandler {
                 }
             }
             SelfCmd::Update(args) => {
+                let svc = SelfUpdateService::new()?;
                 let channel = parse_channel(args.channel.as_str())?;
                 let req = UpdateRequest {
                     channel,
@@ -114,15 +175,79 @@ impl SelfCommandHandler {
                 }
             }
             SelfCmd::Rollback(args) => {
+                let svc = SelfUpdateService::new()?;
                 let out = svc.rollback(args.backup_id.as_deref())?;
                 println!("rollback=true");
                 if let Some(id) = out.backup_id {
                     println!("backup_id={id}");
                 }
             }
+            SelfCmd::Skill(cmd) => {
+                execute_skill(cmd)?;
+            }
         }
         Ok(())
     }
+}
+
+/// `gops self skill` 的处理器。
+fn execute_skill(cmd: SkillCmd) -> MainResult<()> {
+    let svc = SkillService::new()?;
+    match cmd {
+        SkillCmd::Install(args) => {
+            let source = SkillSource::parse(&args.source, &args.git_ref)?;
+            let source_desc = source.describe();
+            let req = InstallRequest {
+                source,
+                skill: args.skill.clone(),
+                targets: parse_skill_targets(&args.target, &args.dir)?,
+                symlink: args.symlink,
+                yes: args.yes,
+            };
+            let report = svc.install(&req)?;
+            println!("Source:    {source_desc}");
+            println!("Name:      {}", report.name);
+            println!("Validated: {} SKILL.md", report.skill_files.len());
+            for loc in &report.installed {
+                println!("Installed: {}", loc.dir.display());
+                println!("Platform:  {}", loc.platform);
+            }
+        }
+        SkillCmd::List(args) => {
+            let source = SkillSource::parse(&args.source, &args.git_ref)?;
+            let names = svc.list(&source)?;
+            println!("Source: {}", source.describe());
+            if names.is_empty() {
+                println!("(no skills found)");
+            } else {
+                for name in names {
+                    println!("  {name}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 把 `--target` / `--dir` 解析成安装目标；`all` 展开为全部平台。
+fn parse_skill_targets(targets: &[String], dirs: &[PathBuf]) -> MainResult<Vec<SkillTarget>> {
+    let mut out = Vec::new();
+    for raw in targets {
+        if raw.trim().eq_ignore_ascii_case("all") {
+            out.extend(SkillPlatform::ALL.into_iter().map(SkillTarget::Platform));
+            continue;
+        }
+        let platform = SkillPlatform::parse(raw).ok_or_else(|| {
+            MainReason::Uvs(UvsReason::validation_error())
+                .to_err()
+                .with_detail(format!("--target={raw}, expected=codex|claude|zed|all"))
+        })?;
+        out.push(SkillTarget::Platform(platform));
+    }
+    for dir in dirs {
+        out.push(SkillTarget::Dir(dir.clone()));
+    }
+    Ok(out)
 }
 
 fn parse_channel(input: &str) -> MainResult<ReleaseChannel> {
@@ -224,10 +349,12 @@ fn render_relation_message(relation: VersionRelation, use_color: bool) -> String
 #[cfg(test)]
 mod tests {
     use super::{
-        SelfCheckArgs, SelfCmd, format_self_check_report, parse_channel, render_relation_message,
+        SelfCheckArgs, SelfCmd, SkillCmd, format_self_check_report, parse_channel,
+        parse_skill_targets, render_relation_message,
     };
     use clap::Parser;
     use galaxy_ops::self_update::{CheckResult, ReleaseChannel};
+    use std::path::PathBuf;
     use wp_self_update::VersionRelation;
 
     #[test]
@@ -318,5 +445,75 @@ mod tests {
         ] {
             assert!(!render_relation_message(relation, false).contains('\u{1b}'));
         }
+    }
+
+    #[test]
+    fn parse_self_skill_install_defaults() {
+        let cmd = SelfCmd::try_parse_from(["self", "skill", "install"]).expect("parse");
+        match cmd {
+            SelfCmd::Skill(SkillCmd::Install(args)) => {
+                assert_eq!(args.source, "galaxio-labs/gops-skills");
+                assert_eq!(args.git_ref, "main");
+                assert!(args.skill.is_none());
+                assert!(args.target.is_empty());
+                assert!(args.dir.is_empty());
+                assert!(!args.symlink);
+                assert!(!args.yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_self_skill_install_flags() {
+        let cmd = SelfCmd::try_parse_from([
+            "self",
+            "skill",
+            "install",
+            "gops-engineering",
+            "--target",
+            "zed",
+            "--dir",
+            "/tmp/skills",
+            "--symlink",
+            "--yes",
+        ])
+        .expect("parse");
+        match cmd {
+            SelfCmd::Skill(SkillCmd::Install(args)) => {
+                assert_eq!(args.skill.as_deref(), Some("gops-engineering"));
+                assert_eq!(args.target, vec!["zed".to_string()]);
+                assert_eq!(args.dir, vec![PathBuf::from("/tmp/skills")]);
+                assert!(args.symlink);
+                assert!(args.yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_self_skill_list() {
+        let cmd = SelfCmd::try_parse_from(["self", "skill", "list", "--ref", "v1"]).expect("parse");
+        match cmd {
+            SelfCmd::Skill(SkillCmd::List(args)) => assert_eq!(args.git_ref, "v1"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_skill_targets_expands_all_plus_explicit_and_dirs() {
+        let dir = PathBuf::from("/tmp/x");
+        let targets = parse_skill_targets(
+            &["all".to_string(), "zed".to_string()],
+            std::slice::from_ref(&dir),
+        )
+        .expect("parse");
+        // `all` 展开为 3 个平台，再加显式 `zed` 与 1 个自定义目录（目录去重留给服务层）
+        assert_eq!(targets.len(), 5);
+    }
+
+    #[test]
+    fn parse_skill_targets_rejects_unknown() {
+        assert!(parse_skill_targets(&["vscode".to_string()], &[]).is_err());
     }
 }

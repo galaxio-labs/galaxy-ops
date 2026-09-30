@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.12] - 2026-09-30
+
+### 新增功能
+- **`gops self skill`**：安装 / 列出 agent skills（默认源 [gops-skills](https://github.com/galaxio-labs/gops-skills)）到各 agent 目录（codex / claude / zed / 自定义）。用内置 `git2` 浅 clone + `serde_yaml` 校验 `SKILL.md` frontmatter，不再依赖 `install.sh` / `python3` / `ruby`；`install` 支持 `--source` / `--ref` / `--target` / `--dir` / `--symlink` / `--yes`，`list` 列出来源仓库中的 skills。
+
+### 文档
+- README：安装说明补齐「稳定版 / 测试版（beta）/ 开发版（alpha）」三通道，并新增「安装 agent skills」小节；CLI 概览的「常用子命令」按命令分节。
+
 ## [2.0.11] - 2026-09-30
 
 ### 依赖更新

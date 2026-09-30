@@ -13,6 +13,72 @@ galaxy-ops 开源运维交付工具，用于组织、配置、组合和交付运
 - `galaxy-ops` 负责模块、系统和运维项目的组织与交付
 - `galaxy-flow` 提供基于 GXL 的工作流定义与执行能力
 
+## 安装说明 / Installation
+
+### 一键安装（推荐）
+
+**稳定版**
+
+```bash
+curl -sSf https://get.warpparse.ai/inst-x.sh | bash -s -- gops
+```
+
+**测试版（beta 通道）**
+
+```bash
+curl -sSf https://get.warpparse.ai/inst-x.sh | bash -s -- gops beta
+```
+
+**开发版（alpha 通道）**
+
+```bash
+curl -sSf https://get.warpparse.ai/inst-x.sh | bash -s -- gops alpha
+```
+
+默认安装到：`$HOME/bin`。如需自定义安装目录：
+
+```bash
+curl -sSf https://get.warpparse.ai/inst-x.sh | WP_INST_INSTALL_DIR=/usr/local/bin bash -s -- gops
+```
+
+安装后验证：
+
+```bash
+# 需要 PATH 里有 $HOME/bin（galaxy-ops 调用 galaxy-flow 的 gx 来完成系统操作）
+gops --version
+gx --version
+```
+
+如果提示命令不存在，请把安装目录加入 `PATH`（例如 `$HOME/bin`）。
+
+### 自升级
+
+安装后可用 **`gops self update`** 直接升级到最新版本，**无需重新执行安装脚本**：
+
+```bash
+gops self status                          # 当前版本与安装目录
+gops self check --channel alpha           # 查询通道最新版本（--json 机器可读）
+gops self update --channel alpha --yes    # 升级到最新版
+gops self rollback                        # 回滚到上一版本
+```
+
+### 安装 agent skills
+
+`gops` 可直接把 [gops-skills](https://github.com/galaxio-labs/gops-skills) 装进 agent 的 skills 目录（无需 `install.sh` / `python3` / `ruby`）：
+
+```bash
+gops self skill install                          # 整包（顶层路由 + skills/），自动探测已装平台
+gops self skill list                             # 列出可安装的 skills
+```
+
+- 默认源 `galaxio-labs/gops-skills@main`；`--source` 接受 `owner/repo`、git URL 或本地目录，`--ref` 指定分支 / 标签。
+- `--target codex|claude|zed|all`（可重复）与 `--dir <path>`（可重复）选择落地目录；都不给时自动探测 `~/.codex/skills`、`~/.claude/skills`、`~/.agents/skills`。
+- 装前校验每个 `SKILL.md` 的 YAML frontmatter，非法即中止；本地来源可用 `--symlink`。
+
+### 从源码构建
+
+见下方 Quick Start。
+
 ## Why Galaxy-OPS
 
 很多自动化工具解决的是“命令怎么执行”，`galaxy-ops` 更关注“运维能力如何被组织、组合、配置、本地化和交付”。
@@ -41,7 +107,7 @@ Module -> System -> Ops Project
 - `gops sys`：系统**定义与交付**——创建系统、更新/解析、本地化、打包、漂移检查、值变更。
 - `gops run`：**运行时运维**——在目标环境下载/安装/卸载组件、启动/停止服务、查询状态、诊断。
 - `gops prj`：创建运维工程、导入系统、更新本地项目引用。
-- `gops self`：检查与升级 `gops` 自身（自升级）。
+- `gops self`：检查与升级 `gops` 自身（自升级），并安装 / 列出 agent skills（`gops self skill`）。
 
 这意味着 `galaxy-ops` 负责交付组织层，而不是直接替代工作流执行引擎：
 
@@ -66,48 +132,50 @@ gops <COMMAND>
 
 常用子命令：
 
+### `gops mod` — 模块
+
 ```bash
-# 创建模块
-gops mod new --name nginx
+gops mod new --name nginx        # 创建模块
+gops mod localize                # 本地化模块配置
+gops mod diff                    # 查看值变更（哪些值被覆盖、被哪一层覆盖）
+```
 
-# 本地化模块配置
-gops mod localize
+### `gops sys` — 系统（定义 / 交付）
 
-# 查看模块值变更（哪些值被覆盖、被哪一层覆盖）
-gops mod diff
+```bash
+gops sys new --name web-stack    # 创建系统
+gops sys update                  # 更新系统引用 / 解析变量
+gops sys diff                    # 查看值变更（初始值 / 生效值 / 来源 / 可变性；--json 机器可读）
+gops sys package                 # 打包为 .tar.gz（在系统目录内执行）
+```
 
-# 创建系统
-gops sys new --name web-stack
+### `gops run` — 运行时运维
 
-# 更新系统引用
-gops sys update
+```bash
+gops run download                # 下载组件
+gops run install                 # 安装组件
+gops run start                   # 启动服务
+gops run stop                    # 停止服务
+gops run status                  # 查询状态
+gops run diagnose                # 诊断
+```
 
-# 查看系统值变更（初始值 / 生效值 / 来源 / 可变性；--json 机器可读）
-gops sys diff
+### `gops prj` — 运维工程
 
-# 解析变量并打包系统为 .tar.gz
-cd web-stack
-gops sys package
+```bash
+gops prj new --name customer-a                              # 创建运维工程
+gops prj import --path /path/to/web-stack-0.1.0.tar.gz      # 导入已打包的系统
+gops prj update                                             # 更新本地引用
+gops prj reimport                                           # 重新导入（保留 values/ 客户值）
+```
 
-# 在目标环境运维（下载/安装/启停/状态/诊断）
-gops run install
-gops run start
+### `gops self` — 自身维护
 
-# 创建运维工程
-gops prj new --name customer-a
-
-# 向运维工程导入已打包的系统
-gops prj import --path /path/to/web-stack-0.1.0.tar.gz
-
-# 更新运维工程本地引用
-gops prj update
-
-# 重新导入系统（保留 values/ 客户值）
-gops prj reimport
-
-# 检查 / 升级 gops 自身
-gops self check --channel alpha
-gops self update --channel alpha --yes
+```bash
+gops self check --channel alpha           # 检查通道最新版本
+gops self update --channel alpha --yes    # 升级到最新版
+gops self skill install                   # 安装 agent skills
+gops self skill list                      # 列出可安装的 skills
 ```
 
 查看完整帮助：
@@ -120,49 +188,6 @@ gops run --help
 gops prj --help
 gops self --help
 ```
-
-## 安装说明 / Installation
-
-### 1. 一键安装（推荐）
-
-```bash
-curl -sSf https://get.warpparse.ai/inst-x.sh | bash -s -- gops
-```
-
-默认安装到：`$HOME/bin`
-
-可选参数：
-
-```bash
-# alpha channel
-curl -sSf https://get.warpparse.ai/inst-x.sh | bash -s -- gops alpha
-
-# custom install dir
-curl -sSf https://get.warpparse.ai/inst-x.sh | WP_INST_INSTALL_DIR=/usr/local/bin bash -s -- gops
-```
-
-安装后验证：
-
-```bash
-# 需要 PATH 里有 $HOME/bin（galaxy-ops 调用 galaxy-flow 的 gx 来完成系统操作）
-gops --version
-gx --version
-```
-
-如果提示命令不存在，请把安装目录加入 `PATH`（例如 `$HOME/bin`）。
-
-安装后可用 `gops self` 自升级，无需重跑安装脚本：
-
-```bash
-gops self status                          # 当前版本与安装目录
-gops self check --channel alpha           # 查询通道最新版本（--json 机器可读）
-gops self update --channel alpha --yes    # 升级到最新版
-gops self rollback                        # 回滚到上一版本
-```
-
-### 2. 从源码构建
-
-见下方 Quick Start。
 
 ## Quick Start
 

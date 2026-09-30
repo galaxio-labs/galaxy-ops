@@ -7,33 +7,27 @@
 
 ## [2.0.10] - 2026-09-30
 
-> 本条目汇总 **2.0.1 – 2.0.9**（快速迭代的 alpha 系列）的全部变更。
+> 汇总 2.0.1 – 2.0.9（alpha 快速迭代）。
 
 ### 新增功能
-- **变更呈现 `gops sys diff` / `gops mod diff`** —— 回答“哪些值/文件被覆盖、被哪一层覆盖”：
-  - **值变更表**：逐键 `KEY | INITIAL | EFFECTIVE | ORIGIN | MUTABILITY | STATE`（`same|changed|added|removed`，只列非 `same` 行）；比对两侧均为 **env 展开前**的原始值，避免 `${VAR}` 造成伪变更；`--json` 机器可读。
-  - **文件变更表**：`FILE | STATE`（`created` / `replaced`）。`sys diff` 对 gxl 系统额外呈现 `sys/setting/<mod>/**` 相对模块 `<mod>/spec/**` 的**覆盖 / 新增**——纯**路径 + 内容 sha256** 比对，无需渲染、也不依赖上次 localize 的磁盘状态，模块 `setting.yml` 的 `include/exclude` 一致参与过滤。
-  - `--json` 结构：`{ "system": [...], "modules": [{ "module", "changes": [...] }], "files": [{ "target", "changes": [...] }] }`，**只含有变更的分组**。
-- **`localize` 末尾附带变更表**：`sys localize` / `mod localize` 完成后打印值变更表（无覆盖时打 `[OK] 值无覆盖`）；`localize` 另打印本次文件变更表（前后 sha256 指纹比对，**删除不报**、运行时产物不计入）。标头统一为 `<输出 ← 源>`（如 `…/mods/warp-fusion/local ← sys/setting/warp-fusion`）。
-- **`gops self` 自升级**：`status | check | update | rollback`，制品来自 `galaxio-labs/get` 的 `updates/gops` 通道（与 `inst-x.sh gops <channel>` 同源），状态/备份存于 `~/.galaxy/self_update/gops`（与 `gx` 同名目录隔离）。
-- **`gops sys package` 支持 `sys-prj.yml` 的 `ignore:` 节**：glob（相对系统根），**默认与 `--full` 两种模式都生效**；目录级模式排除整棵子树（`*` 不跨 `/`）。
-- 发布时生成更新清单 `updates/gops/<channel>`（2.0.1 补发）。
+- **变更呈现**：`gops sys diff` / `gops mod diff` 逐键列出值的**初始值 → 生效值**、来源与可变性（含系统层/模块分组；`sys diff` 另列 `sys/setting/<mod>` 相对模块 `spec/` 的**文件覆盖**）；`sys` / `mod localize` 末尾附带值 + 文件变更表。`--json` 可脚本消费。
+- **`gops self` 自升级**：`status | check | update | rollback`。
+- **`gops sys package`** 支持 `sys-prj.yml` 的 `ignore:` 节（默认与 `--full` 都生效）。
 
-### 变更（含破坏性）
-- **〔破坏性〕`gops sys` 拆分出运行时运维命令 `gops run`**：`download` / `install` / `uninstall` / `start` / `stop` / `status` / `diagnose` 移到 **`gops run <cmd>`**（仍按 `sys/sys_model.yml` 的 `kind` 分派到 gx 算子流或 docker compose）；`gops sys` 只保留定义 / 交付 / 工件（`new` / `update` / `localize` / `package` / `setting` / `check`）。使用方需把 `gops sys start` 之类改为 `gops run start`。
-- **〔破坏性〕`gops sys diff --json` 结构变更**：由平铺数组改为按范围分组的对象（见上），且只含有变更的分组。
-- **`localize` 文件变更表标头统一为「输出 ← 源」**：一次 localize 有多个渲染目标（模块 `spec/` 与 `sys/setting/<mod>` 写入同一 `local/`），此前模块标签误用模型名、setting 用绝对路径，无法分辨来源；同时去掉 `GXL_PRJ_ROOT` / 当前目录前缀，路径更短。
-- **`gops sys package` 打包模式命名**：`--no-git` 更名 **`--full`**（含义不变：打当前目录全部，含制品与本地化产物；默认仍只打 git 入库文件）。旧名 `--no-git` 保留为隐藏别名。
+### 重大变更（破坏性）
+- **拆出 `gops run`**：`download` / `install` / `uninstall` / `start` / `stop` / `status` / `diagnose` 从 `gops sys` 移到 **`gops run <cmd>`**；`gops sys` 只保留定义 / 交付 / 工件。
+- **`gops sys diff --json`** 由平铺数组改为分组对象 `{ system, modules, files }`。
+- `gops sys package` 的 `--no-git` 更名 **`--full`**（旧名保留为隐藏别名）。
 
 ### 改进优化
-- **输出流对齐 `gx`**：版本横幅改到 **stderr**（且仅人类可读模式打印），错误报告 `report_error` 由 `println!` 改为 **`eprintln!`**——保证 `--json` 场景下 stdout 始终干净。
-- **自升级健壮性**：`rollback` 用**临时文件 + rename 原子替换**（避免就地覆盖运行中的二进制在 Linux 触发 `ETXTBSY`）；升级前先备份当前二进制（否则回滚无文件可恢复）；同秒重复升级时备份 id 顺延避免覆盖；升级成功后只保留最近 5 个备份。
+- 版本横幅与错误输出改走 **stderr**，保证 `--json` 时 stdout 干净。
+- 自升级 `rollback` 用临时文件 + rename 原子替换，并保留最近 5 个备份。
+- `sys check` 对「定义比已解析结果更新」给出 `[WARN]`（不改变退出码）。
 
 ### Bug 修复
-- **`sys diff` / `localize` 漏报模块层覆盖（gxl 系统）**：此前只比对「系统层」，忽略 `sys localize` 实际消费的 `values/<mod>/mod_value.yml`；现按 `sys/mod_list.yml` **逐模块分组**（`[mod: <name>]`）呈现，模块未下载时打 `[WARN]` 提示（先 `gops sys update`）。
-- **值文件小写键被静默忽略**：`values/*.yml` 的小写键（如 `cpu: 2000`）与变量名（`CPU`）不匹配、导致覆盖失效；加载值文件时统一**归一化为大写**（`localize` / `diff` / `prj import` 均受益）。
-- **`gops sys localize` 默认重解析变量（#24）**：此前仅在 `sys/merged_vars.yml` 缺失时才解析，改完 `sys/setting/vars.yml` 后 `localize` 不生效；现在默认**无条件先解析**，一条命令即生效（`--only` 语义不变：始终跳过解析）。
-- **`gops sys check` 暴露「定义比已解析结果更新」的陈旧**：输出 `[WARN]` 提示运行 `gops sys localize`（仅提示，不改变退出码，避免 mtime 抖动误伤 CI）。
+- `sys diff` / `localize` 补上**模块层覆盖**（此前只比对系统层，漏掉 `values/<mod>/mod_value.yml`；现按 `mod_list.yml` 逐模块分组）。
+- 值文件的**小写键**不再被静默忽略（加载时统一归一化为大写）。
+- `sys localize` 默认**先重解析变量**（改 `sys/setting/vars.yml` 后一条命令即生效；`--only` 仍跳过）。
 
 ## [2.0.0] - 2026-09-29
 

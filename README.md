@@ -382,7 +382,8 @@ gops prj update
 
 ## Documentation
 
-- [升级迁移指南](./UPGRADE.md)
+- [2.0 升级指南](./UPGRADE.md)
+- [库 / 开发者迁移（API）](./API-MIGRATION.md)
 - [项目总览](./PROJECT_OVERVIEW.md)
 - [Module 模块文档](./src/module/README.md)
 - [System 系统文档](./src/system/README.md)

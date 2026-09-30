@@ -1,6 +1,40 @@
 # 升级迁移指南
 
-本文档面向从旧版 `galaxy-ops` 升级到当前版本的调用方，重点说明这次依赖升级带来的 API 迁移点，以及推荐的落地方式。
+本文档面向从旧版 `galaxy-ops` 升级到当前版本的调用方，重点说明**破坏性变更与迁移步骤**，以及依赖升级带来的库 API 迁移点。
+
+## 2.0 升级要点（破坏性）
+
+### 模块布局按模型分组（2.0.0）
+
+`gops sys update` 现在把模块落到 **`sys/<model>/mods/<mod>/`**（原 `sys/mods/<mod>/<model>/`），同一部署目标的模块集中一处。
+
+- **算子模板通道**：系统 / 模块脚手架的 `extern` 指向 `galaxio-hub/ops-gxl` 的 **`2.0`** 通道（`main` 只服务旧布局 / 旧 gops）。
+- **存量项目不用手动搬运**：读取优先新布局，缺失时回退旧布局，不重跑 `update` 也能继续 `localize`。
+- 跑一次 `gops sys update` 会自动：清理遗留 `sys/mods`、给 `.gitignore` 补 `sys/*/mods`（幂等）、把 `sys/setting/list.yml` 里旧布局的 `dst` 迁到 `sys/<model>/mods/<mod>/local/`。
+
+### 运行时命令拆到 `gops run`（2.0.4）
+
+`download` / `install` / `uninstall` / `start` / `stop` / `status` / `diagnose` 从 `gops sys` 移到 **`gops run <cmd>`**；`gops sys` 只保留**定义 / 交付 / 工件**（`new` / `update` / `localize` / `package` / `setting` / `check` / `diff`）。
+
+```bash
+gops sys start     # 旧
+
+gops run start     # 新
+```
+
+分派语义不变：仍按 `sys/sys_model.yml` 的 `kind` 走 gx 算子流（`gxl`）或 `docker compose`。脚本与 CI 需同步改名。
+
+### `sys package` 打包模式改名（2.0.3）
+
+`--no-git` → **`--full`**（含义不变：打当前目录全部，含制品与本地化产物）；默认仍只打 git 入库文件。旧名 `--no-git` 保留为隐藏别名，不强制改。
+
+### `sys diff --json` 结构（2.0.9）
+
+新增的 `gops sys diff` 的 JSON 由平铺数组改为**分组对象**（仅 alpha 期间的使用者受影响）：
+
+```json
+{ "system": [...], "modules": [{ "module": "…", "changes": [...] }], "files": [{ "target": "…", "changes": [...] }] }
+```
 
 ## docker-compose 文件位置变更（1.3.3）
 
@@ -23,11 +57,12 @@ docker-compose 系统的 compose 文件从系统**根目录**改为默认放在 
 
 ## 依赖升级
 
-- `orion-error` 升级到 `0.6`
-- `orion_conf` 升级到 `0.5`
-- `orion-infra` 升级到 `0.5`
-- `orion-accessor` 通过别名 `orion_variate` 升级到 `0.6`
-- `orion-variate` 通过别名 `orion_vars` 升级到 `0.11`
+- `orion-error` 升级到 `0.8`
+- `orion_conf` 升级到 `0.7`
+- `orion-infra` 升级到 `0.7`
+- `orion-accessor`（别名 `orion_variate`）升级到 `0.8`
+- `orion-variate`（别名 `orion_vars`）升级到 `0.13`
+- 新增 `orion-sec`（`0.6`，读取 `~/.galaxy/sec_value.yml` 注入 `${SEC_xxx}`）与 `wp-self-update`（`0.3`，`gops self` 自升级）
 
 ## 配置读写 API 迁移
 
@@ -109,6 +144,8 @@ dict.get_case_insensitive("key")
 
 不要再继续使用旧的 `ucase_get()`。
 
+值文件（`values/*.yml` / `values/<mod>/mod_value.yml`）的键同样**大小写不敏感**：加载时统一归一化为大写（此前小写键会与变量名不匹配而被静默忽略）。
+
 ## 加载后初始化
 
 `LoadHook` 只是新版本上游的 trait 名，不代表上游 `load_*` 会自动调用 hook。
@@ -119,7 +156,8 @@ dict.get_case_insensitive("key")
 
 ## 建议迁移顺序
 
-1. 先升级依赖版本，确保项目可编译。
+1. 先处理 2.0 破坏性变更：把 `gops sys <run-cmd>` 改为 `gops run <cmd>`（脚本 / CI）；存量系统跑一次 `gops sys update` 完成布局与 `list.yml` 迁移。
+2. 升级依赖版本，确保项目可编译。
 2. 把 `from_*` / `save_yml` / `Persistable` 等旧命名替换为新接口。
 3. 把 `ucase_get()` 统一替换为 `get_case_insensitive()`。
 4. 复查错误处理，确认没有把新的细粒度错误又包回旧的大类错误。

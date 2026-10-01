@@ -5,6 +5,33 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.0] - 2026-10-01
+
+### 新增功能
+
+- **`gops prj` 有了现场态能力：非破坏升级 / 备份 / 还原 / 重建。** 声明分两级——
+  `sys-prj.yml` 的 `preserve:`（升级不覆盖、也不删）与 `backup.{restore,rebuild}`（备份分级），
+  `ops-prj.yml` 的 `backup.{target,keep,systems}`（落点 / 份数 / 收哪些系统）。
+  - `gops prj update`：把包内内容覆盖到已交付系统上，`preserve` 一律不碰 —— 升级不再只能靠人搬文件。
+  - `gops prj backup` / `prj restore`：按分级收现场态，含清单 + sha256，并**点名含私钥的条目**提示离机保管；
+    还原先解到临时目录再合并，失败不留半截。
+  - `gops prj rebuild [<系统名>]`：重建系统目录 —— 现场态搬走搬回、旧目录先留后删、失败回滚。
+    这是**唯一**会丢“包外未声明内容”的操作，所以不做成默认。
+- **`gops prj diagnose`**（原名 `doctor`，旧名仍可用）：输出改成与 agentd 同口径（`[OK]/[WARN]/[FAIL]` +
+  缩进 detail + `→` 处置提示 + `结论:`，非 TTY / `NO_COLOR` 自动纯文本，有 FAIL 时退 1 供 CI 卡口）；
+  新增检查 `ignore ⊆ preserve`、`sys_models` 重名、`backup.restore` 是否声明、preserve 是否被备份档覆盖。
+
+### 变更
+
+- `gops prj reimport` 收紧为**只补缺失**：目录已存在就拒绝（旧行为是 `rm -rf` 重装），
+  并指向 `prj update`（非破坏升级）与 `prj rebuild`（重建）。
+- `gops prj update` 不再只更新项目 conf：现在还会逐个系统下载包做非破坏覆盖；包不可达时会失败。
+
+### Bug 修复
+
+- `prj rebuild` 回滚没走干净时不再顺手删掉暂存区（那可能是原目录与现场态的**最后一份拷贝**）；
+  上次遗留的暂存区会让下一次 `rebuild` 直接拒绝，而不是把它覆盖掉。
+
 ## [2.0.13] - 2026-09-30
 
 ### Bug 修复

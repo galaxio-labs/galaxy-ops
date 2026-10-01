@@ -20,7 +20,7 @@ use crate::system::lock::DELIVER_LOCK_FILE;
 /// 符号链接按 `git archive` 语义**保留为符号链接**（两种模式一致，不解引用）。
 /// `deliver.lock` 作为交付清单始终随包分发（不受 `ignore` 影响）。
 pub fn pack_system(root: &Path, out: &Path, use_git: bool, ignore: &[String]) -> MainResult<()> {
-    let patterns = compile_ignore(ignore)?;
+    let patterns = compile_path_patterns(ignore, "ignore")?;
 
     let mut files = if use_git {
         git_tracked_files(root)?
@@ -30,7 +30,7 @@ pub fn pack_system(root: &Path, out: &Path, use_git: bool, ignore: &[String]) ->
 
     // 两种模式都应用 `sys-prj.yml` 的 ignore（匹配文件自身或其任一祖先目录）
     if !patterns.is_empty() {
-        files.retain(|rel| !is_ignored(rel, &patterns));
+        files.retain(|rel| !path_matches(rel, &patterns));
     }
 
     // 交付清单必须随包分发
@@ -46,20 +46,21 @@ pub fn pack_system(root: &Path, out: &Path, use_git: bool, ignore: &[String]) ->
 }
 
 /// 编译 ignore glob（去空白、去前导 `./`、去首尾 `/`；忽略空串）。
-fn compile_ignore(ignore: &[String]) -> MainResult<Vec<glob::Pattern>> {
+/// 编译一组路径模式（`sys-prj.yml` 的 `ignore:` / `preserve:` 等）为 glob。
+///
+/// `what` 只用于报错文案（如 `ignore` / `preserve`），让用户知道是哪一节写错了。
+///
+/// 归一化常见 gitignore 写法：`/build`、`./artifacts/` 等应等价于 `build`、`artifacts`。
+/// 不归一化的话，glob 会把前导 `/`、`./` 当作字面量，模式静默失效。
+pub(crate) fn compile_path_patterns(raw: &[String], what: &str) -> MainResult<Vec<glob::Pattern>> {
     let mut patterns = Vec::new();
-    for raw in ignore {
-        // 归一化常见 gitignore 写法：`/build`、`./artifacts/` 等应等价于 `build`、`artifacts`。
-        // 不归一化的话，glob 会把前导 `/`、`./` 当作字面量，模式静默失效。
-        let trimmed = raw.trim();
-        let no_dot = trimmed.strip_prefix("./").unwrap_or(trimmed);
-        let pat = no_dot.trim_matches('/');
-        if pat.is_empty() {
+    for raw in raw {
+        let Some(pat) = normalize_path_pattern(raw) else {
             continue;
-        }
-        let pattern = glob::Pattern::new(pat).map_err(|e| {
+        };
+        let pattern = glob::Pattern::new(&pat).map_err(|e| {
             MainReason::logic_detail(format!(
-                "invalid ignore pattern in sys-prj.yml: `{raw}` ({e})"
+                "invalid {what} pattern in sys-prj.yml: `{raw}` ({e})"
             ))
         })?;
         patterns.push(pattern);
@@ -67,8 +68,25 @@ fn compile_ignore(ignore: &[String]) -> MainResult<Vec<glob::Pattern>> {
     Ok(patterns)
 }
 
-/// `rel` 是否命中任一 ignore（匹配文件自身**或**其任一祖先目录，类 gitignore 的目录排除）。
-fn is_ignored(rel: &Path, patterns: &[glob::Pattern]) -> bool {
+/// 归一化单条路径模式：去空白、去前导 `./`、去首尾 `/`；空串返回 `None`。
+/// 供 `compile_path_patterns` 与 `prj diagnose`（比对 `ignore` / `preserve` / `backup`）共用，
+/// 避免两处归一化规则分叉。
+pub(crate) fn normalize_path_pattern(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let no_dot = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    let pat = no_dot.trim_matches('/');
+    if pat.is_empty() {
+        None
+    } else {
+        Some(pat.to_string())
+    }
+}
+
+/// `rel` 是否命中任一模式（匹配文件自身**或**其任一祖先目录，类 gitignore 的目录排除）。
+///
+/// 注意它返回的是“命中”，而不是“被忽略” —— 同一个判定既用于打包时的 `ignore`，
+/// 也用于升级时的 `preserve`（后者是“不覆盖”，不是“不打包”），所以不能叫 `is_ignored`。
+pub(crate) fn path_matches(rel: &Path, patterns: &[glob::Pattern]) -> bool {
     let opts = glob::MatchOptions {
         // `*` 不跨 `/`（需显式用 `**`），贴近 gitignore 直觉
         require_literal_separator: true,
@@ -128,7 +146,7 @@ fn walk_files(root: &Path, patterns: &[glob::Pattern]) -> MainResult<Vec<PathBuf
             && e.file_type().is_dir()
             && let Ok(rel) = e.path().strip_prefix(root)
         {
-            return !is_ignored(rel, patterns);
+            return !path_matches(rel, patterns);
         }
         true
     }) {

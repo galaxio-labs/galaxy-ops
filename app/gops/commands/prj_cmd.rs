@@ -2,7 +2,8 @@ use clap::{Args, Parser};
 use derive_getters::Getters;
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
-use galaxy_ops::ops_prj::doctor::{CheckLevel, DoctorRequest, project_doctor};
+use galaxy_ops::ops_prj::backup::{list_archive, restore};
+use galaxy_ops::ops_prj::diagnose::{DiagnoseRequest, project_diagnose};
 use galaxy_ops::ops_prj::project::OpsProject;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::types::InsUpdateable;
@@ -47,7 +48,37 @@ pub struct PrjReimportArgs {
 }
 
 #[derive(Debug, Args, Getters)]
-pub struct PrjDoctorArgs {
+pub struct PrjRebuildArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+    #[clap(flatten)]
+    pub force: ForceArgs,
+    #[arg(help = "只重建该系统（缺省 = ops-prj.yml 里的全部系统）")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Args, Getters)]
+pub struct PrjBackupArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+    #[arg(long, help = "连系统声明的 rebuild 档一起收（默认只收 restore 档）")]
+    pub include_rebuild: bool,
+}
+
+#[derive(Debug, Args, Getters)]
+pub struct PrjRestoreArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+    #[arg(help = "备份归档 (.tar.gz) 的路径")]
+    pub archive: String,
+    #[arg(long, help = "只列出归档内容，不落地")]
+    pub list: bool,
+    #[arg(long, help = "预演：解包校验但不改动现场")]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args, Getters)]
+pub struct PrjDiagnoseArgs {
     #[clap(flatten)]
     pub debug_log: DebugLogArgs,
     #[arg(long, help = "将警告视为错误（用于 CI 卡口）")]
@@ -63,19 +94,42 @@ pub enum PrjCmd {
     #[command(about = "维护工程 (Maintain Project)")]
     Update(PrjUpdateArgs),
     #[command(
-        about = "重新导入系统 (Reimport Systems)",
-        long_about = "按 ops-prj.yml 里记录的 sys_models 重新导入系统，保留 values/ 客户值。适用于删除了已导入系统目录、但保留了 values/ + ops-prj.yml 的场景。\n\
-                     Reimport recorded systems from ops-prj.yml, preserving values/. Use when the imported system dir is removed but values/ + ops-prj.yml are kept."
+        about = "补装缺失的系统 (Reimport Missing Systems)",
+        long_about = "按 ops-prj.yml 里记录的 sys_models，把**不在场的**系统重新导入。\
+                     已存在的目录一律不动（只补、不删），并在结束时拒绝并指向 `prj update` / `prj rebuild`。\
+                     适用于删除了已导入系统目录、但保留了 values/ + ops-prj.yml 的场景。"
     )]
     Reimport(PrjReimportArgs),
     #[command(
-        about = "体检工程客户值 (Doctor Project Values)",
-        long_about = "检查运维项目的客户值（values/）是否已被版本控制纳管：目录是否存在、\
-                     每个已导入系统是否有值目录、values/ 是否被 .gitignore 忽略、是否有未提交改动。\
-                     把'靠 git 纪律'变成'靠工具提醒'。\n\
-                     Check that the project's customer values (values/) are tracked by version control."
+        about = "重建系统 (Rebuild Systems)",
+        long_about = "重建系统目录：现场态（`sys-prj.yml: preserve`）先搬走、旧目录改名保留、铺新内容、再搬回；\
+                     中途失败回滚。目录不在场的直接导入。**这是唯一会丢“包外未声明内容”的操作**，\
+                     所以不做成默认；只想升级请用 `gops prj update`。\
+                     可选 `<系统名>` 只重建一个，缺省重建 ops-prj.yml 里的全部系统。"
     )]
-    Doctor(PrjDoctorArgs),
+    Rebuild(PrjRebuildArgs),
+    #[command(
+        about = "备份现场态 (Backup Site State)",
+        long_about = "按系统侧 `sys-prj.yml: backup.{restore,rebuild}` 与项目侧 `ops-prj.yml: backup` 的声明，\
+                     收集现场态到一个归档（含清单 + sha256），并保留最近 `keep` 份。\
+                     含私钥/凭据的条目会被点名，请离机保管。"
+    )]
+    Backup(PrjBackupArgs),
+    #[command(
+        about = "还原现场态 (Restore Site State)",
+        long_about = "把备份归档合并回现场目录（先解到临时目录再覆盖）。\
+                     `--list` 只列内容；`--dry-run` 解包校验但不改动现场。"
+    )]
+    Restore(PrjRestoreArgs),
+    #[command(
+        about = "诊断工程现场态 (Diagnose Project)",
+        alias = "doctor",
+        long_about = "检查运维项目的现场态声明与客户值纳管：values/ 是否存在、每个已导入系统是否有值目录、\
+                     values/ 是否被 .gitignore 忽略、是否有未提交改动；以及 sys-prj.yml 的\
+                     `ignore ⊆ preserve`、`backup.restore` 是否声明、ops-prj.yml 的 sys_models 是否重名。\
+                     （旧名 `doctor` 仍可用。）"
+    )]
+    Diagnose(PrjDiagnoseArgs),
 }
 
 impl DfxArgsGetter for PrjNewArgs {
@@ -114,7 +168,34 @@ impl DfxArgsGetter for PrjReimportArgs {
     }
 }
 
-impl DfxArgsGetter for PrjDoctorArgs {
+impl DfxArgsGetter for PrjRebuildArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
+impl DfxArgsGetter for PrjBackupArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
+impl DfxArgsGetter for PrjRestoreArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
+impl DfxArgsGetter for PrjDiagnoseArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -124,6 +205,34 @@ impl DfxArgsGetter for PrjDoctorArgs {
 }
 
 pub struct PrjCommandHandler;
+
+/// 从当前目录加载运维项目，并在“不在项目根”时给出可操作的提示。
+///
+/// `gops prj` 全部以 CWD 为项目根（`ops-prj.yml` 所在）。常见误用是在**系统目录**里执行
+/// （如 `<项目>/wist-gateway-stack/`）——那里没有 `ops-prj.yml`，默认报错是一串
+/// “CONF ERROR / read file”，看不出该怎么办。
+fn load_project_from_cwd(current_dir: &std::path::Path) -> MainResult<OpsProject> {
+    if current_dir.join("ops-prj.yml").exists() {
+        return OpsProject::load(current_dir).err_conv();
+    }
+    // 父目录是项目根？—— 多半是在系统子目录里执行的
+    if let Some(parent) = current_dir.parent()
+        && parent.join("ops-prj.yml").exists()
+    {
+        return Err(format!(
+            "当前目录不是运维项目根：{}\n  → 它下面没有 ops-prj.yml，父目录 {} 才有。\n  → 请到项目根目录重跑，例如：cd {} && gops prj backup",
+            current_dir.display(),
+            parent.display(),
+            parent.display()
+        ))
+        .source_resource()?;
+    }
+    Err(format!(
+        "当前目录没有 ops-prj.yml（运维项目标志）：{}\n  → `gops prj` 需要在项目根目录运行；新建项目用 `gops prj new <name>`。",
+        current_dir.display()
+    ))
+    .source_resource()?
+}
 
 impl PrjCommandHandler {
     pub async fn handle_new(args: PrjNewArgs) -> MainResult<()> {
@@ -140,7 +249,7 @@ impl PrjCommandHandler {
         galaxy_ops::infra::configure_dfx_logging(&args);
         let current_dir = std::env::current_dir().source_resource()?;
         let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
-        let mut prj = OpsProject::load(&current_dir).err_conv()?;
+        let mut prj = load_project_from_cwd(&current_dir)?;
         let accessor = galaxy_ops::accessor::accessor_for_default();
 
         prj.import_sys(accessor, args.path(), &options)
@@ -154,9 +263,13 @@ impl PrjCommandHandler {
 
         let current_dir = std::env::current_dir().source_resource()?;
         let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
-        let prj = OpsProject::load(&current_dir).err_conv()?;
+        let prj = load_project_from_cwd(&current_dir)?;
         let accessor = galaxy_ops::accessor::accessor_for_default();
 
+        // 先做**非破坏性内容更新**（包内覆盖、preserve 不动），再更新项目 conf。
+        prj.update_sys_content(accessor.clone(), &options)
+            .await
+            .err_conv()?;
         prj.update_local(accessor, &current_dir, &options)
             .await
             .err_conv()?;
@@ -168,38 +281,115 @@ impl PrjCommandHandler {
 
         let current_dir = std::env::current_dir().source_resource()?;
         let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
-        let mut prj = OpsProject::load(&current_dir).err_conv()?;
+        let mut prj = load_project_from_cwd(&current_dir)?;
         let accessor = galaxy_ops::accessor::accessor_for_default();
 
         prj.reimport(accessor, &options).await.err_conv()?;
         Ok(())
     }
 
-    pub async fn handle_doctor(args: PrjDoctorArgs) -> MainResult<()> {
+    pub async fn handle_rebuild(args: PrjRebuildArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+
+        let current_dir = std::env::current_dir().source_resource()?;
+        let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
+        let mut prj = load_project_from_cwd(&current_dir)?;
+        let accessor = galaxy_ops::accessor::accessor_for_default();
+
+        prj.rebuild(args.name().as_deref(), accessor, &options)
+            .await
+            .err_conv()?;
+        Ok(())
+    }
+
+    pub async fn handle_backup(args: PrjBackupArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().source_resource()?;
+        let prj = load_project_from_cwd(&current_dir)?;
+
+        let report = prj.backup(*args.include_rebuild()).err_conv()?;
+        println!(
+            "备份完成 → {}（{} 项，共 {} 字节）",
+            report.archive.display(),
+            report.entries.len(),
+            report.total_bytes()
+        );
+        for e in &report.entries {
+            println!("  {}  {}  {}", e.sha256, e.size, e.path);
+        }
+        let secrets: Vec<&str> = report.secret_entries().map(|e| e.path.as_str()).collect();
+        if !secrets.is_empty() {
+            println!("  ⚠ 含私钥/凭据 {} 项，请离机安全保管：", secrets.len());
+            for s in &secrets {
+                println!("    {s}");
+            }
+        }
+        for old in &report.pruned {
+            println!("  清理过期份：{}", old.display());
+        }
+        Ok(())
+    }
+
+    pub async fn handle_restore(args: PrjRestoreArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().source_resource()?;
+        let archive = std::path::PathBuf::from(args.archive());
+
+        // 还原落点就是项目根：先确认 CWD 是项目根，免得把现场态倒进系统子目录
+        let _ = load_project_from_cwd(&current_dir)?;
+
+        if *args.list() {
+            for p in list_archive(&archive).err_conv()? {
+                println!("{p}");
+            }
+            return Ok(());
+        }
+        let report = restore(&current_dir, &archive, *args.dry_run()).err_conv()?;
+        if report.dry_run {
+            println!(
+                "预演（未改动现场）→ {}（将还原 {} 个系统目录：{}）",
+                report.root.display(),
+                report.entries.len(),
+                report.entries.join("、")
+            );
+        } else {
+            println!(
+                "已还原 → {}（{} 个系统目录：{}）",
+                report.root.display(),
+                report.entries.len(),
+                report.entries.join("、")
+            );
+            // 备份只收**现场态**，不含交付包内容：目录是被删掉的场景还要把系统铺回来
+            println!(
+                "提示：备份不含交付包内容（sys/ 等）；若系统目录是被删掉的，请再跑 `gops prj import` 或 `gops prj reimport`"
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn handle_diagnose(args: PrjDiagnoseArgs) -> MainResult<()> {
         galaxy_ops::infra::configure_dfx_logging(&args);
         let current_dir = std::env::current_dir().source_resource()?;
 
-        let report =
-            project_doctor(&current_dir, &DoctorRequest::new(*args.strict())).err_conv()?;
-        for item in report.items() {
-            let tag = match item.level() {
-                CheckLevel::Info => "INFO",
-                CheckLevel::Warn => "WARN",
-                CheckLevel::Error => "ERROR",
-            };
-            println!("[{tag}] {}", item.message());
-        }
+        // 提前给“不在项目根”的可操作提示（project_diagnose 内部自己会再 load 一次）
+        let _ = load_project_from_cwd(&current_dir)?;
 
-        if report.is_ok() {
-            println!(
-                "prj doctor: OK ({} 项提示, {} 项警告)",
-                report.count(CheckLevel::Info),
-                report.warnings()
-            );
-            Ok(())
-        } else {
-            Err(format!("prj doctor: {} error(s)", report.errors())).source_resource()?
+        let report =
+            project_diagnose(&current_dir, &DiagnoseRequest::new(*args.strict())).err_conv()?;
+
+        // 版式与 agentd `diagnose` 一致（[OK]/[WARN]/[FAIL] + 结论），着色由 NO_COLOR / TTY 决定。
+        let text = report.render_text(galaxy_ops::report::use_color());
+        print!("{text}");
+        // 有 FAIL 时下面直接 exit，先把 stdout 落盘（管道下是块缓冲）
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+
+        if report.exit_code() != 0 {
+            // 诊断的“失败”是**结果**，不是异常：退 1 让 `gops prj diagnose || 处理` 可用，
+            // 但不走框架的 Run Error 块（那会把报告重复一遍、还盖在结论后面）。
+            std::process::exit(1);
         }
+        Ok(())
     }
 
     pub async fn execute(cmd: PrjCmd) -> MainResult<()> {
@@ -208,7 +398,88 @@ impl PrjCommandHandler {
             PrjCmd::Import(args) => Self::handle_import(args).await,
             PrjCmd::Update(args) => Self::handle_update(args).await,
             PrjCmd::Reimport(args) => Self::handle_reimport(args).await,
-            PrjCmd::Doctor(args) => Self::handle_doctor(args).await,
+            PrjCmd::Rebuild(args) => Self::handle_rebuild(args).await,
+            PrjCmd::Backup(args) => Self::handle_backup(args).await,
+            PrjCmd::Restore(args) => Self::handle_restore(args).await,
+            PrjCmd::Diagnose(args) => Self::handle_diagnose(args).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{GInsCmd, PrjCmd};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_prj_rebuild_parses_with_and_without_name() {
+        let with = GInsCmd::try_parse_from(["gops", "prj", "rebuild", "web-stack"]).unwrap();
+        match with {
+            GInsCmd::Prj(PrjCmd::Rebuild(a)) => {
+                assert_eq!(a.name().as_deref(), Some("web-stack"))
+            }
+            other => panic!("expected rebuild, got {other:?}"),
+        }
+
+        let without = GInsCmd::try_parse_from(["gops", "prj", "rebuild"]).unwrap();
+        match without {
+            GInsCmd::Prj(PrjCmd::Rebuild(a)) => assert!(a.name().is_none()),
+            other => panic!("expected rebuild, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_prj_reimport_no_longer_accepts_recreate_flag() {
+        assert!(GInsCmd::try_parse_from(["gops", "prj", "reimport"]).is_ok());
+        // 改名后旧旗标必须被拒（不做隐藏别名，因为从未发布）
+        assert!(GInsCmd::try_parse_from(["gops", "prj", "reimport", "--recreate"]).is_err());
+    }
+
+    #[test]
+    fn test_prj_doctor_is_diagnose_alias() {
+        let cmd = GInsCmd::try_parse_from(["gops", "prj", "doctor"]).unwrap();
+        assert!(matches!(cmd, GInsCmd::Prj(PrjCmd::Diagnose(_))));
+    }
+
+    fn make_project(root: &std::path::Path) {
+        std::fs::create_dir_all(root.join("_gal")).unwrap();
+        std::fs::write(root.join("_gal/work.gxl"), "mod envs {}\nmod main {}\n").unwrap();
+        std::fs::write(
+            root.join("ops-prj.yml"),
+            "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_load_project_from_cwd_ok_at_root() {
+        let tmp = TempDir::new().unwrap();
+        make_project(tmp.path());
+        assert!(load_project_from_cwd(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_load_project_from_cwd_points_to_parent_when_in_system_dir() {
+        let tmp = TempDir::new().unwrap();
+        make_project(tmp.path());
+        // 在系统子目录里执行（该目录没有 ops-prj.yml）
+        let sys = tmp.path().join("wist-gateway-stack");
+        std::fs::create_dir_all(&sys).unwrap();
+
+        let err = load_project_from_cwd(&sys).unwrap_err();
+        let msg = err.detail().as_deref().unwrap_or_default();
+        assert!(msg.contains("不是运维项目根"), "msg={msg}");
+        assert!(msg.contains("cd"), "msg={msg}");
+        assert!(msg.contains("wist-gateway-stack"), "msg={msg}");
+    }
+
+    #[test]
+    fn test_load_project_from_cwd_without_project() {
+        let tmp = TempDir::new().unwrap();
+        let err = load_project_from_cwd(tmp.path()).unwrap_err();
+        let msg = err.detail().as_deref().unwrap_or_default();
+        assert!(msg.contains("ops-prj.yml"), "msg={msg}");
     }
 }

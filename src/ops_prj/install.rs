@@ -1,12 +1,16 @@
 use super::prelude::*;
 
 use crate::ops_prj::system::OpsTargetSystem;
+use crate::types::Accessor;
 use fs_extra::dir::CopyOptions;
+use orion_variate::addr::Address;
 use orion_variate::archive::decompress;
 use pathdiff::diff_paths;
 
 use crate::{
-    artifact::types::PackageType, error::MainResult, ops_prj::path::ProjectPath,
+    artifact::types::{PackageType, build_pkg, convert_addr},
+    error::MainResult,
+    ops_prj::path::ProjectPath,
     system::spec::SysModelSpec,
 };
 #[derive(Debug, Clone)]
@@ -26,6 +30,37 @@ pub struct SystemPackageInstaller {
     project_paths: ProjectPath,
     work_paths: PackageWorkingPaths,
     copy_options: CopyOptions,
+}
+
+/// 取包并解开：本地包直接解，远端包先下载到工作区再解。
+///
+/// 返回解包后的**包内容根目录**（内含 `sys/`、`sys-prj.yml` 等）。
+/// 与 `import_sys` 的第一步完全一致，抽出来供非破坏性更新（`prj update`）与重建复用 ——
+/// 三处各抄一遍取包逻辑，迟早会分叉。
+pub async fn fetch_and_prepare(
+    project_paths: ProjectPath,
+    addr: &str,
+    accessor: Accessor,
+    options: &DownloadOptions,
+) -> MainResult<PathBuf> {
+    let address = convert_addr(addr)?;
+    let work_path = PathBuf::from(
+        "${HOME}/ds-package"
+            .to_string()
+            .env_eval(&ValueDict::default()),
+    );
+    let pkg_path = if let Address::Local(local) = address.clone() {
+        PathBuf::from(local.path())
+    } else {
+        let up_unit = accessor
+            .download_to_local(&address, &work_path, options)
+            .await
+            .map_err(crate::error::MainReason::from_addr_error)?;
+        up_unit.position().clone()
+    };
+    let installer = SystemPackageInstaller::new(project_paths).with_pkg_path(pkg_path);
+    let package = build_pkg(addr)?;
+    installer.prepare_package(package)
 }
 
 impl SystemPackageInstaller {

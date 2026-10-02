@@ -9,7 +9,8 @@ use pathdiff::diff_paths;
 
 use crate::{
     artifact::types::{PackageType, build_pkg, convert_addr},
-    error::MainResult,
+    error::{MainError, MainReason, MainResult},
+    infra::{ensure_download_dir, package_work_dir},
     ops_prj::path::ProjectPath,
     system::spec::SysModelSpec,
 };
@@ -32,11 +33,38 @@ pub struct SystemPackageInstaller {
     copy_options: CopyOptions,
 }
 
+/// 清空并重建解包目录。
+///
+/// 不用 `make_clean_path`：那个只报 “system error / create_dir_all”，把底层 io 原文吞了 ——
+/// 在客户机上无法分辨是**权限 / 只读 / 磁盘满**，还是路径被同名文件（或符号链接）占着。
+/// 这里把 io 原文带出来，并把“同名文件占位”也当作可处理的输入（删掉重建，而不是失败）。
+fn prepare_clean_dir(dir: &Path) -> MainResult<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir_all(dir)
+        } else {
+            // 同名文件 / 符号链接：直接删（原实现会因 remove_dir_all(非目录) 而失败）
+            std::fs::remove_file(dir)
+        };
+        removed.map_err(|e| clean_dir_err("清理解包目录", dir, &e))?;
+    }
+    std::fs::create_dir_all(dir).map_err(|e| clean_dir_err("创建解包目录", dir, &e))
+}
+
+fn clean_dir_err(action: &str, dir: &Path, e: &std::io::Error) -> MainError {
+    MainReason::logic_detail(format!(
+        "{action}失败：{}（{e}）—— 检查是否只读 / 磁盘满，或该路径被同名文件占用",
+        dir.display()
+    ))
+}
+
 /// 取包并解开：本地包直接解，远端包先下载到工作区再解。
 ///
 /// 返回解包后的**包内容根目录**（内含 `sys/`、`sys-prj.yml` 等）。
 /// 与 `import_sys` 的第一步完全一致，抽出来供非破坏性更新（`prj update`）与重建复用 ——
 /// 三处各抄一遍取包逻辑，迟早会分叉。
+///
+/// 工作区取 [`package_work_dir`]（`GOPS_PACKAGE_DIR` 或平台缓存目录），不再硬编 `$HOME/ds-package`。
 pub async fn fetch_and_prepare(
     project_paths: ProjectPath,
     addr: &str,
@@ -44,11 +72,12 @@ pub async fn fetch_and_prepare(
     options: &DownloadOptions,
 ) -> MainResult<PathBuf> {
     let address = convert_addr(addr)?;
-    let work_path = PathBuf::from(
-        "${HOME}/ds-package"
-            .to_string()
-            .env_eval(&ValueDict::default()),
-    );
+    let work_path = package_work_dir();
+    // 落一行日志：客户报文里最常缺的就是“它到底往哪个目录写”
+    debug!("package work dir: {}", work_path.display());
+    // 先保证工作目录**真的是目录**：下载器在“目标不是已存在目录”时会把整条路径当文件名写，
+    // 于是一个 `~/ds-package` 会被写成一个文件，之后所有解包都 ENOTDIR（见 `ensure_download_dir` 注释）。
+    ensure_download_dir(&work_path)?;
     let pkg_path = if let Address::Local(local) = address.clone() {
         PathBuf::from(local.path())
     } else {
@@ -65,11 +94,7 @@ pub async fn fetch_and_prepare(
 
 impl SystemPackageInstaller {
     pub fn new(project_paths: ProjectPath) -> Self {
-        let work_dir = PathBuf::from(
-            "${HOME}/ds-package"
-                .to_string()
-                .env_eval(&ValueDict::default()),
-        );
+        let work_dir = package_work_dir();
         Self {
             project_paths,
             work_paths: PackageWorkingPaths::new(work_dir, PathBuf::new()),
@@ -85,8 +110,10 @@ impl SystemPackageInstaller {
     pub fn prepare_package(&self, package: PackageType) -> MainResult<PathBuf> {
         match package {
             PackageType::Bin(bin_package) => {
+                // 防御式：万一调用方没走 `fetch_and_prepare`，工作目录也必须是目录
+                ensure_download_dir(&self.work_paths.work_dir)?;
                 let out_path = self.work_paths.work_dir.join(bin_package.name());
-                make_clean_path(&out_path).source_resource()?;
+                prepare_clean_dir(&out_path)?;
                 decompress(&self.work_paths.pkg_path, out_path.clone())
                     .source_sys()
                     .want("decompress tar.gz")
@@ -171,6 +198,76 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::ops_prj::path::InstallationPaths;
+
+    use super::prepare_clean_dir;
+
+    #[test]
+    fn test_prepare_clean_dir_wipes_dir_and_replaces_file() {
+        let tmp = TempDir::new().unwrap();
+
+        // 已存在的目录 → 清空重建
+        let d = tmp.path().join("out");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("stale.txt"), "x").unwrap();
+        prepare_clean_dir(&d).unwrap();
+        assert!(d.is_dir());
+        assert!(!d.join("stale.txt").exists());
+
+        // 同名**文件** → 删掉重建（原 `make_clean_path` 会失败）
+        let f = tmp.path().join("asfile");
+        std::fs::write(&f, "x").unwrap();
+        prepare_clean_dir(&f).unwrap();
+        assert!(f.is_dir());
+    }
+
+    #[test]
+    fn test_prepare_clean_dir_error_carries_io_detail() {
+        let tmp = TempDir::new().unwrap();
+        // 父路径是文件 → create_dir_all ENOTDIR；报错必须带 io 原文与处置提示
+        let parent = tmp.path().join("pfile");
+        std::fs::write(&parent, "x").unwrap();
+
+        let err = prepare_clean_dir(&parent.join("sub")).unwrap_err();
+        let detail = err.detail().as_deref().unwrap_or_default();
+        assert!(detail.contains("创建解包目录失败"), "detail={detail}");
+        assert!(detail.contains("只读"), "应给出排查提示：{detail}");
+    }
+
+    /// 目标是**指向目录的符号链接**：只删链接、重建为目录，**不动链接指向的内容**。
+    /// （否则一次清理就会把别人目录里的东西删光。）
+    #[test]
+    fn test_prepare_clean_dir_symlink_only_removes_the_link() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep.txt"), "keep").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        prepare_clean_dir(&link).unwrap();
+
+        // link 现在是**真目录**（不再是链接）
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_dir());
+        assert!(
+            !std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // 链接原来指向的目录内容完好
+        assert_eq!(
+            std::fs::read_to_string(real.join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn test_prepare_clean_dir_creates_nested_from_scratch() {
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("a/b/c");
+        prepare_clean_dir(&nested).unwrap();
+        assert!(nested.is_dir());
+    }
 
     #[test]
     fn test_installation_paths() {

@@ -5,6 +5,30 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.1] - 2026-10-01
+
+### Bug 修复
+
+- **修复「全新的机器首次 `gops prj import / update / reimport` 必失败」**：取包前未保证
+  `$HOME/ds-package` 存在，而下载器在「目标不是已存在的目录」时会把**整条路径当成文件名**写——
+  于是 `~/ds-package` 被写成一个文件，随后建 `~/ds-package/<包名>` 报 `create_dir_all … ENOTDIR`。
+  现在取包前先保证工作目录就绪；若该路径已被同名文件 / 悬空符号链接占用，会**明确报错并给处置命令**，
+  不再只留一句看不懂的 `system error`。
+- 解包目录准备失败时改为透出**底层 io 原文**（只读 / 磁盘满 / 权限 / 被同名文件占用）；
+  同名文件或符号链接会被删掉重建（原来直接失败）。
+
+### 变更
+
+- 取包/解包工作目录不再硬编 `$HOME/ds-package`，优先级：`GOPS_PACKAGE_DIR` 环境变量 >
+  旧目录 `$HOME/ds-package`（**存在且是目录**时沿用，不打断在跑的机器）> 平台缓存目录的 `gops`
+  （Linux `$XDG_CACHE_HOME/gops`，缺省 `~/.cache/gops`；macOS `~/Library/Caches/gops`）。
+  `--debug 1` 会打印实际使用的工作目录。
+
+### 说明
+
+- `ds-package` 这个前缀来自早期的 `ds-sys` / `ds-mod` / `ds-ops` 二进制（0.11.0 已改名为 `g*`），
+  当时漏改了这个目录名。仍是目录的机器会继续沿用；想搬到新位置，删掉它即可。
+
 ## [2.1.0] - 2026-10-01
 
 ### 新增功能

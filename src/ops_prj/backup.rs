@@ -442,12 +442,59 @@ fn merge_copy(src: &Path, dst: &Path) -> MainResult<()> {
             merge_copy(&entry.path(), &dst.join(entry.file_name()))?;
         }
     } else {
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)
-                .source_resource()
-                .with(parent)?;
-        }
-        std::fs::copy(src, dst).source_resource().with(dst)?;
+        place_file(src, dst)?;
+    }
+    Ok(())
+}
+
+/// 把一个普通文件落到 `dst`：**同目录暂存 + `rename`**。
+///
+/// 为什么不是 `fs::copy(src, dst)` 原地覆盖：目标可能**不归当前用户**。现场真实一例 ——
+/// `configs/gateway/state/wist-gateway-store.db*` 是**容器身份**（`999:999`）建的
+/// （`align-host-perms.sh` 刻意不碰容器自建的库），而 `prj restore` 以**部署账号**跑：
+/// 原地打开写入会被 `EACCES` 挡住，症状是「备份**收得进**、还原**写不回**」。
+/// `rename(2)` 只要求**目录**可写、**不要求目标文件可写**，所以能把目标直接换掉 ——
+/// 这也是不需要提权的唯一办法。附带好处：单个文件的落盘是原子的，不会留半截。
+fn place_file(src: &Path, dst: &Path) -> MainResult<()> {
+    if let Some(parent) = dst.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .source_resource()
+            .with(parent)?;
+    }
+    // 目标已存在且是**目录**时，`rename` 只会给出 ENOTDIR/EISDIR 这种看不懂的话，先说人话。
+    if std::fs::symlink_metadata(dst)
+        .map(|meta| meta.is_dir())
+        .unwrap_or(false)
+    {
+        return Err(MainReason::logic_detail(format!(
+            "还原时目标是一个目录，不能用文件覆盖：{}",
+            dst.display()
+        )));
+    }
+    let dir = dst.parent().unwrap_or_else(|| Path::new("."));
+    let name = dst
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "restored".into());
+    // 暂存文件与目标**同目录**：`rename` 才落在同一个文件系统上，且只需目录写权限。
+    let staged = dir.join(format!(".{name}.restore-{}", std::process::id()));
+    let _ = std::fs::remove_file(&staged);
+    if let Err(err) = std::fs::copy(src, &staged) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(MainReason::logic_detail(format!(
+            "写入暂存文件 {} 失败：{err}",
+            staged.display()
+        )));
+    }
+    if let Err(err) = std::fs::rename(&staged, dst) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(MainReason::logic_detail(format!(
+            "换上 {} 失败：{err}\n  \
+             目标可能归别的属主（现场典型：容器身份 999:999 建的文件），且它所在目录 {} 对当前用户不可写 —— \
+             停掉容器后重试，或先 `sudo rm -f` 该文件。",
+            dst.display(),
+            dir.display()
+        )));
     }
     Ok(())
 }
@@ -603,6 +650,54 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .filter(|n| n.starts_with(".restore-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftovers={leftovers:?}");
+    }
+
+    #[test]
+    fn test_restore_replaces_a_target_the_user_cannot_write() {
+        // 现场真实一例：`configs/gateway/state/wist-gateway-store.db*` 归**容器身份**
+        // （999:999）所有，而 `prj restore` 以部署账号跑 —— 原地覆盖会 EACCES，
+        // 于是「备份收得进、还原写不回」。工具得靠「同目录暂存 + rename」换掉它。
+        // 这里用 0444 模拟「目标不可写」（rename 只要求目录可写）。
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("site");
+        let out = tmp.path().join("backup");
+        std::fs::create_dir_all(&root).unwrap();
+        make_site(&root, "web-stack");
+
+        let report = backup_systems(
+            "cust",
+            &root,
+            &[sel("web-stack", &["configs/state/store.db"])],
+            &out,
+            10,
+        )
+        .unwrap();
+
+        let live = root.join("web-stack/configs/state/store.db");
+        let from_backup = std::fs::read(&live).unwrap();
+        // 先把现场改成不同内容，再置为「不可写」——模拟「归别人所有、写不动」
+        std::fs::write(&live, b"stale").unwrap();
+        let mut perm = std::fs::metadata(&live).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&live, perm).unwrap();
+        assert!(
+            std::fs::write(&live, b"nope").is_err(),
+            "前提：目标此时确实不可写"
+        );
+
+        restore(&root, &report.archive, false).unwrap();
+        assert_eq!(
+            std::fs::read(&live).unwrap(),
+            from_backup,
+            "不可写的目标也必须被换掉（否则就是「备份收得进、还原写不回」那个缺陷）"
+        );
+        // 不得留下暂存文件
+        let leftovers: Vec<_> = std::fs::read_dir(live.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".restore-"))
             .collect();
         assert!(leftovers.is_empty(), "leftovers={leftovers:?}");
     }

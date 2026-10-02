@@ -5,6 +5,21 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.2] - 2026-10-03
+
+### Bug 修复
+
+- **`gops prj restore` 不再被「目标文件归别的属主」挡住**（备份**收得进**、还原**写不回**）。
+  现场真实一例：`configs/gateway/state/wist-gateway-store.db*` 由**容器身份**（`999:999`）创建
+  （`align-host-perms.sh` 刻意不碰容器自建的库），而 `prj restore` 以**部署账号**跑 ——
+  原来用 `fs::copy` **原地覆盖**，打开目标写入即 `EACCES`，还原中断在半途（只留一句 Permission denied）。
+  现在落盘改为**同目录暂存 + `rename(2)`**：`rename` 只要求**目录**可写、**不要求目标文件可写**，
+  所以归别人的文件也换得掉，且**不需要提权**。附带两点：单个文件落盘变**原子**（不留半截）；
+  还原后库文件的属主是**部署账号**，正是「恢复搬过来的库」那种，`align-host-perms.sh` 会把属组
+  放到容器 gid（`660`）。
+- 只有当**目录**也不可写时才失败，且报错直接给出处置（停容器后重试 / 先 `sudo rm -f` 该文件）；
+  目标同名条目是**目录**时也改为一句人话，不再抛 `ENOTDIR`。
+
 ## [2.1.1] - 2026-10-01
 
 ### Bug 修复

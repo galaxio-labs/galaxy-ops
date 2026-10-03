@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.3] - 2026-10-03
+
+### Bug 修复
+
+- **`gops prj rebuild` 不再卡在「容器以别的属主写的运行期目录」上**：保留项（`sys-prj.yml: preserve`）
+  的搬走/搬回，从**逐文件 `rename`** 改成**按最浅匹配项整体 `rename`** —— 命中一个目录就整棵搬，
+  **不再进入**它内部。于是 `preserve: configs` 会把 `configs` 一次性改名搬走再搬回，全程不碰
+  容器私有的 `configs/gateway/state/knowledge/`（uid 999、部署账号读写不了）—— 逐文件搬会在那里
+  `rename` 时因**父目录不可写**而 `Permission denied (os error 13)`。
+  语义不变（`path_matches` 是祖先匹配：目录命中 ⇒ 子树全部命中）；细到文件的模式（如
+  `configs/gateway/state/*.pem`）仍按文件收集。
+
 ## [2.1.2] - 2026-10-03
 
 ### Bug 修复

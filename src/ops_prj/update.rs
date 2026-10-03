@@ -260,6 +260,51 @@ pub(crate) fn walk_files(root: &Path) -> MainResult<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// 列出**最浅一层**匹配 preserve 的条目（相对路径，目录与文件都可能在列）。
+///
+/// 为什么按「最浅匹配项」而不是逐文件：`path_matches` 是**按祖先**匹配的 —— 一个目录命中，
+/// 它的整棵子树都算保留。于是「保留一棵目录」可以整体 `rename` 搬走，**不必进入**它的内部。
+/// 这对那些「部署账号读不了 / 写不了、但必须原样留着」的子树（如网关容器以 uid 999 写的
+/// 运行期目录 `configs/gateway/state/knowledge/`）是决定性的：逐文件搬会在 `rename` 时
+/// 因**父目录不可写**而 `EACCES`（issue：HK 上 `gops prj rebuild` 重建就卡在这里）。
+///
+/// 与 [`walk_files`] 同一套过滤：跳过 `.git` 与顶层的 `values`（客户值链接，不是包内容）。
+pub(crate) fn preserved_entries(
+    root: &Path,
+    patterns: &[glob::Pattern],
+) -> MainResult<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    // 没有 preserve 模式就不必走树：既省 I/O，也避免在“压根不保留”时误入私有子目录。
+    if patterns.is_empty() {
+        return Ok(out);
+    }
+    let mut pending: Vec<PathBuf> = vec![PathBuf::new()];
+    while let Some(rel_dir) = pending.pop() {
+        let dir = root.join(&rel_dir);
+        for entry in std::fs::read_dir(&dir).source_resource().with(&dir)? {
+            let entry = entry.source_resource()?;
+            let name = entry.file_name();
+            if rel_dir.as_os_str().is_empty() && name == ".git" {
+                continue;
+            }
+            let rel = rel_dir.join(&name);
+            if rel.components().count() == 1 && name == "values" {
+                continue;
+            }
+            if path_matches(&rel, patterns) {
+                // 命中即**不再下钻**：祖先匹配规则保证子树全部命中，整目录 rename 一下即可。
+                out.push(rel);
+                continue;
+            }
+            if entry.file_type().source_resource()?.is_dir() {
+                pending.push(rel);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// 覆盖一个条目：父目录按需创建；符号链接按链接复制（不跟随），其余按内容复制（沿用权限）。
 fn copy_entry(from: &Path, to: &Path) -> MainResult<()> {
     if let Some(parent) = to.parent() {
@@ -331,6 +376,67 @@ mod tests {
     fn patterns(items: &[&str]) -> Vec<glob::Pattern> {
         let raw: Vec<String> = items.iter().map(|s| s.to_string()).collect();
         compile_path_patterns(&raw, "preserve").unwrap()
+    }
+
+    #[test]
+    fn preserved_entries_stop_at_the_shallowest_match() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("sys");
+        std::fs::create_dir_all(root.join("configs/gateway/state/knowledge/kbp-x")).unwrap();
+        std::fs::write(
+            root.join("configs/gateway/state/knowledge/kbp-x/catalog.toml"),
+            "x",
+        )
+        .unwrap();
+        std::fs::write(root.join("configs/gateway/wist-gateway.toml"), "x").unwrap();
+        std::fs::write(root.join("app.txt"), "y").unwrap();
+
+        // 裸 `configs` → **整目录一项**，不下钻（容器私有子树不会被逐个列出 → 逐文件 rename 的 EACCES 就此消失）。
+        assert_eq!(
+            preserved_entries(&root, &patterns(&["configs"])).unwrap(),
+            vec![PathBuf::from("configs")]
+        );
+        // 细到文件 → 仍能下钻到该文件（不被目录级短路影响）。
+        assert_eq!(
+            preserved_entries(&root, &patterns(&["configs/gateway/wist-gateway.toml"])).unwrap(),
+            vec![PathBuf::from("configs/gateway/wist-gateway.toml")]
+        );
+        // 没有模式 → 不走树。
+        assert!(preserved_entries(&root, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn preserved_entries_do_not_descend_into_unreadable_subtrees() {
+        // 复现线上事故：容器（别的 uid）写的运行期目录，属主之外谁也进不去（mode 000）。
+        // 裸 `configs` 保留应**整目录搬**、不进入该子树 —— 逐文件遍历会在这里 EACCES。
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("sys");
+        let private = root.join("configs/gateway/state/knowledge");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("catalog.toml"), "x").unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        assert_eq!(
+            preserved_entries(&root, &patterns(&["configs"])).unwrap(),
+            vec![PathBuf::from("configs")]
+        );
+
+        // 复原，好在 TempDir 析构时能清理。
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn preserved_entries_skip_git_and_top_level_values() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("sys");
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        std::fs::write(root.join(".git/config"), "x").unwrap();
+        std::os::unix::fs::symlink("../values", root.join("values")).unwrap();
+        std::fs::write(root.join("app.txt"), "y").unwrap();
+
+        let out = preserved_entries(&root, &patterns(&["**"])).unwrap();
+        assert_eq!(out, vec![PathBuf::from("app.txt")]);
     }
 
     #[test]

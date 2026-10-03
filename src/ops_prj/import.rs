@@ -13,7 +13,7 @@ use crate::{
     const_vars::{MERGED_VARS_YML, SYS_PRJ_CONF_FILE_V2, SYS_VALUE_FILE, SYS_VARS_YML},
     error::{MainReason, MainResult},
     ops_prj::{project::OpsProject, system::OpsSystem},
-    system::pack::{compile_path_patterns, path_matches},
+    system::pack::compile_path_patterns,
     types::Accessor,
 };
 
@@ -165,10 +165,10 @@ impl OpsProject {
         let patterns = compile_path_patterns(&preserve, "preserve")?;
 
         // 3) 预演：三类清单
-        let keep_rels: Vec<PathBuf> = crate::ops_prj::update::walk_files(&target)?
-            .into_iter()
-            .filter(|rel| path_matches(rel, &patterns))
-            .collect();
+        //    保留项按**最浅匹配项**收集（目录整体搬，不逐文件）——见 `preserved_entries` 说明：
+        //    逐文件 rename 会因容器私有目录（uid 999）的父目录不可写而 EACCES。
+        let keep_rels: Vec<PathBuf> =
+            crate::ops_prj::update::preserved_entries(&target, &patterns)?;
         let undeclared = crate::ops_prj::update::undeclared_top_entries(
             &target, &sys_src, &patterns, &preserve,
         )?;

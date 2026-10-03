@@ -3,7 +3,31 @@
 所有重要的项目变更都将记录在此文件中。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
-并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+
+## [2.2.0] - 2026-10-03
+
+### 新功能
+
+- **`gops prj upgrade`：发布态的自动化升级事务**（`kind: docker-compose`）。一条命令把
+  「备份 → 覆盖包内内容 → 重渲值与 `.env` → 拉镜像 → 切换 → 探活」串成一次**可回滚**的升级，
+  替代手敲 `prj update` + `sys localize` + `run download` + `run start` 并靠人记得先备份。
+  - **按版本升级**：`ops-prj.yml` 的 system ref 支持 `version:`，`addr` 可用 `{version}` 占位
+    （如 `.../x-v{version}.tar.gz`）；`gops prj upgrade --to <版本>` 自动解析，也仍接受完整地址。
+  - **先拉后停**：新镜像没到齐绝不动运行中的服务；失败按 `--on-failure` 处置
+    （`rollback-all` 整工程回滚 / `halt` 停在中间态），回滚是**状态级**（含库）。
+  - 另有 `--dry-run`（只出计划）、`--json`（给编排器判成败）、`--health-cmd`（栈外探活）。
+- 含 `{version}` 但没写 `version`、或有版本但 `addr` 没占位，都会在**解析处明确报错**，
+  绝不拿字面量 `{version}` 去下载。
+
+### 文档
+
+- 新增 `docs/design/prj-upgrade.md`：发布态升级事务的设计与取舍（阶段序、失败处置、边界）。
+
+### 内部
+
+- 测试稳定性：不再在用例里 `remove_var("TEST_MODE")`（进程级全局，撤掉会让并发跑的其它用例
+  掉进交互式选择而 panic），并让 `WorkDirWithLock` 不再被一次 panic **中毒**连带拖垮其它用例。
 
 ## [2.1.4] - 2026-10-03
 

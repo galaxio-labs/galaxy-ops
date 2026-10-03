@@ -54,7 +54,7 @@ impl OpsProject {
         options: &DownloadOptions,
     ) -> MainResult<()> {
         let mut refused: Vec<String> = Vec::new();
-        for (name, path) in self.sys_targets() {
+        for (name, path) in self.sys_targets()? {
             if self.paths().root().join(&name).exists() {
                 // 已存在的不动，继续把**缺失的**建起来
                 // （否则多系统项目里“恢复一个被删系统”会被其它在场的系统卡死）。
@@ -86,11 +86,11 @@ impl OpsProject {
         accessor: Accessor,
         options: &DownloadOptions,
     ) -> MainResult<()> {
-        let mut targets = self.sys_targets();
+        let mut targets = self.sys_targets()?;
         if let Some(name) = only {
             targets.retain(|(n, _)| n.as_str() == name);
             if targets.is_empty() {
-                let known: Vec<String> = self.sys_targets().into_iter().map(|(n, _)| n).collect();
+                let known: Vec<String> = self.sys_targets()?.into_iter().map(|(n, _)| n).collect();
                 return Err(MainReason::logic_detail(format!(
                     "ops-prj.yml 里没有系统 `{name}`（可用：{}）",
                     known.join("、")
@@ -110,12 +110,15 @@ impl OpsProject {
     }
 
     /// （系统名, addr 反推路径）清单。抽出来避开各处重复，也绕开迭代借用与 `&mut self` 冲突。
-    fn sys_targets(&self) -> Vec<(String, String)> {
-        self.conf()
-            .sys_models()
-            .iter()
-            .map(|sys| (sys.sys().name().clone(), addr_to_path_string(sys.addr())))
-            .collect()
+    ///
+    /// addr 经 `{version}` 模板解析（`OpsSystem::resolved_addr`）：含占位但没写 `version` 时
+    /// 在这里就报错，而不是拿字面量 `{version}` 去下载。
+    fn sys_targets(&self) -> MainResult<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        for sys in self.conf().sys_models() {
+            out.push((sys.sys().name().clone(), sys.resolved_addr()?));
+        }
+        Ok(out)
     }
 
     /// 重建一个系统：现场态整体搬走搬回，旧目录改名保留，失败回滚。

@@ -9,3 +9,4 @@ mod prelude;
 pub mod project;
 pub mod system;
 pub mod update;
+pub mod upgrade;

@@ -138,9 +138,24 @@ impl RunCommandHandler {
 
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         match SysOperator::load_kind(&current_dir) {
-            SysKind::DockerCompose => Self::run_compose_cmd(cmd_name, &args).await,
+            SysKind::DockerCompose => {
+                Self::run_compose_cmd(&current_dir, cmd_name, args.module().as_deref()).await
+            }
             SysKind::Gxl => Self::run_gx_cmd(cmd_name, &args).await,
         }
+    }
+
+    /// 在**指定系统目录**上跑 docker-compose 运行时动作（`gops prj upgrade` 的事务用）。
+    ///
+    /// 只支持 `kind: docker-compose`：`gxl` 的分派（`gx run`）是按 **CWD** 解析工程的，
+    /// 无法按目录重定向，另行设计（见 `docs/design/prj-upgrade.md` §3.5）。
+    pub(crate) async fn compose_cmd_in(dir: &Path, cmd_name: &str) -> MainResult<()> {
+        if !matches!(SysOperator::load_kind(dir), SysKind::DockerCompose) {
+            return Err(galaxy_ops::error::MainReason::logic_detail(
+                "gops prj upgrade 第一版只支持 kind: docker-compose 的系统",
+            ));
+        }
+        Self::run_compose_cmd(dir, cmd_name, None).await
     }
 
     /// `kind: gxl` 的系统：把 `gops run <cmd>` 映射为 `gx run <cmd>`。
@@ -157,6 +172,7 @@ impl RunCommandHandler {
         }
 
         // 与 compose 的可选阶段流程共用同一入口 `run_gx_flow`。
+        // gxl 分派按 CWD 解析工程（`gops run` 从系统目录执行），故传 `None`。
         gx_dispatch::run_gx_flow(
             &gx_path,
             args.env(),
@@ -164,26 +180,25 @@ impl RunCommandHandler {
             module.as_deref(),
             cmd_name,
             &[],
+            None,
         )
         .await
     }
 
-    async fn run_compose_cmd(cmd_name: &str, args: &SysOpsArgs) -> MainResult<()> {
-        let current_dir = std::env::current_dir().expect("无法获取当前目录");
-
+    async fn run_compose_cmd(dir: &Path, cmd_name: &str, module: Option<&str>) -> MainResult<()> {
         // 将 gops run 语义映射到 docker compose 子命令：
         //   download -> pull, install -> create, start -> up -d, stop -> stop,
         //   uninstall -> down, status -> ps, diagnose -> config
         let (subcommand, extra) = compose_subcommand(cmd_name);
 
-        if args.module().is_some() {
+        if module.is_some() {
             println!("note: docker-compose 类型系统忽略 --mod 参数");
         }
 
         let mut cmd = TokioCommand::new("docker");
         // compose 文件位置可变（默认 `sys/docker-compose.yaml`），但项目目录始终锚定到系统根，
         // 使相对挂载与 .env 的基准保持不变。
-        let sys_paths = SysOperatorPath::new(&current_dir);
+        let sys_paths = SysOperatorPath::new(dir);
         let candidates = sys_paths.compose_candidates();
         let compose_file = candidates.first().cloned();
         if let Some(file) = &compose_file {
@@ -200,10 +215,10 @@ impl RunCommandHandler {
             );
         }
         cmd.arg("compose")
-            .args(compose_global_args(compose_file.as_deref(), &current_dir))
+            .args(compose_global_args(compose_file.as_deref(), dir))
             .arg(subcommand)
             .args(extra);
-        cmd.current_dir(&current_dir);
+        cmd.current_dir(dir);
 
         // 运行时注入密钥：从 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）读取 SEC_* 变量，
         // 只进入 docker compose 子进程环境，不落盘、不进 .env。

@@ -3,6 +3,7 @@
 //! 供 `gops sys`（`localize` 的可选阶段流程）与 `gops run`（算子流分派）共用，
 //! 保证「如何调 gx」只有一处。
 
+use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
 
@@ -111,9 +112,15 @@ pub(crate) async fn run_gx_flow(
     module: Option<&str>,
     flow: &str,
     inject_env: &[(String, String)],
+    cwd: Option<&Path>,
 ) -> MainResult<()> {
     let mut cmd = TokioCommand::new(gx_path);
     cmd.args(gx_run_args(flow, env, debug, module));
+    // `gx` 按**工作目录**解析工程：目录可变时（如 `prj upgrade` 对某系统目录）必须显式设置，
+    // 否则会拿进程 CWD 去解析，探测与流程都会落错地方。
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
     for (key, value) in inject_env {
         // 保留变量不被合并配置覆盖，否则可能破坏 gx 自身或其 shell（如 PATH/HOME）。
         if is_reserved_env(key) {

@@ -110,6 +110,8 @@ pub fn ensure_download_dir(dir: &Path) -> MainResult<()> {
 }
 
 static WORKDIR_LOCK: Mutex<()> = Mutex::new(());
+
+/// 切 CWD（**不持锁**）：仅限单线程/生产场景；测试或任何并发场景请用 [`WorkDirWithLock`]。
 pub struct WorkDir {
     original_dir: PathBuf,
 }
@@ -133,6 +135,8 @@ impl Drop for WorkDir {
     }
 }
 
+/// 切 CWD 并**持锁**：`chdir` 是**进程级全局**，多线程/多测试并发切换会互相踩，
+/// 所以凡是要改 CWD 的地方（尤其测试）都用它，不要用裸 `set_current_dir` 或 [`WorkDir`]。
 pub struct WorkDirWithLock {
     original_dir: PathBuf,
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -140,7 +144,11 @@ pub struct WorkDirWithLock {
 
 impl WorkDirWithLock {
     pub fn change<S: Into<PathBuf>>(target_dir: S) -> std::io::Result<Self> {
-        let lock = WORKDIR_LOCK.lock().unwrap();
+        // 这把锁保护的是「进程级 CWD」这一全局状态，不是锁里的数据（`()`）。
+        // 所以某个持有者 panic 只让锁「中毒」，**不该**把后续持锁者一起拖垮 —— 直接从中毒状态取回。
+        let lock = WORKDIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let original_dir = env::current_dir()?;
         let target = target_dir.into();
         info!("set current dir:{}", target.display());

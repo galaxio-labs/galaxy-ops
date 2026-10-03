@@ -19,7 +19,6 @@ use crate::system::pack::{compile_path_patterns, path_matches};
 
 use crate::const_vars::SYS_PRJ_CONF_FILE_V2;
 use crate::error::MainReason;
-use crate::ops_prj::import::addr_to_path_string;
 use crate::ops_prj::install::fetch_and_prepare;
 use crate::ops_prj::project::OpsProject;
 use crate::system::SysConf;
@@ -74,12 +73,10 @@ impl OpsProject {
         options: &DownloadOptions,
     ) -> MainResult<Vec<SysContentUpdate>> {
         let mut reports = Vec::new();
-        let targets: Vec<(String, String)> = self
-            .conf()
-            .sys_models()
-            .iter()
-            .map(|sys| (sys.sys().name().clone(), addr_to_path_string(sys.addr())))
-            .collect();
+        let mut targets: Vec<(String, String)> = Vec::new();
+        for sys in self.conf().sys_models() {
+            targets.push((sys.sys().name().clone(), sys.resolved_addr()?));
+        }
 
         for (name, addr) in targets {
             let target = self.paths().root().join(&name);

@@ -393,17 +393,22 @@ impl SysCommandHandler {
 
     pub async fn handle_localize(args: SysLocalizeArgs) -> MainResult<()> {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
-        galaxy_ops::infra::configure_dfx_logging(&args);
+        Self::localize_in(&current_dir, &args).await
+    }
 
-        let spec = SysOperator::load(&current_dir).err_conv()?;
-        let val_path = resolve_sys_value_path(&current_dir);
+    /// 在**指定系统目录**上跑 `sys localize`（`gops prj upgrade` 的事务用；CWD 版走 [`handle_localize`]）。
+    pub(crate) async fn localize_in(dir: &Path, args: &SysLocalizeArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(args);
+
+        let spec = SysOperator::load(dir).err_conv()?;
+        let val_path = resolve_sys_value_path(dir);
 
         // 默认：无条件先重解析变量（改 `sys/setting/vars.yml` 后一条命令即生效）。
         // `--only` 跳过解析，直接用现有 `sys/merged_vars.yml`。
         if !args.only {
             let options = DownloadOptions::from((false, ValueDict::default()));
             let accessor = galaxy_ops::accessor::accessor_for_default();
-            spec.update_local(accessor, &current_dir, &options)
+            spec.update_local(accessor, dir, &options)
                 .await
                 .err_conv()?;
         }
@@ -425,7 +430,7 @@ impl SysCommandHandler {
 
         // 与写 `.env` **完全一致**的值（同一份 evaled 字典，含 `${VAR}` 展开）：先算好，
         // 供随后的阶段流程注入子进程。
-        let options = LocalizeOptions::new(dict).with_only_mod(args.module);
+        let options = LocalizeOptions::new(dict).with_only_mod(args.module.clone());
         let stage_env = galaxy_ops::project::env_pairs(options.evaled_value());
 
         spec.localize(val_path, options).await.err_conv()?;
@@ -439,6 +444,7 @@ impl SysCommandHandler {
                 "localize",
                 debug,
                 &stage_env,
+                dir,
             )
             .await?;
         }
@@ -670,17 +676,20 @@ impl SysCommandHandler {
     /// 判定依赖 galaxy-flow `>= 0.14` 的 `gx run --exists`（**确定性**，不靠试跑猜
     /// 退出码）：存在则 `gx run <flow>`；不存在/不可判定则**跳过**（零行为变化、gx 可选）。
     /// `env_pairs` 里是合并后的配置，作为进程环境变量注入子进程，使流程能读到刚合并的值。
+    /// `cwd` 是**要在哪个目录**跑流程：`gx` 按工作目录解析工程，目录可变时（`prj upgrade`）
+    /// 不正确传递就会探测/执行到错的地方。
     async fn run_stage_flow(
         kind: SysKind,
         gx_path: &str,
         flow_name: &str,
         debug: usize,
         env_pairs: &[(String, String)],
+        cwd: &Path,
     ) -> MainResult<()> {
         if !matches!(kind, SysKind::DockerCompose) {
             return Ok(());
         }
-        match Self::gx_flow_probe(gx_path, flow_name) {
+        match Self::gx_flow_probe(gx_path, flow_name, cwd) {
             StageProbe::Exists => {}
             StageProbe::Skipped(reason) => {
                 // 默认静默（保持「compose 无需 gx」）；`-d 1` 给出跳过原因，避免
@@ -693,7 +702,16 @@ impl SysCommandHandler {
         }
         println!("run stage flow: gx run {flow_name}");
         // 与 gxl 分派共用同一入口（`-e default`，因为 compose 系统没有可选的 env）。
-        gx_dispatch::run_gx_flow(gx_path, "default", debug, None, flow_name, env_pairs).await
+        gx_dispatch::run_gx_flow(
+            gx_path,
+            "default",
+            debug,
+            None,
+            flow_name,
+            env_pairs,
+            Some(cwd),
+        )
+        .await
     }
 
     /// `gx run --exists <flow>`：退出 `0` = 存在；其余（不存在 / conf 不可加载 /
@@ -701,9 +719,10 @@ impl SysCommandHandler {
     ///
     /// 捕获并丢弃输出：探测不应污染 gops 输出（例如 compose 项目没有 `_gal/work.gxl`
     /// 时 gx 会往 stderr 打 `conf not exists`）。
-    fn gx_flow_probe(gx_path: &str, flow_name: &str) -> StageProbe {
+    fn gx_flow_probe(gx_path: &str, flow_name: &str, cwd: &Path) -> StageProbe {
         match Command::new(gx_path)
             .args(["run", "--exists", flow_name])
+            .current_dir(cwd)
             .output()
         {
             Ok(out) if out.status.success() => StageProbe::Exists,
@@ -810,6 +829,10 @@ mod tests {
     use super::*;
     use galaxy_ops::infra::{WorkDirWithLock, once_init_log};
     use tempfile::tempdir;
+
+    // `TEST_MODE` 是**进程级**全局，测试间共享：只设、**不撤**。
+    // 撤掉它会让并发跑的其它测试掉进交互式 `Select`（非 tty → panic），且 panic 会中毒
+    // `WORKDIR_LOCK` → 连带一片测试失败。
     #[tokio::test]
     async fn test_sys_new_command() {
         once_init_log();
@@ -826,10 +849,6 @@ mod tests {
         };
 
         let result = SysCommandHandler::handle_new(args).await;
-        unsafe {
-            std::env::remove_var("TEST_MODE");
-        }
-
         assert!(result.is_ok());
     }
 
@@ -841,10 +860,6 @@ mod tests {
         }
 
         let result = SysCommandHandler::ia_model_std();
-        unsafe {
-            std::env::remove_var("TEST_MODE");
-        }
-
         assert!(result.is_ok());
     }
 
@@ -864,10 +879,6 @@ mod tests {
         });
         let result = SysCommandHandler::execute(new_cmd).await;
         assert!(result.is_ok());
-
-        unsafe {
-            std::env::remove_var("TEST_MODE");
-        }
     }
 
     #[test]
@@ -975,15 +986,19 @@ mod tests {
     fn test_gx_flow_probe() {
         // `true` 忽略参数退出 0（视为存在）；`false` 退出 1；不存在路径 → 不可用
         assert!(matches!(
-            SysCommandHandler::gx_flow_probe("true", "localize"),
+            SysCommandHandler::gx_flow_probe("true", "localize", std::path::Path::new(".")),
             StageProbe::Exists
         ));
         assert!(matches!(
-            SysCommandHandler::gx_flow_probe("false", "localize"),
+            SysCommandHandler::gx_flow_probe("false", "localize", std::path::Path::new(".")),
             StageProbe::Skipped(_)
         ));
         assert!(matches!(
-            SysCommandHandler::gx_flow_probe("/nonexistent/gx-xyz", "localize"),
+            SysCommandHandler::gx_flow_probe(
+                "/nonexistent/gx-xyz",
+                "localize",
+                std::path::Path::new(".")
+            ),
             StageProbe::Skipped(_)
         ));
     }
@@ -991,9 +1006,16 @@ mod tests {
     #[tokio::test]
     async fn test_run_stage_flow_gates_on_kind() {
         // 非 docker-compose 是 no-op：即使 gx 路径不存在也不报错
-        SysCommandHandler::run_stage_flow(SysKind::Gxl, "/nonexistent/gx", "localize", 0, &[])
-            .await
-            .unwrap();
+        SysCommandHandler::run_stage_flow(
+            SysKind::Gxl,
+            "/nonexistent/gx",
+            "localize",
+            0,
+            &[],
+            std::path::Path::new("."),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1002,9 +1024,16 @@ mod tests {
         let out = dir.path().join("ran.txt");
         let pairs = vec![("OUT".to_string(), out.display().to_string())];
         // 探测失败（`false`）→ 跳过，不执行流程
-        SysCommandHandler::run_stage_flow(SysKind::DockerCompose, "false", "localize", 0, &pairs)
-            .await
-            .unwrap();
+        SysCommandHandler::run_stage_flow(
+            SysKind::DockerCompose,
+            "false",
+            "localize",
+            0,
+            &pairs,
+            dir.path(),
+        )
+        .await
+        .unwrap();
         assert!(!out.exists(), "absent flow must be skipped");
     }
 
@@ -1037,6 +1066,7 @@ exit 0
             "localize",
             0,
             &pairs,
+            dir.path(),
         )
         .await
         .unwrap();
@@ -1060,9 +1090,6 @@ exit 0
             std::env::set_var("TEST_MODE", "true");
         }
         let kind = SysCommandHandler::ia_kind().unwrap();
-        unsafe {
-            std::env::remove_var("TEST_MODE");
-        }
         assert_eq!(kind, SysKind::Gxl);
     }
 
@@ -1080,10 +1107,6 @@ exit 0
             kind: Some("docker-compose".to_string()),
         };
         SysCommandHandler::handle_new(args).await.unwrap();
-
-        unsafe {
-            std::env::remove_var("TEST_MODE");
-        }
 
         let prj = temp_dir.path().join("compose_demo");
         assert_eq!(SysOperator::load_kind(&prj), SysKind::DockerCompose);
@@ -1111,10 +1134,6 @@ exit 0
             kind: Some("docker-compose".to_string()),
         };
         SysCommandHandler::handle_new(args).await.unwrap();
-
-        unsafe {
-            std::env::remove_var("TEST_MODE");
-        }
 
         // 不覆盖用户已有的 docker-compose.yml
         let compose = std::fs::read_to_string(prj.join("docker-compose.yml")).unwrap();

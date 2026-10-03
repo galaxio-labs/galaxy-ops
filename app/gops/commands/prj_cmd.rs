@@ -12,6 +12,17 @@ use orion_variate::update::DownloadOptions;
 use orion_vars::vars::ValueDict;
 
 use crate::commands::common::{DebugLogArgs, ForceArgs};
+use crate::commands::run_cmd::RunCommandHandler;
+use crate::commands::sys_cmd::{SysCommandHandler, SysLocalizeArgs};
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use galaxy_ops::error::MainReason;
+use galaxy_ops::ops_prj::upgrade::{
+    FailurePolicy, ProjectRuntime, RuntimeDispatch, imported_systems, record_path, run_upgrade,
+};
 
 #[derive(Debug, Args, Getters)]
 pub struct PrjNewArgs {
@@ -85,6 +96,51 @@ pub struct PrjDiagnoseArgs {
     pub strict: bool,
 }
 
+#[derive(Debug, Args, Getters)]
+pub struct PrjUpgradeArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+
+    #[arg(help = "只升级该系统（缺省 = ops-prj.yml 里已导入的全部系统）")]
+    pub name: Option<String>,
+
+    #[arg(
+        long = "to",
+        value_name = "VERSION|URL|PATH",
+        help = "目标版本（按 ref 的 addr 模板 `{version}` 解析）或完整地址（URL / 本机路径）"
+    )]
+    pub to: String,
+
+    #[arg(
+        long = "on-failure",
+        value_name = "rollback-all|halt",
+        help = "失败处置：rollback-all = 整工程回滚；halt = 停在那里不回滚。默认未定，现阶段必填"
+    )]
+    pub on_failure: String,
+
+    #[arg(long, help = "只出计划，不动现场")]
+    pub dry_run: bool,
+
+    #[arg(
+        long = "health-cmd",
+        help = "栈外健康检查命令（给 sh -c）；给了才做回滚判定"
+    )]
+    pub health_cmd: Option<String>,
+
+    #[arg(
+        long = "health-timeout",
+        default_value_t = galaxy_ops::ops_prj::upgrade::DEFAULT_HEALTH_TIMEOUT_SECS,
+        help = "健康检查超时（秒）"
+    )]
+    pub health_timeout: u64,
+
+    #[arg(long, help = "机读结果（单行 JSON，给编排器判成败）")]
+    pub json: bool,
+
+    #[clap(flatten)]
+    pub force: ForceArgs,
+}
+
 #[derive(Debug, Parser)]
 pub enum PrjCmd {
     #[command(about = "创建维护工程 (Create Maintenance Project)")]
@@ -121,6 +177,17 @@ pub enum PrjCmd {
                      `--list` 只列内容；`--dry-run` 解包校验但不改动现场。"
     )]
     Restore(PrjRestoreArgs),
+    #[command(
+        about = "升级发布态 (Upgrade Deployed Systems)",
+        long_about = "对已导入的系统做一次**升级事务**：diagnose → backup → apply（覆盖包内内容）→ \
+                     regenerate（sys update + localize）→ pull → up → health。\n\
+                     失败处置由 `--on-failure` 指定（rollback-all = 整工程回滚；halt = 停在那里不回滚）；\
+                     默认值未定，现阶段**必填**。\n\
+                     第 1 版只支持 `kind: docker-compose` 的系统；`--to` 收**版本**（按 ref 的 `addr` 模板 \
+                     `{version}` 解析）或**完整地址**（URL / 本机路径）。\n\
+                     只覆盖包内内容并保留现场态（`sys-prj.yml: preserve`）；备份/回滚走 `prj backup`/`restore`。"
+    )]
+    Upgrade(PrjUpgradeArgs),
     #[command(
         about = "诊断工程现场态 (Diagnose Project)",
         alias = "doctor",
@@ -204,7 +271,64 @@ impl DfxArgsGetter for PrjDiagnoseArgs {
     }
 }
 
+impl DfxArgsGetter for PrjUpgradeArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
 pub struct PrjCommandHandler;
+
+/// `prj upgrade` 的运行时能力闸门：本版只支持 `kind: docker-compose`。
+///
+/// 放在**动现场之前**（backup/apply 前）：否则非 compose 系统会先被覆盖内容 + localize，
+/// 再在 `pull` 才失败，留下中间态。读 `sys/sys_model.yml` 的 `kind`，不碰任何文件。
+fn ensure_upgradeable(systems: &[String], project_root: &Path) -> MainResult<()> {
+    for sys in systems {
+        let dir = project_root.join(sys);
+        let kind = galaxy_ops::system::operator::SysOperator::load_kind(&dir);
+        if !matches!(kind, galaxy_ops::system::SysKind::DockerCompose) {
+            return Err(MainReason::logic_detail(format!(
+                "系统 `{sys}` 不是 kind: docker-compose；`gops prj upgrade` 第一版只支持 compose\
+                 （见 docs/design/prj-upgrade.md §3.5）"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `prj upgrade` 第一版的运行时：docker-compose 的 localize / pull / up / status。
+///
+/// 与栈隔离的核心：它只碰指定系统目录，不依赖任何全局状态。
+struct ComposeDispatch;
+
+#[async_trait::async_trait]
+impl RuntimeDispatch for ComposeDispatch {
+    async fn localize(&self, sys_dir: &Path) -> MainResult<()> {
+        let args = SysLocalizeArgs {
+            debug_log: DebugLogArgs {
+                debug: 0,
+                log: None,
+            },
+            module: None,
+            only: false,
+            no_flow: false,
+        };
+        SysCommandHandler::localize_in(sys_dir, &args).await
+    }
+    async fn pull(&self, sys_dir: &Path) -> MainResult<()> {
+        RunCommandHandler::compose_cmd_in(sys_dir, "download").await
+    }
+    async fn up(&self, sys_dir: &Path) -> MainResult<()> {
+        RunCommandHandler::compose_cmd_in(sys_dir, "start").await
+    }
+    async fn status(&self, sys_dir: &Path) -> MainResult<()> {
+        RunCommandHandler::compose_cmd_in(sys_dir, "status").await
+    }
+}
 
 /// 从当前目录加载运维项目，并在“不在项目根”时给出可操作的提示。
 ///
@@ -367,6 +491,101 @@ impl PrjCommandHandler {
         Ok(())
     }
 
+    pub async fn handle_upgrade(args: PrjUpgradeArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().source_resource()?;
+        // 先确认 CWD 是项目根：backup/restore 的落点就是它，倒错地方代价很大。
+        let _ = load_project_from_cwd(&current_dir)?;
+
+        let policy = FailurePolicy::parse(args.on_failure()).ok_or_else(|| {
+            MainReason::logic_detail(format!(
+                "--on-failure 只接受 rollback-all / halt，收到：{}",
+                args.on_failure()
+            ))
+        })?;
+
+        let systems = imported_systems(&current_dir, args.name().as_deref())?;
+        // 早停：本版运行时只支持 docker-compose。非 compose 系统在**动现场之前**就拒，
+        // 而不是先覆盖内容、localize 完到 pull 才报错（那就留下了中间态）。
+        ensure_upgradeable(&systems, &current_dir)?;
+        let state_path = record_path(&current_dir);
+
+        let runtime = ProjectRuntime::new(
+            current_dir.clone(),
+            args.to().clone(),
+            *args.force().force() > 0,
+            args.health_cmd().clone(),
+            Duration::from_secs(*args.health_timeout()),
+            Arc::new(ComposeDispatch),
+        );
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems,
+            args.to(),
+            policy,
+            args.health_cmd().is_some(),
+            *args.dry_run(),
+            &state_path,
+        )
+        .await?;
+
+        if *args.json() {
+            println!("{}", outcome.to_json());
+        } else {
+            Self::print_upgrade(&outcome);
+        }
+
+        if outcome.exit_code() != 0 {
+            std::process::exit(1);
+        }
+        Ok(())
+    }
+
+    fn print_upgrade(outcome: &galaxy_ops::ops_prj::upgrade::UpgradeOutcome) {
+        if outcome.dry_run {
+            println!("升级计划（--dry-run，未动现场）");
+            println!("  目标      {}", outcome.plan.target);
+            println!("  系统      {}", outcome.plan.systems.join("、"));
+            println!("  失败处置  {}", outcome.plan.policy);
+            println!(
+                "  健康检查  {}",
+                if outcome.plan.health {
+                    "有（失败会触发回滚判定）"
+                } else {
+                    "无（不探活）"
+                }
+            );
+            println!("  阶段序    diagnose → backup → apply → regenerate → pull → up → health");
+            return;
+        }
+        if let Some(record) = &outcome.record {
+            let label = match record.status.as_str() {
+                "succeeded" => "升级成功",
+                "rolled_back" => "已回滚（整工程）",
+                _ => "升级失败",
+            };
+            println!("{label}（status={}）", record.status);
+            println!(
+                "  版本  {} → {}",
+                record.from_version,
+                if record.to_version.is_empty() {
+                    "—"
+                } else {
+                    &record.to_version
+                }
+            );
+            println!("  步骤  {}", record.step);
+            if let Some(backup) = &record.backup_id {
+                println!("  备份  {backup}");
+            }
+            if !record.detail.is_empty() {
+                println!("  详情  {}", record.detail);
+            }
+        }
+        println!("  状态文件  {}", outcome.record_path.display());
+    }
+
     pub async fn handle_diagnose(args: PrjDiagnoseArgs) -> MainResult<()> {
         galaxy_ops::infra::configure_dfx_logging(&args);
         let current_dir = std::env::current_dir().source_resource()?;
@@ -401,6 +620,7 @@ impl PrjCommandHandler {
             PrjCmd::Rebuild(args) => Self::handle_rebuild(args).await,
             PrjCmd::Backup(args) => Self::handle_backup(args).await,
             PrjCmd::Restore(args) => Self::handle_restore(args).await,
+            PrjCmd::Upgrade(args) => Self::handle_upgrade(args).await,
             PrjCmd::Diagnose(args) => Self::handle_diagnose(args).await,
         }
     }
@@ -441,6 +661,66 @@ mod tests {
     fn test_prj_doctor_is_diagnose_alias() {
         let cmd = GInsCmd::try_parse_from(["gops", "prj", "doctor"]).unwrap();
         assert!(matches!(cmd, GInsCmd::Prj(PrjCmd::Diagnose(_))));
+    }
+
+    #[test]
+    fn test_ensure_upgradeable_rejects_non_compose() {
+        let tmp = TempDir::new().unwrap();
+        // compose 系统：放一份 kind: docker-compose 的 sys_model.yml
+        let compose = tmp.path().join("compose-sys");
+        std::fs::create_dir_all(compose.join("sys")).unwrap();
+        std::fs::write(
+            compose.join("sys/sys_model.yml"),
+            "name: compose-sys\nkind: docker-compose\nvender: ''\n",
+        )
+        .unwrap();
+        assert!(ensure_upgradeable(&["compose-sys".to_string()], tmp.path()).is_ok());
+
+        // gxl 系统（缺 kind）→ 拒
+        let gxl = tmp.path().join("gxl-sys");
+        std::fs::create_dir_all(gxl.join("sys")).unwrap();
+        std::fs::write(gxl.join("sys/sys_model.yml"), "name: gxl-sys\nvender: ''\n").unwrap();
+        let err = ensure_upgradeable(&["gxl-sys".to_string()], tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("docker-compose"), "{err}");
+
+        // 空清单：无可升级（上层 `run_upgrade` 会拒），这里不报错
+        assert!(ensure_upgradeable(&[], tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_prj_upgrade_requires_to_and_on_failure() {
+        // 两个都必填：缺一即拒（默认值未定，不替人选）。
+        assert!(
+            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "--to", "http://x/p.tar.gz"])
+                .is_err()
+        );
+        assert!(
+            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "--on-failure", "halt"]).is_err()
+        );
+
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "--to",
+            "http://x/p.tar.gz",
+            "--on-failure",
+            "rollback-all",
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => {
+                assert_eq!(a.to(), "http://x/p.tar.gz");
+                assert_eq!(a.on_failure(), "rollback-all");
+                assert!(*a.dry_run());
+                assert!(*a.json());
+                assert_eq!(*a.health_timeout(), 60);
+                assert!(a.name().is_none());
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
     }
 
     fn make_project(root: &std::path::Path) {

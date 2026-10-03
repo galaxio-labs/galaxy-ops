@@ -308,7 +308,7 @@ pub fn project_diagnose(root: &Path, req: &DiagnoseRequest) -> MainResult<Diagno
                 .sys_models()
                 .iter()
                 .filter(|s| s.sys().name() == *n)
-                .map(|s| crate::ops_prj::import::addr_to_path_string(s.addr()))
+                .map(|s| s.resolved_addr().unwrap_or_else(|_| s.addr_template()))
                 .collect();
             if matching.len() > 1 {
                 dup.push(format!("`{n}` → {}", matching.join("\n         ")));

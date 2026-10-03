@@ -154,6 +154,8 @@ pub struct UpgradePlan {
     pub target: String,
     pub policy: String,
     pub health: bool,
+    /// dry-run 时解析出的每系统目标地址（与 `systems` 同序）；非 dry-run 为空。
+    pub resolved: Vec<String>,
 }
 
 /// 事务结果。
@@ -194,6 +196,7 @@ impl UpgradeOutcome {
             "target": self.plan.target,
             "on_failure": self.plan.policy,
             "health": self.plan.health,
+            "resolved": self.plan.resolved,
             "record": record,
             "record_path": self.record_path.display().to_string(),
         })
@@ -227,6 +230,9 @@ pub trait UpgradeRuntime: Send + Sync {
     async fn restore(&self, backup: &str) -> MainResult<()>;
     /// 读某系统当前版本（`deliver.lock`，缺失时退回 `version.txt`）。
     async fn version_of(&self, sys: &str) -> MainResult<String>;
+    /// 解析某系统的目标地址（`--to` 是地址则原样；是版本则用该系统 ref 的 `{version}` 模板渲染）。
+    /// **只读**：dry-run 用它校验目标可解析，避免「计划一片绿、真跑才在 apply 炸」。
+    async fn resolve_target(&self, sys: &str) -> MainResult<String>;
 }
 
 /// 运行时动作（按 `kind` 分派到 docker compose / gx）—— app 层实现。
@@ -327,11 +333,12 @@ pub async fn run_upgrade(
     dry_run: bool,
     record_path: &Path,
 ) -> MainResult<UpgradeOutcome> {
-    let plan = UpgradePlan {
+    let mut plan = UpgradePlan {
         systems: systems.to_vec(),
         target: target.to_string(),
         policy: policy.as_str().to_string(),
         health: expect_health,
+        resolved: Vec::new(),
     };
 
     if systems.is_empty() {
@@ -341,6 +348,12 @@ pub async fn run_upgrade(
     }
 
     if dry_run {
+        // dry-run **也要校验目标可解析**（只读、不写状态）：否则计划一片绿，真跑却在 apply 才炸。
+        let mut resolved = Vec::with_capacity(systems.len());
+        for sys in systems {
+            resolved.push(runtime.resolve_target(sys).await?);
+        }
+        plan.resolved = resolved;
         return Ok(UpgradeOutcome {
             plan,
             dry_run: true,
@@ -561,6 +574,27 @@ pub fn imported_systems(project_root: &Path, only: Option<&str>) -> MainResult<V
     Ok(out)
 }
 
+/// 读某系统目录当前的**部署版本**（供状态文件记 `from`/`to`）。
+///
+/// **优先 `version.txt`**：它随交付包走、升级时会被覆盖更新。
+/// 回退 `deliver.lock`：它是**交付时**生成的 git-ignored 产物、**不在包里** —— 升级不会更新它，
+/// 因此它常常是**陈旧**的（本次现场实测：栈包已升到 0.1.23，`deliver.lock` 仍是 0.1.17），只作最后兜底。
+pub fn read_sys_version(sys_dir: &Path) -> String {
+    if let Some(version) = std::fs::read_to_string(sys_dir.join("version.txt"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return version;
+    }
+    if DeliverLock::path(sys_dir).exists()
+        && let Ok(lock) = DeliverLock::load(sys_dir)
+    {
+        return lock.version().to_string();
+    }
+    String::new()
+}
+
 /// 真实运行时：接本 crate 既有实现 + 注入的 [`RuntimeDispatch`]。
 ///
 /// `target` 是 `--to` 的原文：地址（直接用于所有系统）或版本（每个系统各自用
@@ -616,9 +650,14 @@ impl UpgradeRuntime for ProjectRuntime {
         Ok(report.archive.display().to_string())
     }
 
-    async fn apply(&self, sys: &str) -> MainResult<()> {
+    async fn resolve_target(&self, sys: &str) -> MainResult<String> {
         let project = OpsProject::load(&self.project_root)?;
-        let addr = resolve_target_addr(&project, sys, &self.target)?;
+        resolve_target_addr(&project, sys, &self.target)
+    }
+
+    async fn apply(&self, sys: &str) -> MainResult<()> {
+        let addr = self.resolve_target(sys).await?;
+        let project = OpsProject::load(&self.project_root)?;
         let options = DownloadOptions::from((self.force, ValueDict::default()));
         let sys_src = fetch_and_prepare(
             project.paths().clone(),
@@ -694,15 +733,7 @@ impl UpgradeRuntime for ProjectRuntime {
     }
 
     async fn version_of(&self, sys: &str) -> MainResult<String> {
-        let dir = self.sys_dir(sys);
-        if DeliverLock::path(&dir).exists() {
-            return Ok(DeliverLock::load(&dir)?.version().to_string());
-        }
-        Ok(std::fs::read_to_string(dir.join("version.txt"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default())
+        Ok(read_sys_version(&self.sys_dir(sys)))
     }
 }
 
@@ -714,6 +745,30 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use tempfile::TempDir;
+
+    #[test]
+    fn read_sys_version_prefers_version_txt_over_stale_deliver_lock() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        // 升级后现场的真实形状：version.txt 是新的，deliver.lock 是交付时的旧的。
+        std::fs::write(dir.join("version.txt"), "0.1.23\n").unwrap();
+        std::fs::write(
+            dir.join("deliver.lock"),
+            "lockfile_version: 1\nname: x\nversion: 0.1.17\nkind: docker-compose\ngenerated_at: t\nmodules: []\nhashes: {}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_sys_version(dir),
+            "0.1.23",
+            "must not trust the stale deliver.lock"
+        );
+        // 没有 version.txt 才回退 deliver.lock。
+        std::fs::remove_file(dir.join("version.txt")).unwrap();
+        assert_eq!(read_sys_version(dir), "0.1.17");
+        // 都没有 → 空串（不编造）。
+        std::fs::remove_file(dir.join("deliver.lock")).unwrap();
+        assert_eq!(read_sys_version(dir), "");
+    }
 
     #[test]
     fn failure_policy_parses_known_values_only() {
@@ -830,6 +885,7 @@ mod tests {
         fail_once: Mutex<Option<(UpgradeStep, Option<String>)>>,
         calls: Mutex<Vec<String>>,
         version: String,
+        resolve_err: bool,
     }
 
     impl FakeRuntime {
@@ -838,7 +894,13 @@ mod tests {
                 fail_once: Mutex::new(fail_once),
                 calls: Mutex::new(Vec::new()),
                 version: "0.1.0".to_string(),
+                resolve_err: false,
             }
+        }
+        /// 让 `resolve_target` 报错（验证 dry-run 会因目标不可解析而拒）。
+        fn resolving_err(mut self) -> Self {
+            self.resolve_err = true;
+            self
         }
         fn record(&self, name: &str) -> MainResult<()> {
             self.calls.lock().unwrap().push(name.to_string());
@@ -906,10 +968,37 @@ mod tests {
         async fn version_of(&self, _sys: &str) -> MainResult<String> {
             Ok(self.version.clone())
         }
+        async fn resolve_target(&self, _sys: &str) -> MainResult<String> {
+            // 只读查询，**不记入 calls**（dry-run 会调它，但不能因此算「动了现场」）。
+            if self.resolve_err {
+                return Err(MainReason::logic_detail("cannot resolve target (test)"));
+            }
+            Ok("https://example.com/resolved.tar.gz".to_string())
+        }
     }
 
     fn systems() -> Vec<String> {
         vec!["s1".to_string(), "s2".to_string()]
+    }
+
+    #[tokio::test]
+    async fn dry_run_fails_when_target_cannot_be_resolved() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None).resolving_err();
+        let err = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.24",
+            FailurePolicy::Halt,
+            false,
+            true,
+            &path,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot resolve target"), "{err}");
+        assert!(!path.exists(), "dry-run must not write the record");
     }
 
     #[tokio::test]
@@ -938,6 +1027,12 @@ mod tests {
             "dry-run must not touch anything"
         );
         assert!(!path.exists(), "dry-run must not write the record");
+        // dry-run 会**解析**目标（只读，不记入 calls），并把结果放进计划。
+        assert_eq!(
+            outcome.plan.resolved,
+            vec!["https://example.com/resolved.tar.gz".to_string(); 2],
+            "dry-run must resolve each system's target"
+        );
         // 计划里带上目标与策略，供人核对。
         assert_eq!(outcome.plan.systems, systems());
         assert_eq!(outcome.plan.policy, "rollback-all");

@@ -557,6 +557,9 @@ impl PrjCommandHandler {
                 }
             );
             println!("  阶段序    diagnose → backup → apply → regenerate → pull → up → health");
+            for (sys, addr) in outcome.plan.systems.iter().zip(&outcome.plan.resolved) {
+                println!("  解析      {sys} → {addr}");
+            }
             return;
         }
         if let Some(record) = &outcome.record {

@@ -284,10 +284,12 @@ pub(crate) fn preserved_entries(
         for entry in std::fs::read_dir(&dir).source_resource().with(&dir)? {
             let entry = entry.source_resource()?;
             let name = entry.file_name();
-            if rel_dir.as_os_str().is_empty() && name == ".git" {
+            // 与 `walk_files` 同一口径：任意深度的 `.git` 都不算包内容。
+            if name == ".git" {
                 continue;
             }
             let rel = rel_dir.join(&name);
+            // 顶层 `values` 是客户值链接（导入/重建维护），不是包内容 —— 与 `walk_files` / backup 一致。
             if rel.components().count() == 1 && name == "values" {
                 continue;
             }

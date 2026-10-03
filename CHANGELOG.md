@@ -5,6 +5,20 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.4] - 2026-10-03
+
+### Bug 修复
+
+- **`prj rebuild` 把保留项搬到「目标已存在」时按类型清理**：保留项现在可能是**目录**（整棵搬），
+  若包内恰好有同名**目录**，原来只 `remove_file` 会在目录上失败 —— 改为目录 `remove_dir_all`、
+  其余 `remove_file`（符号链接仍按链接删，不跟进去）。
+- **保留项收集跳过**任意深度的 `.git`**（与 `walk_files` 同一口径；原来只跳顶层）。
+
+### 文档
+
+- `docs/design/prj-backup-restore.md` §5.1 补「保留项粒度 = 最浅匹配项」：命中目录就整棵 `rename`、
+  不进入内部（连带的 `EACCES` 缘由）。
+
 ## [2.1.3] - 2026-10-03
 
 ### Bug 修复

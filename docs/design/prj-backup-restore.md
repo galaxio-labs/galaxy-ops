@@ -156,6 +156,11 @@ gops prj rebuild [<系统名>]
 4. 提示下一步：`gops sys localize`
 ```
 
+> **保留项的粒度 = 最浅匹配项**：`path_matches` 是**按祖先**匹配的（目录命中 ⇒ 子树全部命中），
+> 所以命中一个目录就**整棵 `rename`** 搬走、**不进入它内部**；细到文件的模式（如 `configs/gateway/state/*.pem`）
+> 仍按文件收集。这样 `preserve: configs` 不会钻进容器以**别的 uid** 写的运行期子目录
+> （如 `configs/gateway/state/knowledge/`）—— 逐文件 `rename` 会在那里因**父目录不可写**而 `EACCES`。
+
 三条路径的边界：
 
 | | 包内文件 | 包外·已声明 `preserve` | 包外·**未声明存量** | 失败时 |

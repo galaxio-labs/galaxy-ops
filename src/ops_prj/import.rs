@@ -378,8 +378,17 @@ fn move_path(from: &Path, to: &Path) -> MainResult<()> {
             .source_resource()
             .with(parent)?;
     }
-    if std::fs::symlink_metadata(to).is_ok() {
-        std::fs::remove_file(to).source_resource().with(to)?;
+    // 目标已存在时**按类型**清掉：保留项现在可能是**目录**（整棵搬），而目标若是包内同名目录，
+    // `remove_file` 会在目录上失败。清掉再 rename = 「保留项整棵盖过包内同名」。
+    match std::fs::symlink_metadata(to) {
+        // 符号链接按链接处理（不跟进去 remove_dir_all）—— `is_dir()` 对链接为 false，会落到下面。
+        Ok(meta) if meta.file_type().is_dir() => {
+            std::fs::remove_dir_all(to).source_resource().with(to)?;
+        }
+        Ok(_) => {
+            std::fs::remove_file(to).source_resource().with(to)?;
+        }
+        Err(_) => {}
     }
     std::fs::rename(from, to).source_resource().with(to)?;
     Ok(())
@@ -429,6 +438,23 @@ mod tests {
         // 源不存在 → 静默 Ok（重建时 preserve 项可能已被删）
         move_path(&tmp.path().join("nope"), &to).unwrap();
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "secret");
+    }
+
+    #[test]
+    fn test_move_path_replaces_an_existing_directory_destination() {
+        // 保留项现在可能是**目录**（整棵搬）；目标若是包内同名目录，旧的 `remove_file` 会失败。
+        let tmp = tempfile::TempDir::new().unwrap();
+        let from = tmp.path().join("from");
+        std::fs::create_dir_all(from.join("sub")).unwrap();
+        std::fs::write(from.join("sub/x"), "new").unwrap();
+        let to = tmp.path().join("to");
+        std::fs::create_dir_all(to.join("old")).unwrap();
+        std::fs::write(to.join("old/y"), "old").unwrap();
+
+        move_path(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read_to_string(to.join("sub/x")).unwrap(), "new");
+        assert!(!to.join("old").exists(), "旧目标目录应被整棵替换");
     }
 
     /// `reimport` 默认不删：目录已存在时拒绝，且**不取包、不动现场**。

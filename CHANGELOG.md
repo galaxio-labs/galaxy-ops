@@ -5,6 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.2.2] - 2026-10-08
+
+### 变更
+
+- **发布制品矩阵收敛为 musl**：Linux 统一使用 musl 静态制品（`x86_64-unknown-linux-musl`、新增 `aarch64-unknown-linux-musl`），不再发布 glibc 制品；制品包内顶层目录名与资产名一致（含平台 triple）。
+- **`gops self` 在 Linux 上改用 musl 制品**（升级 `wp-self-update` 至 0.3.3）：静态链接、跨发行版/容器（含 Alpine）通用；过渡期内旧客户端仍可经别名获取同一 musl 制品。
+
 ## [2.2.1] - 2026-10-03
 
 ### Bug 修复

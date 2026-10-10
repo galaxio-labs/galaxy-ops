@@ -41,7 +41,7 @@ impl SysOperator {
         }
     }
     pub fn load(root_local: &Path) -> MainResult<Self> {
-        let mut ctx = OperationContext::want("load sys-operator")
+        let mut ctx = OperationContext::doing("load sys-operator")
             .with_auto_log()
             .with_mod_path("sys/prj");
 
@@ -96,7 +96,7 @@ impl SysOperator {
         self.sys_spec.define().is_docker_compose()
     }
     pub fn save(&self) -> MainResult<()> {
-        let mut ctx = OperationContext::want("save sys-prj")
+        let mut ctx = OperationContext::doing("save sys-prj")
             .with_auto_log()
             .with_mod_path("sys/prj");
         ctx.record("root", self.paths.root().display());

@@ -31,7 +31,6 @@ pub use crate::compat::{
     StructErrorTrait, UvsFrom,
 };
 pub use orion_error::conversion::ToStructError;
-pub use orion_infra::auto_exit_log;
 pub use orion_infra::path::{PathResult, ensure_path, make_clean_path};
 pub use orion_variate::addr::Address;
 pub use orion_variate::addr::accessor::UniversalAccessor;

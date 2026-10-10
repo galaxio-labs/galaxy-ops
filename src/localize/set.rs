@@ -47,16 +47,16 @@ impl RefUpdateable<()> for LocalizeSet {
 #[async_trait]
 impl ModuleLocalizable<PathBuf> for LocalizeSet {
     async fn mod_localize(&self, val_path: PathBuf, options: LocalizeOptions) -> MainResult<()> {
-        let mut flag = auto_exit_log!(
-            info!(target: "sys-localize", "Localizing {} paths for sys_local", self.items.len()),
-            error!(target: "sys-localize", "Failed to localize sys_local paths")
-        );
+        let mut ctx = OperationContext::doing("localize sys_local paths")
+            .with_auto_log()
+            .with_mod_path("sys-localize");
+        ctx.record("count", self.items.len());
 
         for item in &self.items {
             item.mod_localize(val_path.clone(), options.clone()).await?;
         }
 
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(())
     }
 }

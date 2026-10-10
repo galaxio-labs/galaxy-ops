@@ -106,10 +106,10 @@ impl RefUpdateable<UpdateUnit> for ModuleSpecRef {
     ) -> MainResult<UpdateUnit> {
         //trace!(target: "spec/mod/",  "{:?}",self );
         if let Some(local) = &self.local {
-            let mut flag = auto_exit_log!(
-                info!(target: "/mod/ref",  "update mod ref {} success!", self.name ),
-                error!(target: "/mod/ref", "update mod ref {} fail!", self.name )
-            );
+            let mut ctx = OperationContext::doing("update mod ref")
+                .with_auto_log()
+                .with_mod_path("/mod/ref");
+            ctx.record("name", &self.name);
             // local 即模块内容目录 `sys/<model>/mods/<mod>`；下载和解包在它的父目录进行。
             let target_root = local.clone();
             let work_root = target_root
@@ -142,7 +142,6 @@ impl RefUpdateable<UpdateUnit> for ModuleSpecRef {
                 }
             }
 
-            debug!(target: "mod/ref",  "update target success!" );
             let spec = MMOperator::load_from_model(&target_root, self.model())
                 .with(&target_root)
                 .owe(MainReason::from(ModReason::Load))?;
@@ -150,7 +149,7 @@ impl RefUpdateable<UpdateUnit> for ModuleSpecRef {
                 .update_local(accessor, &target_root, options)
                 .await
                 .with(("module", self.name().to_string()))?;
-            flag.mark_suc();
+            ctx.mark_suc();
             return Ok(unit);
         } else {
             Err(MainReason::logic_detail("no local value in ModuleSpecRef"))
@@ -174,7 +173,7 @@ impl SystemLocalizable<SysValuePaths> for ModuleSpecRef {
     ) -> MainResult<()> {
         if self.enable.is_none_or(|x| x) {
             if let Some(local) = &self.local {
-                let mut ctx = OperationContext::want("mod ref localize")
+                let mut ctx = OperationContext::doing("mod ref localize")
                     .with_auto_log()
                     .with_mod_path("mod");
                 ctx.record("name", self.name.as_str());

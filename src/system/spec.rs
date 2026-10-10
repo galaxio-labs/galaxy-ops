@@ -80,10 +80,10 @@ impl SysModelSpec {
     pub fn save_local(&self, path: &Path, name: &str) -> MainResult<()> {
         let root = path.join(name);
 
-        let mut flag = auto_exit_log!(
-            info!(target: "sys", "save sys spec success!:{}", root.display()),
-            error!(target: "sys", "save sys spec failed!:{}", root.display())
-        );
+        let mut ctx = OperationContext::doing("save sys spec")
+            .with_auto_log()
+            .with_mod_path("sys");
+        ctx.record("root", root.display());
         let paths = SysTargetPaths::from(&root);
         std::fs::create_dir_all(paths.spec_path()).source_conf()?;
         sys_init_gitignore(&root)?;
@@ -99,7 +99,7 @@ impl SysModelSpec {
         self.workflow
             .save_to(paths.workflow_path(), None)
             .source_logic()?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(())
     }
 
@@ -122,16 +122,14 @@ impl SysModelSpec {
     }
 
     pub fn load_from(root: &Path) -> MainResult<Self> {
-        let mut ctx = WithContext::want("load syspec");
+        let mut ctx = OperationContext::doing("load syspec")
+            .with_auto_log()
+            .with_mod_path("sys");
         let _name = root
             .file_name()
             .and_then(|f| f.to_str())
             .ok_or_else(|| MainReason::conf_detail("bad name"))?;
 
-        let mut flag = auto_exit_log!(
-            info!(target: "sys", "load sys spec success!:{}", root.display()),
-            error!(target: "sys", "load sys spec failed!:{}", root.display())
-        );
         let paths = SysTargetPaths::from(&root.to_path_buf());
 
         ctx.record("mod_list", paths.modlist_path().display());
@@ -160,7 +158,7 @@ impl SysModelSpec {
             .with(&ctx)
             .owe(SysReason::Load.into())?;
         let setting = SysSetting::load_from(paths.setting_path())?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(Self {
             define,
             mod_list,

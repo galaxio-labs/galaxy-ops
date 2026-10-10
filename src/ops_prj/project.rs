@@ -26,16 +26,10 @@ impl OpsProject {
         self.conf.import_sys(ops_sys);
     }
     pub fn load(root_local: &Path) -> MainResult<Self> {
-        let mut flag = auto_exit_log!(
-            info!(
-                target : "ops-prj",
-                "load project from {} success!", root_local.display()
-            ),
-            error!(
-                target : "ops-prj",
-                "load project  from {} fail!", root_local.display()
-            )
-        );
+        let mut ctx = OperationContext::doing("load project")
+            .with_auto_log()
+            .with_mod_path("ops-prj");
+        ctx.record("root", root_local.display());
 
         let paths = ProjectPath::new(root_local);
         let mut conf = OpsProjectConf::load(paths.root())?;
@@ -50,7 +44,7 @@ impl OpsProject {
         }
 
         let project = GxlProject::load_from(paths.root()).owe(OpsReason::Load.into())?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(Self {
             conf,
             project,
@@ -58,16 +52,10 @@ impl OpsProject {
         })
     }
     pub fn save(&self) -> MainResult<()> {
-        let mut flag = auto_exit_log!(
-            info!(
-                target : "workprj",
-                "save project to {} success!", self.paths.root().display()
-            ),
-            error!(
-                target : "workprj",
-                "save project  to {} fail!", self.paths.root().display()
-            )
-        );
+        let mut ctx = OperationContext::doing("save project")
+            .with_auto_log()
+            .with_mod_path("workprj");
+        ctx.record("root", self.paths.root().display());
         orion_conf::ConfigIO::save_conf(&self.conf, &self.paths.conf_file()).source_resource()?;
         // 迁移：删除旧的 ops-systems.yml（已合并进 ops-prj.yml）
         let target_file = self.paths.target_file();
@@ -79,7 +67,7 @@ impl OpsProject {
             .source_logic()?;
 
         workins_init_gitignore(self.paths.root())?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(())
     }
 }

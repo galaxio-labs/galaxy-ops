@@ -70,7 +70,7 @@ fn unexpanded_var(path: &Path) -> Option<String> {
 #[async_trait]
 impl ModuleLocalizable<PathBuf> for LocalizeExecPath {
     async fn mod_localize(&self, value_file: PathBuf, _options: LocalizeOptions) -> MainResult<()> {
-        let mut ctx = OperationContext::want("sys-path localize").with_auto_log();
+        let mut ctx = OperationContext::doing("sys-path localize").with_auto_log();
         ctx.record("dst", self.dst.display());
         ctx.record("src", self.src.display());
 

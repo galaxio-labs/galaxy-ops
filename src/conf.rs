@@ -90,7 +90,7 @@ impl ConfFile {
 }
 impl ConfSpec {
     pub fn save(&self, path: &PathBuf) -> MainResult<()> {
-        let mut ctx = WithContext::want("save conf spec");
+        let mut ctx = WithContext::doing("save conf spec");
         ctx.record("path", format!("path: {}", path.display()));
         let data_content = toml::to_string(self).source_data().with(&ctx)?;
         fs::write(path, data_content).source_resource().with(&ctx)?;
@@ -124,7 +124,7 @@ impl RefUpdateable<UpdateUnit> for ConfSpec {
         path: &Path,
         options: &DownloadOptions,
     ) -> MainResult<UpdateUnit> {
-        let mut ctx = OperationContext::want("upload local confspec")
+        let mut ctx = OperationContext::doing("upload local confspec")
             .with_auto_log()
             .with_mod_path("spec/conf");
         ctx.record("path", path.display());

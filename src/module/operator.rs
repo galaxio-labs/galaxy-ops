@@ -121,16 +121,10 @@ impl ModOperator {
         Ok(value_root)
     }
     pub fn load(root_local: &Path) -> MainResult<Self> {
-        let mut flag = auto_exit_log!(
-            info!(
-                target : "/mod_prj",
-                 "load mod-prj  to {} success!", root_local.display()
-            ),
-            error!(
-                target : "/mod_prj",
-                "load mod-prj  to {} fail!", root_local.display()
-            )
-        );
+        let mut ctx = OperationContext::doing("load mod-prj")
+            .with_auto_log()
+            .with_mod_path("/mod_prj");
+        ctx.record("root", root_local.display());
 
         let conf_file_v1 = root_local.join(MOD_PRJ_CONF_FILE_V1);
         let conf_file_v2 = root_local.join(MOD_PRJ_CONF_FILE_V2);
@@ -141,7 +135,7 @@ impl ModOperator {
         let root_local = root_local.to_path_buf();
         let mod_spec = ModuleSpec::load_from(&root_local).owe(ModReason::Load.into())?;
         let project = GxlProject::load_from(&root_local).owe(ModReason::Load.into())?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(Self {
             conf,
             mod_spec,
@@ -150,16 +144,10 @@ impl ModOperator {
         })
     }
     pub fn save(&self) -> MainResult<()> {
-        let mut flag = auto_exit_log!(
-            info!(
-                target : "spec/local/modprj",
-                 "save modprj  to {} success!", self.root_local().display()
-            ),
-            error!(
-               target : "spec/local/modprj",
-               "save modprj  to {} fail!", self.root_local().display()
-            )
-        );
+        let mut ctx = OperationContext::doing("save mod-prj")
+            .with_auto_log()
+            .with_mod_path("spec/local/modprj");
+        ctx.record("root", self.root_local().display());
         let conf_file = self.root_local().join("mod-prj.yml");
         orion_conf::ConfigIO::save_conf(&self.conf, &conf_file).source_resource()?;
         self.mod_spec
@@ -169,7 +157,7 @@ impl ModOperator {
             .save_to(self.root_local(), None)
             .owe(ModReason::Save.into())?;
         mod_init_gitignore(self.root_local())?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(())
     }
 }

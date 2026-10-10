@@ -103,11 +103,10 @@ impl FilePersist<ModuleSpec> for ModuleSpec {
 
     fn load_from(path: &Path) -> SerdeResult<Self> {
         let name = path_file_name(path).source_logic()?;
-        let name_copy = name.clone();
-        let mut flag = auto_exit_log!(
-            info!(target: "mod/spec", "load mod-spec {} success!", name_copy ),
-            error!(target: "mod/spec", "load mod-spec {} fail!", name_copy)
-        );
+        let mut ctx = OperationContext::doing("load mod-spec")
+            .with_auto_log()
+            .with_mod_path("mod/spec");
+        ctx.record("name", &name);
         let src_path = path.join(MOD_DIR);
         let subs = get_sub_dirs(&src_path).source_logic()?;
         let mut targets = IndexMap::new();
@@ -115,7 +114,7 @@ impl FilePersist<ModuleSpec> for ModuleSpec {
             let node = MMOperator::load_from(&sub).with(&sub)?;
             targets.insert(node.model().clone(), node);
         }
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(Self {
             name,
             targets,
@@ -132,7 +131,7 @@ impl ModuleLocalizable<ModValuePaths> for ModuleSpec {
         options: LocalizeOptions,
     ) -> MainResult<()> {
         for model in self.targets.values() {
-            let mut ctx = OperationContext::want("model localize").with_auto_log();
+            let mut ctx = OperationContext::doing("model localize").with_auto_log();
             let model_path = val_path.clone().join(model.model().to_string());
             ctx.record("sys-value", model_path.sys_value_file().display());
             //let cur_options = if model_path.sys_value_file().exists() {

@@ -30,12 +30,12 @@ indexmap = { version = "2.10", features = ["serde"] }
 indicatif = "0.18"
 libc = "0.2"
 log = "0.4"
-orion-error = "0.8"
-orion-infra = "0.7"
-orion-sec = "0.6"
-orion_conf = { version = "0.7", features = ["full"] }
-orion_variate = { package = "orion-accessor", version = "0.8" }
-orion_vars = { package = "orion-variate", version = "0.13" }
+orion-error = "0.9"
+orion-infra = "0.8"
+orion-sec = "0.7"
+orion_conf = { version = "0.8", features = ["full"] }
+orion_variate = { package = "orion-accessor", version = "0.9" }
+orion_vars = { package = "orion-variate", version = "0.14" }
 os_info = "3"
 reqwest = { version = "0.12", features = ["multipart"] }
 scopeguard = "1.2.0"
@@ -53,7 +53,7 @@ tokio = { version = "1.47", features = ["full"] }
 toml = "1.0"
 tracing = "0.1"
 url = "2.5"
-wp-self-update = "0.3"
+wp-self-update = "0.4"
 
 [dependencies]
 anyhow = { workspace = true }

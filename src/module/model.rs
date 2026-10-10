@@ -122,7 +122,7 @@ impl FilePersist<MMOperator> for MMOperator {
     fn save_to(&self, root: &Path, name: Option<String>) -> SerdeResult<()> {
         let target_path = root.join(name.unwrap_or(self.model().to_string()));
 
-        let mut ctx = OperationContext::want("save target").with_auto_log();
+        let mut ctx = OperationContext::doing("save target").with_auto_log();
         ctx.record("target", target_path.display());
         let paths = ModTargetPaths::from(&target_path);
         std::fs::create_dir_all(paths.spec_path())
@@ -170,12 +170,9 @@ impl MMOperator {
     /// 系统布局 `sys/<model>/mods/<mod>` 下内容目录名是模块名，
     /// 模型无法再从目录名推断（由 `mod_list.yml` 的 ref 携带）。
     pub fn load_from_model(target_root: &Path, model: &ModelSTD) -> SerdeResult<Self> {
-        let mut ctx = WithContext::want("load target mod spec");
-
-        let mut flag = auto_exit_log!(
-            info!(target: "spec/mod/target", "load target  success!:{}", target_root.display()),
-            error!(target: "spec/mod/target", "load target failed!:{}", target_root.display())
-        );
+        let mut ctx = OperationContext::doing("load target mod spec")
+            .with_auto_log()
+            .with_mod_path("spec/mod/target");
         let paths = ModTargetPaths::from(&target_root.to_path_buf());
         ctx.record("root", target_root.display());
         let target = model.clone();
@@ -205,7 +202,7 @@ impl MMOperator {
             .source_logic()?;
 
         let gxl_prj = GxlProject::load_from(paths.target_root()).with(&ctx)?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(Self {
             model: target,
             artifact,
@@ -266,7 +263,7 @@ impl ModuleLocalizable<ModValuePaths> for MMOperator {
         val_path: ModValuePaths,
         options: LocalizeOptions,
     ) -> MainResult<()> {
-        let mut ctx = OperationContext::want("mod1 localize")
+        let mut ctx = OperationContext::doing("mod1 localize")
             .with_auto_log()
             .with_mod_path("mod");
         let mod_root = self

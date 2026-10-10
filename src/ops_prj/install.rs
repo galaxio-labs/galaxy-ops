@@ -163,7 +163,7 @@ impl SystemPackageInstaller {
         sys_src: &Path,
         paths: &crate::ops_prj::path::InstallationPaths,
     ) -> MainResult<()> {
-        let mut ctx = OperationContext::want("move&rename sys").with_auto_log();
+        let mut ctx = OperationContext::doing("move&rename sys").with_auto_log();
         ctx.record("src", sys_src.display());
         ctx.record("src", paths.project_root.display());
         fs_extra::dir::move_dir(sys_src, &paths.project_root, &self.copy_options)

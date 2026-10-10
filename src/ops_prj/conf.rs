@@ -108,21 +108,15 @@ impl InsUpdateable<OpsProjectConf> for OpsProjectConf {
         path: &Path,
         options: &DownloadOptions,
     ) -> MainResult<Self> {
-        let mut flag = auto_exit_log!(
-            info!(
-                target : "ops-prj/conf",
-                "ins conf update from {} success!", path.display()
-            ),
-            error!(
-                target : "ops-prj/conf",
-                "ins conf update from {} fail!", path.display()
-            )
-        );
+        let mut ctx = OperationContext::doing("update ops conf")
+            .with_auto_log()
+            .with_mod_path("ops-prj/conf");
+        ctx.record("path", path.display());
         self.work_envs
             .update_local(accessor, path, options)
             .await
             .with(("ops-conf", "update work envs"))?;
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(self)
     }
 }

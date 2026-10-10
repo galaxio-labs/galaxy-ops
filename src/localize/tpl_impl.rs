@@ -668,7 +668,7 @@ impl LocalizeTemplate<'_> {
         data: &PathBuf,
         setting: &TemplatePath,
     ) -> MainResult<()> {
-        let mut err_ctx = WithContext::want("render tpl path");
+        let mut err_ctx = WithContext::doing("render tpl path");
         // 处理目录模板
         err_ctx.record("data", data.display());
         let content = std::fs::read_to_string(data).source_data().with(&err_ctx)?;
@@ -721,7 +721,7 @@ impl LocalizeTemplate<'_> {
         debug!("tpl:{}", tpl_path.display());
         debug!("dst:{}", dst_path.display());
 
-        let mut err_ctx = WithContext::want("render tpl");
+        let mut err_ctx = WithContext::doing("render tpl");
         err_ctx.record("tpl", tpl_path.display());
         // 2. 验证模板文件
         if !tpl_path.exists() {

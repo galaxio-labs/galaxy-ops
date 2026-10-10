@@ -183,7 +183,7 @@ impl SystemLocalizable<SysValuePaths> for SysSetting {
                 continue;
             }
             let cur_used_file = used_value_file.clone();
-            let mut ctx = OperationContext::want("sys-setting localize")
+            let mut ctx = OperationContext::doing("sys-setting localize")
                 .with_auto_log()
                 .with_mod_path("sys/setting");
             let dict = options.clone().evaled_value().export_dict();

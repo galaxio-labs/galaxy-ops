@@ -15,7 +15,6 @@ pub use crate::const_vars::{OPS_PRJ_CONF_FILE, OPS_PRJ_ROOT};
 pub use crate::ops_prj::conf::OpsProjectConf;
 pub use crate::ops_prj::init::workins_init_gitignore;
 
-pub use orion_infra::auto_exit_log;
 pub use orion_infra::path::make_clean_path;
 
 pub use crate::workflow::prj::GxlProject;

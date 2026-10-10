@@ -41,19 +41,13 @@ impl SysModelSpecRef {
 
     pub fn load(mut self, path: &Path) -> MainResult<Self> {
         let path = path.join(self.name());
-        let mut flag = auto_exit_log!(
-            info!(
-                target : "ops-prj/sys-model",
-                "load spec ref to {} success!", path.display()
-            ),
-            error!(
-                target : "ops-prj/sys-model",
-                "load spec ref to {} fail!", path.display()
-            )
-        );
+        let mut ctx = OperationContext::doing("load spec ref")
+            .with_auto_log()
+            .with_mod_path("ops-prj/sys-model");
+        ctx.record("path", path.display());
         let spec = SysModelSpec::load_from(&path)?;
         self.spec = Some(spec);
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(self)
     }
 }
@@ -66,16 +60,10 @@ impl InsUpdateable<SysModelSpecRef> for SysModelSpecRef {
         path: &Path,
         options: &DownloadOptions,
     ) -> MainResult<Self> {
-        let mut flag = auto_exit_log!(
-            info!(
-                target : "ops-prj/sys-model",
-                "update spec ref to {} success!", path.display()
-            ),
-            error!(
-                target : "ops-prj/sys-model",
-                "update spec ref to {} fail!", path.display()
-            )
-        );
+        let mut ctx = OperationContext::doing("update spec ref")
+            .with_auto_log()
+            .with_mod_path("ops-prj/sys-model");
+        ctx.record("path", path.display());
         let spec_addr = convert_syspec_addr(self.addr.clone());
         let update_v = accessor
             .download_rename(&spec_addr, path, self.name.as_str(), options)
@@ -84,7 +72,7 @@ impl InsUpdateable<SysModelSpecRef> for SysModelSpecRef {
         let spec = SysModelSpec::load_from(update_v.position())?;
         spec.update_local(accessor, path, options).await?;
         self.spec = Some(spec);
-        flag.mark_suc();
+        ctx.mark_suc();
         Ok(self)
     }
 }

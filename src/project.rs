@@ -13,7 +13,7 @@ pub fn load_mod_opr_value(root: &Path, model: &str) -> MainResult<OriginDict> {
     let value_root = ensure_path(root.join(VALUE_DIR)).source_logic()?;
     let sys_v_file = value_root.join(SYS_VALUE_FILE);
     if !sys_v_file.exists() {
-        let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
+        let mut ctx = OperationContext::doing("build sys-value.yml").with_auto_log();
         let vars_file = root.join("mod").join(model).join("vars.yml");
         let vars_vec = VarCollection::load_conf(&vars_file).source_resource()?;
         let sys_value = vars_vec.system_vars().to_val();
@@ -46,7 +46,7 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
     let value_root = ensure_path(prj_root.join(VALUE_DIR)).source_logic()?;
     let sys_v_file = value_root.join(SYS_VALUE_FILE);
     if !sys_v_file.exists() {
-        let mut ctx = OperationContext::want("build sys-value.yml").with_auto_log();
+        let mut ctx = OperationContext::doing("build sys-value.yml").with_auto_log();
         // 兼容旧名：merged_vars.yml 优先，缺失时回退 sys_vars.yml
         let new_vars_file = prj_root.join("sys").join(MERGED_VARS_YML);
         let legacy_vars_file = prj_root.join("sys").join(SYS_VARS_YML);

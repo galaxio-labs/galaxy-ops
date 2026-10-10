@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.2.3] - 2026-10-10
+
+### 变更
+
+- **升级 `orion-error` 至 0.9**：`orion-error 0.8→0.9`、`orion-infra 0.7→0.8`、`orion_conf 0.7→0.8`、`orion-accessor 0.8→0.9`、`orion-variate 0.13→0.14`、`orion-sec 0.6→0.7`、`wp-self-update 0.3→0.4`。
+- **统一生命周期日志**：把模块 / 本地化 / 系统 / 运维项目各处的 `auto_exit_log!` + 成对 `info!`/`error!` 改为 orion-error 0.9 的 `OperationContext` + `AutoLogGuard`（`doing(...).with_auto_log().with_mod_path(...)` + `mark_suc()`），成功 / 失败 / 取消统一走 `suc!`/`fail!`/`cancel!`。
+- **顶层错误输出改用 0.9 诊断渲染**：`report_error` 改走 `StructError::render()`（reason / detail / position / context），不再手写 reason match。
+
 ## [2.2.2] - 2026-10-08
 
 ### 变更

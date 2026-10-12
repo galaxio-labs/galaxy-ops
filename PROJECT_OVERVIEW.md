@@ -145,8 +145,12 @@ gops sys
 gops prj
   ├── new         创建运维工程
   ├── import      导入系统到工程
-  ├── update      更新工程本地引用
-  └── reimport    按 ops-prj.yml 重新导入系统（保留 values/ 客户值）
+  ├── sync        同步工程系统内容（旧名 update；缺失系统按包导入、已在系统非破坏覆盖）
+  ├── backup      备份现场态
+  ├── restore     还原现场态
+  ├── upgrade     一次可回滚的发布升级
+  ├── contract    对外契约导出 / 导入
+  └── diagnose    诊断工程现场态（旧名 doctor）
 ```
 
 ## 技术栈

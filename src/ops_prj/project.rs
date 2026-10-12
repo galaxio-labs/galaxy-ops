@@ -125,7 +125,10 @@ impl OpsProject {
         let prj_path = PathBuf::from(OPS_PRJ_ROOT).join(name);
         make_clean_path(&prj_path).source_logic()?;
 
-        let conf = OpsProjectConf::for_test();
+        // 示例项目演示项目侧备份 / 契约归档决策：落点 `<项目根>/backup`、`<项目根>/contract`，各留 3 份。
+        let conf = OpsProjectConf::for_test()
+            .with_backup("./backup", 3)
+            .with_contract("./contract", 3);
         let proj = OpsProject::new(conf, prj_path);
         Ok(proj)
     }

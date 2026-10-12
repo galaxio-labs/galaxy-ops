@@ -61,7 +61,7 @@ fn clean_dir_err(action: &str, dir: &Path, e: &std::io::Error) -> MainError {
 /// 取包并解开：本地包直接解，远端包先下载到工作区再解。
 ///
 /// 返回解包后的**包内容根目录**（内含 `sys/`、`sys-prj.yml` 等）。
-/// 与 `import_sys` 的第一步完全一致，抽出来供非破坏性更新（`prj update`）与重建复用 ——
+/// 与 `import_sys` 的第一步完全一致，抽出来供非破坏性更新（`prj sync`）与重建复用 ——
 /// 三处各抄一遍取包逻辑，迟早会分叉。
 ///
 /// 工作区取 [`package_work_dir`]（`GOPS_PACKAGE_DIR` 或平台缓存目录），不再硬编 `$HOME/ds-package`。
@@ -78,8 +78,16 @@ pub async fn fetch_and_prepare(
     // 先保证工作目录**真的是目录**：下载器在“目标不是已存在目录”时会把整条路径当文件名写，
     // 于是一个 `~/ds-package` 会被写成一个文件，之后所有解包都 ENOTDIR（见 `ensure_download_dir` 注释）。
     ensure_download_dir(&work_path)?;
+    let project_root = project_paths.root().to_path_buf();
     let pkg_path = if let Address::Local(local) = address.clone() {
-        PathBuf::from(local.path())
+        // 本地包：`addr` 以**项目根**为基准解析（`ops-prj.yml` 里就是这么记的，`gops prj *`
+        // 也在项目根运行）；绝对路径原样用。否则从别处导入时，会记下一条在项目根下解不开的路径。
+        let raw = PathBuf::from(local.path());
+        if raw.is_absolute() {
+            raw
+        } else {
+            project_root.join(raw)
+        }
     } else {
         let up_unit = accessor
             .download_to_local(&address, &work_path, options)

@@ -1,13 +1,13 @@
 //! 现场态备份与还原。
 //!
 //! 备份选取来自两级声明（见 `docs/design/prj-backup-restore.md` §4）：
-//! **系统侧** `sys-prj.yml: backup.{restore,rebuild}` 说清“哪些路径、丢了什么代价”，
+//! **系统侧** `sys-prj.yml: backup` 说清“哪些路径、丢了什么代价”，
 //! **项目侧** `ops-prj.yml: backup.{target,keep,systems}` 说清“落到哪、留几份、收哪些”。
 //!
 //! 三条设计约束（与本模块直接相关）：
 //! 1. **秘密显性**：含私钥/凭据的条目点名，并提示离机保管。
 //! 2. **原子**：还原先解到临时目录，再合并回现场；中途失败不会留下半截目标。
-//! 3. **没声明就保守**：不在任何档里的路径不收；也不删（收与删是两件事）。
+//! 3. **没声明就保守**：不在 `backup` 里的路径不收；也不删（收与删是两件事）。
 
 use std::path::{Path, PathBuf};
 
@@ -72,22 +72,20 @@ pub struct RestoreReport {
 #[derive(Debug, Clone)]
 struct SystemPlan {
     name: String,
-    with_rebuild: bool,
     include: Vec<String>,
     exclude: Vec<String>,
 }
 
 impl OpsProject {
     /// `prj backup`：按项目/系统两级声明收集现场态，打成一个归档，并清理过期份。
-    pub fn backup(&self, include_rebuild: bool) -> MainResult<BackupReport> {
+    pub fn backup(&self) -> MainResult<BackupReport> {
         let root = self.paths().root();
         let (target, keep, sels) = self.backup_plan();
         let target = PathBuf::from(target.to_string().env_eval(&ValueDict::default()));
 
         let mut resolved = Vec::new();
         for sel in sels {
-            let with_rebuild = sel.with_rebuild || include_rebuild;
-            let include = self.resolve_include(root, &sel.name, with_rebuild, &sel.include)?;
+            let include = self.resolve_include(root, &sel.name, &sel.include)?;
             let exclude = compile_path_patterns(&sel.exclude, "backup.exclude")?;
             resolved.push(ResolvedSystem {
                 name: sel.name,
@@ -99,16 +97,15 @@ impl OpsProject {
         backup_systems(self.conf().name(), root, &resolved, &target, keep)
     }
 
-    /// 解析备份计划：项目侧声明缺省时给保守默认（全系统、restore 档、`<root>/.backup`）。
+    /// 解析备份计划：项目侧声明缺省时给保守默认（全系统、`<root>/.backup`）。
     fn backup_plan(&self) -> (String, usize, Vec<SystemPlan>) {
         let root = self.paths().root().to_path_buf();
-        let all_systems = |level_rebuild: bool| -> Vec<SystemPlan> {
+        let all_systems = || -> Vec<SystemPlan> {
             self.conf()
                 .sys_models()
                 .iter()
                 .map(|s| SystemPlan {
                     name: s.sys().name().clone(),
-                    with_rebuild: level_rebuild,
                     include: Vec::new(),
                     exclude: Vec::new(),
                 })
@@ -121,34 +118,32 @@ impl OpsProject {
                     .iter()
                     .map(|s| SystemPlan {
                         name: s.name().clone(),
-                        with_rebuild: s.level().includes_rebuild(),
                         include: s.include().clone(),
                         exclude: s.exclude().clone(),
                     })
                     .collect();
                 (b.target().clone(), *b.keep(), sels)
             }
-            Some(b) => (b.target().clone(), *b.keep(), all_systems(false)),
+            Some(b) => (b.target().clone(), *b.keep(), all_systems()),
             None => (
                 root.join(".backup").to_string_lossy().to_string(),
                 10,
-                all_systems(false),
+                all_systems(),
             ),
         }
     }
 
-    /// 组装一个系统的 include 模式：系统声明的 backup 档 + 项目现场增量。
+    /// 组装一个系统的 include 模式：系统声明的 backup 选取 + 项目现场增量。
     fn resolve_include(
         &self,
         root: &Path,
         sys_name: &str,
-        with_rebuild: bool,
         extra: &[String],
     ) -> MainResult<Vec<glob::Pattern>> {
         let conf_file = root.join(sys_name).join(SYS_PRJ_CONF_FILE_V2);
         let mut raw = if conf_file.exists() {
             let conf = SysConf::load_conf(&conf_file).source_resource()?;
-            conf.backup().patterns_for(with_rebuild)
+            conf.backup_paths()
         } else {
             Vec::new()
         };
@@ -192,7 +187,7 @@ pub fn backup_systems(
     tar.finish()
         .map_err(|e| MainReason::logic_detail(format!("tar finish failed: {e}")))?;
 
-    let pruned = prune_old(&archive, project_name, keep)?;
+    let pruned = prune_prefixed(&archive, &format!("{project_name}-"), keep)?;
     Ok(BackupReport {
         archive,
         entries,
@@ -263,7 +258,7 @@ pub fn list_archive(archive: &Path) -> MainResult<Vec<String>> {
 }
 
 /// 归档里 `path`（相对项目根的路径）在 `sys_root` 下对应的文件。
-fn collect_matching(
+pub(crate) fn collect_matching(
     sys_root: &Path,
     include: &[glob::Pattern],
     exclude: &[glob::Pattern],
@@ -366,7 +361,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// 写入一个条目（文件 / 符号链接；目录不入归档，解包时按需创建）。
-fn append_entry<W: std::io::Write>(
+pub(crate) fn append_entry<W: std::io::Write>(
     tar: &mut tar::Builder<W>,
     abs: &Path,
     name: &Path,
@@ -390,20 +385,25 @@ fn append_entry<W: std::io::Write>(
     Ok(())
 }
 
-/// 保留最新 `keep` 份 `<project_name>-*.tar.gz`，其余删除；返回被删的路径。
-fn prune_old(archive: &Path, project_name: &str, keep: usize) -> MainResult<Vec<PathBuf>> {
+/// 保留最新 `keep` 份**文件名以 `prefix` 开头**的 `*.tar.gz`，其余删除；返回被删的路径。
+///
+/// 备份与契约归档共用：备份传 `<项目名>-`，契约传 `<项目名>-contract-`（前缀不同 → 互不误删）。
+pub(crate) fn prune_prefixed(
+    archive: &Path,
+    prefix: &str,
+    keep: usize,
+) -> MainResult<Vec<PathBuf>> {
     if keep == 0 {
         return Ok(Vec::new());
     }
     let Some(dir) = archive.parent() else {
         return Ok(Vec::new());
     };
-    let prefix = format!("{project_name}-");
     let mut olds: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(dir).source_resource().with(dir)? {
         let entry = entry.source_resource()?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(&prefix) && name.ends_with(".tar.gz") {
+        if name.starts_with(prefix) && name.ends_with(".tar.gz") {
             olds.push(entry.path());
         }
     }
@@ -817,12 +817,12 @@ mod tests {
         std::fs::write(s.join("extra/note.txt"), "note").unwrap();
         std::fs::write(
             s.join("sys-prj.yml"),
-            "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  restore:\n    - configs/state/*.pem\n",
+            "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  - configs/state/*.pem\n",
         )
         .unwrap();
 
         let prj = OpsProject::load(&root).unwrap();
-        let report = prj.backup(false).unwrap();
+        let report = prj.backup().unwrap();
         let paths: Vec<&str> = report.entries.iter().map(|e| e.path.as_str()).collect();
         assert!(
             paths.contains(&"web-stack/configs/state/a.pem"),
@@ -849,7 +849,7 @@ mod tests {
         );
 
         let prj = OpsProject::load(&root).unwrap();
-        let report = prj.backup(false).expect("未导入的系统应跳过而不是报错");
+        let report = prj.backup().expect("未导入的系统应跳过而不是报错");
         assert!(report.entries.is_empty(), "{:?}", report.entries);
     }
 
@@ -893,6 +893,26 @@ mod tests {
         let r9 = backup_systems("cust", root, &[sel("web-stack", &["configs"])], &out, 9).unwrap();
         assert!(r9.pruned.is_empty());
         assert!(out.join("cust-20260101-000000.tar.gz").exists());
+    }
+
+    #[test]
+    fn test_prune_prefixed_respects_prefix_and_keeps_newest() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        // 契约归档（前缀 `proj-contract-`）3 份 + 备份归档（前缀 `proj-`）+ 别家项目
+        for ts in ["20200101-000000", "20200102-000000", "20200103-000000"] {
+            std::fs::write(dir.join(format!("proj-contract-{ts}.tar.gz")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("proj-20200101-000000.tar.gz"), b"x").unwrap();
+        std::fs::write(dir.join("other-contract-20200101-000000.tar.gz"), b"x").unwrap();
+
+        let newest = dir.join("proj-contract-20200103-000000.tar.gz");
+        let pruned = prune_prefixed(&newest, "proj-contract-", 1).unwrap();
+        assert_eq!(pruned.len(), 2, "应删掉 2 份旧的契约归档：{pruned:?}");
+        assert!(newest.exists(), "最新一份必须保留");
+        // 前缀不同 → 互不误删
+        assert!(dir.join("proj-20200101-000000.tar.gz").exists());
+        assert!(dir.join("other-contract-20200101-000000.tar.gz").exists());
     }
 
     #[test]
@@ -990,7 +1010,7 @@ mod tests {
         assert!(leftovers.is_empty(), "leftovers={leftovers:?}");
     }
 
-    /// 项目侧未声明 `backup` 时的默认：落点 `<root>/.backup`、全系统、restore 档。
+    /// 项目侧未声明 `backup` 时的默认：落点 `<root>/.backup`、全系统。
     #[test]
     fn test_ops_project_backup_default_plan_reads_sys_decl() {
         let tmp = TempDir::new().unwrap();
@@ -1008,12 +1028,12 @@ mod tests {
         std::fs::write(s.join("configs/other.log"), "log").unwrap();
         std::fs::write(
             s.join("sys-prj.yml"),
-            "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  restore:\n    - configs/state/*.pem\n",
+            "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  - configs/state/*.pem\n",
         )
         .unwrap();
 
         let prj = OpsProject::load(&root).unwrap();
-        let report = prj.backup(false).unwrap();
+        let report = prj.backup().unwrap();
 
         assert!(
             report.archive.starts_with(root.join(".backup")),
@@ -1024,9 +1044,9 @@ mod tests {
         assert_eq!(paths, vec!["web-stack/configs/state/x.pem"]);
     }
 
-    /// 项目侧声明 `level: rebuild` 时应连系统声明的 `rebuild` 档一起收。
+    /// 系统声明的 `backup` 是扁平列表；项目侧 target 生效。
     #[test]
-    fn test_ops_project_backup_honors_level_and_target() {
+    fn test_ops_project_backup_honors_decl_and_target() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("prj");
         let dest = tmp.path().join("bk");
@@ -1035,7 +1055,7 @@ mod tests {
         std::fs::write(
             root.join("ops-prj.yml"),
             format!(
-                "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    url: http://example.com/web-stack.tar.gz\nbackup:\n  target: {}\n  keep: 3\n  systems:\n    - name: web-stack\n      level: rebuild\n",
+                "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    url: http://example.com/web-stack.tar.gz\nbackup:\n  target: {}\n  keep: 3\n  systems:\n    - name: web-stack\n",
                 dest.display()
             ),
         )
@@ -1047,12 +1067,12 @@ mod tests {
         std::fs::write(s.join("packages/pkg.tar.gz"), "pkg").unwrap();
         std::fs::write(
             s.join("sys-prj.yml"),
-            "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  restore:\n    - configs/*.pem\n  rebuild:\n    - packages\n",
+            "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  - configs/*.pem\n  - packages\n",
         )
         .unwrap();
 
         let prj = OpsProject::load(&root).unwrap();
-        let report = prj.backup(false).unwrap();
+        let report = prj.backup().unwrap();
 
         assert!(
             report.archive.starts_with(&dest),
@@ -1062,11 +1082,11 @@ mod tests {
         let paths: Vec<&str> = report.entries.iter().map(|e| e.path.as_str()).collect();
         assert!(
             paths.contains(&"web-stack/configs/a.pem"),
-            "restore 档：{paths:?}"
+            "configs 应在选取里：{paths:?}"
         );
         assert!(
             paths.contains(&"web-stack/packages/pkg.tar.gz"),
-            "level=rebuild 应带上 rebuild 档：{paths:?}"
+            "packages 应在选取里：{paths:?}"
         );
     }
 }

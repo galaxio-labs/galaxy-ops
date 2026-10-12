@@ -79,8 +79,8 @@ galaxy-ops,它通过为组件、系统提供 operator, 来实现对系统进行�
     升级、备份、还原三件事在 gops 里没有对应能力，只能每个系统自己写脚本。
   - 输入：`src/ops_prj/`（import / project / install / conf）、`src/system/pack.rs`，以及真实部署现场（见文档 §2）
   - 输出：docs/design/prj-backup-restore.md
-  - 要点：`sys-prj.yml` 新增 `preserve` / `backup`（restore / rebuild 两档），`ops-prj.yml` 新增 `backup`（落点 / 份数 / 系统与级别）；
-    不变式 `ignore ⊆ preserve`；非破坏更新直接复用 `sys package` 的文件选取逻辑
-  - 已实现：`prj update` 非破坏覆盖（`update.rs::apply_overlay`）、`prj backup` / `prj restore`（`backup.rs`，含 sha256 清单 / 私钥点名 / `keep` 清理）、
-    `prj reimport` 只补缺失（默认不删）+ `prj rebuild` 原子重建、`prj doctor` → `prj diagnose`（含 `ignore ⊆ preserve`、`sys_models` 重名等检查）；均已补测试
+  - 要点：`sys-prj.yml` 新增 `protect` / `contract` / `backup`（必收，扁平列表），`ops-prj.yml` 新增 `backup`（落点 / 份数 / 系统）；
+    不变式 `ignore ⊆ protect`；非破坏更新直接复用 `sys package` 的文件选取逻辑
+  - 已实现：`prj sync` 非破坏覆盖（`update.rs::apply_overlay`，并补齐缺失系统）、`prj backup` / `prj restore`（`backup.rs`，含 sha256 清单 / 私钥点名 / `keep` 清理）、
+    `prj doctor` → `prj diagnose`（含 `ignore ⊆ protect`、`sys_models` 重名等检查）；均已补测试
   - 遗留（独立现场问题，见文档 §9）：采集日志 11GB/天 无轮转且落在 `configs/` 下；`gateway-alone/ops-prj.yml` 的 `sys_models` 重名

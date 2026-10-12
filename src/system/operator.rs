@@ -89,6 +89,17 @@ impl SysOperator {
         *self.sys_spec.define_mut() = define;
         self
     }
+    /// 注入现场态声明（builder；供示例 / 测试；语义见 [`SysConf::with_site_state`]）。
+    pub fn with_site_state(
+        mut self,
+        ignore: Vec<String>,
+        protect: Vec<String>,
+        contract: Vec<String>,
+        backup: Vec<String>,
+    ) -> Self {
+        self.conf = self.conf.with_site_state(ignore, protect, contract, backup);
+        self
+    }
     pub fn kind(&self) -> SysKind {
         *self.sys_spec.define().kind()
     }
@@ -736,7 +747,7 @@ pub mod tests {
                 Address::from(HttpResource::from(
                     "https://github.com/galaxio-labs/hello-word.git",
                 )),
-                PathTemplate::from(prj_path.join("test_res")),
+                PathTemplate::from("test_res"),
             )
             .with_rename("bit-common"),
         );

@@ -11,12 +11,13 @@ example/
 ├── knowlege/docker-compose/  # docker-compose 完整示例（可直接运行的 nginx+postgres 系统）
 ├── mod-operators/       # 模块输出根目录（gops 运行时/测试写入，非示例内容）
 ├── sys-operators/       # 系统输出根目录（同上）
-├── ops-projects/        # 运维项目输出根目录（同上）
+├── ops-projects/        # 运维项目输出根目录（同上）；附 `run-prj-test.sh`：obs_prj_x 的 prj 冒烟测试
 └── demo/                # 端到端演示脚本与说明
     └── run-demo.sh
 ```
 
 > 注意：`mod-operators/`、`sys-operators/`、`ops-projects/` 三个目录是 `src/const_vars.rs` 中约定的默认输出/测试写入目录，正常情况下应为空，请勿把它们当作示例。
+> （例外：`ops-projects/run-prj-test.sh` 是随仓提供的测试脚本。）
 
 ## 核心概念回顾
 
@@ -60,6 +61,12 @@ cd ..
 ```
 
 详细步骤与生成结构见下文；演示脚本见 [demo/run-demo.sh](./demo/run-demo.sh)。
+
+针对 `obs_prj_x` 的 `gops prj` 现场态冒烟测试：
+
+```bash
+./example/ops-projects/run-prj-test.sh   # 先 cargo test 生成示例，再逐个跑 diagnose/sync/backup/restore/contract
+```
 
 ## 生成结构速览
 
@@ -155,10 +162,12 @@ System（共享定义）              Ops Project（客户差异）
 
 ```text
 knowlege/docker-compose/
-├── sys-prj.yml              # 系统根配置（test_envs）
+├── sys-prj.yml              # 系统根配置：test_envs / ignore / protect / contract / backup
 ├── version.txt
 ├── _gal/
 │   └── work.gxl             # 可选：定义 localize 阶段流程（扩展点），见下
+├── configs/
+│   └── public.yml           # 对外契约（不可重建的公开现场事实），见 docs/design/contract.md
 ├── sys/
 │   ├── sys_model.yml        # name: web-stack / kind: docker-compose
 │   ├── docker-compose.yaml  # 共享定义，用 ${NGINX_TAG}/${HTTP_PORT}/${SEC_DB_PASSWORD} 占位
@@ -172,6 +181,7 @@ knowlege/docker-compose/
 - `_gal/work.gxl`：**可选**。这里定义了一个 `localize` 流程做**阶段扩展点**验证（见下）；不定义也行，缺了它纯 compose 系统照样跑
 - **没有 `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml`**：纯 docker-compose 系统不依赖 GXL / gx（`_gal/work.gxl` 只用于可选的阶段流程），这些缺失时分别按空处理
 - `sys_model.yml` 的 `name`（`web-stack`）是 gops 的**系统名**（决定交付包名 `web-stack-0.1.0.tar.gz`）；docker 的项目名则取自**系统根目录名**（`docker-compose`）——两者用途不同，不必一致
+- `sys-prj.yml` 演示现场态声明：`ignore`（不进包：localize 的产出 `.env`/`web.conf`）、`protect`（升级不碰）、`contract`（对外契约 `configs/`：**声明即自动**纳入 `protect` + `backup`）、`backup`（**必收**的现场态，如 `.env`）。见 [contract 设计](../../docs/design/contract.md)
 
 直接体验（含客户化；`values/value.yml` 已内置一份只写差异的覆盖样例）：
 

@@ -5,6 +5,36 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.3.0] - 2026-10-12
+
+### 新增功能
+
+- **对外契约（`contract`）**：`sys-prj.yml` 新增 `contract:` —— 声明**不可重建的公开现场事实**
+  （例如现场选的域名落在某个 `.toml` 里）。声明即自动纳入保护（升级不碰）与备份（`restore` 必收），
+  且不进交付包；`ops-prj.yml` 新增 `contract:`（归档落点 / 份数），配套 **`gops prj contract export` / `import`**
+  独立归档与回填。见 `docs/design/contract.md`。
+
+### 变更
+
+- **`gops prj update` 更名为 `gops prj sync`**（旧名 `update` 保留为**隐藏别名**）：它与事务式发布升级
+  `gops prj upgrade` 名字太像，故拆开。
+- **`gops prj sync` 现在补齐缺失的系统**：`ops-prj.yml` 记录、但目录不在场的系统会被按包**导入**；
+  已在场的系统仍是非破坏覆盖（`protect` / `contract` 不碰、**不删**任何东西）。
+- **现场态声明整理**：`sys-prj.yml` 的 `preserve:` 更名为 **`protect:`**（旧名仍可读）；
+  `backup:` 由分级 `{restore, rebuild}` 简化为**扁平列表**（只表达“丢失的代价”，**不触发任何删除**）。
+- **本地包地址以项目根为基准解析**：`ops-prj.yml` 记录的本地 `addr.path` 相对**项目根**，可移植（如 `../../sys-operators/…`）。
+- **依赖解析不再依赖进程 CWD**：模块级 `test_envs` 以**模块根**、模型级 `depends` 以**模型目录**为基准；
+  拒绝绝对路径与 `..`，避免“隐式顶替”与 CWD 漂移。
+- **启动更友好**：进程 CWD 已不存在（如所在目录被删/重建）时给出可操作提示，不再只留一句 `RES ERROR / get current dir`。
+
+### 移除
+
+- **移除 `gops prj rebuild`**（breaking）：它是**唯一**会清掉「包外未声明内容」的操作（彻底重建 / 换身份）；
+  现场态声明（`protect` / `contract` / `backup`）与 `gops prj sync`（**不删**包外内容）已覆盖其诉求。
+- **移除 `gops prj reimport`**（breaking）：其「补齐缺失系统」的职责已并入 `gops prj sync`。
+
+详见 [UPGRADE.md](./UPGRADE.md)。
+
 ## [2.2.3] - 2026-10-10
 
 ### 变更

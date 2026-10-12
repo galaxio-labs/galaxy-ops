@@ -78,7 +78,16 @@ gops self skill install --source galaxio-labs/gx-skills   # 也可装 gx 的 ski
 
 ## 升级要做的事（checklist）
 
-1. **改名**：脚本 / CI 里 `gops sys <run-cmd>` → `gops run <cmd>`；`sys package --no-git` → `--full`（不改也能用）。
+1. **改名 / 移除**：脚本 / CI 里 `gops sys <run-cmd>` → `gops run <cmd>`；`sys package --no-git` → `--full`（不改也能用）。
+   - （2.2.x）**`gops prj update` → `gops prj sync`**：语义不变（非破坏地把已导入系统的内容同步到
+     各自 `addr` 指向的版本 + 刷新项目 `work_envs`），只换名字以免与 `gops prj upgrade`
+     （事务式发布升级：含备份 / 回滚 / 探活）混淆；旧名 `update` 保留为**隐藏别名**，脚本不改也能跑。
+   - （2.2.x，**breaking**）**`gops prj reimport` 已移除**：其「补齐缺失系统」的职责已并入 `gops prj sync`
+     —— sync 现在会**导入目录缺失的系统**、对已在的系统做非破坏覆盖（`protect` / `contract` 不碰、不删任何东西）。
+     脚本里的 `gops prj reimport` 直接改用 `gops prj sync` 即可。
+   - （2.2.x，**breaking**）**`gops prj rebuild` 已移除**：它曾用于连**包外未声明内容**一起清掉的
+     「彻底重建」，但现场态声明（`protect` / `contract` / `backup`）已覆盖保留与还原诉求。改用
+     `gops prj sync` —— 它**不删**包外未声明内容。
 2. **迁移存量系统**：在每个系统目录跑一次 `gops sys update`，它会（幂等）：
 
    - 清理遗留 `sys/mods/`；

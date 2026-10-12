@@ -18,6 +18,9 @@ pub struct OpsProjectConf {
     /// 项目侧备份声明（落点 / 份数 / 收哪些系统）。缺省 = 未声明，`prj backup` 用内置默认。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     backup: Option<ProjectBackupConf>,
+    /// 项目侧契约归档声明（落点 / 份数）。缺省 = 未声明，`prj contract export` 用内置默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contract: Option<ProjectContractConf>,
 }
 
 /// 项目侧的备份决策：**系统侧**声明“哪些路径、什么代价”，**项目侧**声明“落到哪、留几份、收哪些”。
@@ -29,8 +32,8 @@ pub struct ProjectBackupConf {
     /// 保留最近 N 份（按文件名里的时间戳排序）。
     #[serde(default = "default_backup_keep")]
     keep: usize,
-    /// 要收的系统；为空 = 收 `sys_models` 里的全部系统（按 restore 档）。
-    #[serde(default)]
+    /// 要收的系统；为空 = 收 `sys_models` 里的全部系统（按各系统 `backup:` 声明）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     systems: Vec<SystemBackupSel>,
 }
 
@@ -43,9 +46,6 @@ fn default_backup_keep() -> usize {
 #[getset(get = "pub")]
 pub struct SystemBackupSel {
     name: String,
-    /// 收哪一档：`restore`（默认）只收 restore；`rebuild` 连 rebuild 档一起收。
-    #[serde(default)]
-    level: BackupLevel,
     /// 现场增量：本项目要额外收的（在系统声明基础上追加）。
     #[serde(default)]
     include: Vec<String>,
@@ -54,22 +54,19 @@ pub struct SystemBackupSel {
     exclude: Vec<String>,
 }
 
-/// 备份档位。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BackupLevel {
-    /// 丢了要重装 / 换身份
-    #[default]
-    Restore,
-    /// 可重建（重新投放/生成）
-    Rebuild,
+/// 项目侧的契约归档决策：落点 / 份数（对称于 [`ProjectBackupConf`]）。
+#[derive(Getters, Clone, Debug, Serialize, Deserialize)]
+#[getset(get = "pub")]
+pub struct ProjectContractConf {
+    /// 归档落点目录（可写 `${VAR}`）。
+    target: String,
+    /// 保留最近 N 份（按文件名里的时间戳排序）。
+    #[serde(default = "default_contract_keep")]
+    keep: usize,
 }
 
-impl BackupLevel {
-    /// 是否要把系统声明的 `rebuild` 档也收进来。
-    pub fn includes_rebuild(&self) -> bool {
-        matches!(self, BackupLevel::Rebuild)
-    }
+fn default_contract_keep() -> usize {
+    10
 }
 
 impl OpsProjectConf {
@@ -79,6 +76,7 @@ impl OpsProjectConf {
             work_envs: local_res,
             sys_models: Vec::new(),
             backup: None,
+            contract: None,
         }
     }
     pub fn for_test() -> Self {
@@ -87,7 +85,27 @@ impl OpsProjectConf {
             work_envs: DependencySet::example(),
             sys_models: Vec::new(),
             backup: None,
+            contract: None,
         }
+    }
+
+    /// 设置项目侧备份决策（builder；供示例 / 测试）。
+    pub fn with_backup(mut self, target: impl Into<String>, keep: usize) -> Self {
+        self.backup = Some(ProjectBackupConf {
+            target: target.into(),
+            keep,
+            systems: Vec::new(),
+        });
+        self
+    }
+
+    /// 设置项目侧契约归档决策（builder；供示例 / 测试）。
+    pub fn with_contract(mut self, target: impl Into<String>, keep: usize) -> Self {
+        self.contract = Some(ProjectContractConf {
+            target: target.into(),
+            keep,
+        });
+        self
     }
     pub fn import_sys(&mut self, sys: OpsSystem) {
         if !self.sys_models.contains(&sys) {
@@ -138,7 +156,7 @@ mod tests {
     #[test]
     fn test_backup_declaration_roundtrip() {
         let yaml = format!(
-            "{BASE}backup:\n  target: /Volumes/backup/gw\n  keep: 5\n  systems:\n    - name: web-stack\n      level: rebuild\n      include:\n        - packages\n      exclude:\n        - configs/logs\n"
+            "{BASE}backup:\n  target: /Volumes/backup/gw\n  keep: 5\n  systems:\n    - name: web-stack\n      include:\n        - packages\n      exclude:\n        - configs/logs\n"
         );
         let conf: OpsProjectConf = serde_yaml::from_str(&yaml).unwrap();
         let b = conf.backup().as_ref().unwrap();
@@ -146,18 +164,32 @@ mod tests {
         assert_eq!(*b.keep(), 5);
         assert_eq!(b.systems().len(), 1);
         assert_eq!(b.systems()[0].name(), "web-stack");
-        assert!(b.systems()[0].level().includes_rebuild());
         assert_eq!(b.systems()[0].include(), &["packages".to_string()]);
         assert_eq!(b.systems()[0].exclude(), &["configs/logs".to_string()]);
     }
 
     #[test]
-    fn test_backup_defaults_keep_and_level() {
+    fn test_backup_defaults_keep() {
         let yaml = format!("{BASE}backup:\n  target: /tmp/b\n  systems:\n    - name: web-stack\n");
         let conf: OpsProjectConf = serde_yaml::from_str(&yaml).unwrap();
         let b = conf.backup().as_ref().unwrap();
         assert_eq!(*b.keep(), 10);
-        assert_eq!(b.systems()[0].level(), &BackupLevel::Restore);
-        assert!(!b.systems()[0].level().includes_rebuild());
+    }
+
+    #[test]
+    fn test_contract_absent_by_default_and_omitted_on_save() {
+        let conf = OpsProjectConf::new("cust", DependencySet::default());
+        assert!(conf.contract().is_none());
+        let yaml = serde_yaml::to_string(&conf).unwrap();
+        assert!(!yaml.contains("contract"), "yaml={yaml}");
+    }
+
+    #[test]
+    fn test_contract_declaration_roundtrip_and_default_keep() {
+        let yaml = format!("{BASE}contract:\n  target: ./contract\n");
+        let conf: OpsProjectConf = serde_yaml::from_str(&yaml).unwrap();
+        let c = conf.contract().as_ref().unwrap();
+        assert_eq!(c.target(), "./contract");
+        assert_eq!(*c.keep(), 10); // 缺省 10
     }
 }

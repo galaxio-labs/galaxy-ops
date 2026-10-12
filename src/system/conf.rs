@@ -29,46 +29,23 @@ pub struct SysConf {
     ignore: Vec<String>,
     /// **现场态**：升级/重建时**不覆盖、也不删**的路径（glob，相对系统根，同 `ignore` 的写法）。
     ///
-    /// 与 `ignore` 的分工：`ignore` 管“不进交付包”，`preserve` 管“升级不许碰”。
+    /// 与 `ignore` 的分工：`ignore` 管“不进交付包”，`protect` 管“升级/重建不许碰”。
     /// 两者**不相等**（`.env`、`values/`、`deliver.lock` 都不进包，但都属于现场态），
-    /// 但应满足不变式 `ignore ⊆ preserve` —— 不进包的按定义就不是包内容。
+    /// 但应满足不变式 `ignore ⊆ protect` —— 不进包的按定义就不是包内容。
     /// 不一致由 `gops prj diagnose` 报出。
+    ///
+    /// 旧名 `preserve` 仍可读（`#[serde(alias)]`），新写一律用 `protect`。
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "preserve")]
+    protect: Vec<String>,
+    /// **对外契约**：承载“不可重建的公开现场事实”（对外域名 / 端点 / 公开证书）的文件或目录
+    /// （glob，相对系统根）。语义**自足**：命中即 **不覆盖 + 必收（`backup`）+ 不进包**。
+    /// 内容 site-owned、不在交付包内；`sys-prj.yml` 只指路。见 `docs/design/contract.md`。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    preserve: Vec<String>,
-    /// 备份选取分级（glob，相对系统根）。见 [`BackupConf`]。
-    #[serde(default, skip_serializing_if = "BackupConf::is_empty")]
-    backup: BackupConf,
-}
-
-/// 备份选取分级：只表达“丢失的代价”，**不触发任何删除**。
-///
-/// - `restore`：丢了要重装 / 换身份 → `prj backup` 默认**收**，`prj restore` 放回。
-/// - `rebuild`：可重建（重新投放/生成即可）→ 默认**不收**，需显式 `--include-rebuild`，
-///   收它的价值只是省一次重投。
-///
-/// 不在两档里的路径 = 不收、不碰（运行期巨量日志、`data-plane-run/` 之类）。
-#[derive(Getters, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[getset(get = "pub")]
-pub struct BackupConf {
+    contract: Vec<String>,
+    /// **备份选取**（glob，相对系统根）：**必收**的现场态（丢了要重装 / 换身份）。
+    /// 只表达“丢失的代价”，不触发任何删除；不在这里的 = 不收、不碰。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    restore: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    rebuild: Vec<String>,
-}
-
-impl BackupConf {
-    pub fn is_empty(&self) -> bool {
-        self.restore.is_empty() && self.rebuild.is_empty()
-    }
-
-    /// 按级别取模式：`with_rebuild = true` 时把 `rebuild` 档也带上。
-    pub fn patterns_for(&self, with_rebuild: bool) -> Vec<String> {
-        let mut out = self.restore.clone();
-        if with_rebuild {
-            out.extend(self.rebuild.iter().cloned());
-        }
-        out
-    }
+    backup: Vec<String>,
 }
 
 impl SysConf {
@@ -76,9 +53,25 @@ impl SysConf {
         Self {
             test_envs: local_res,
             ignore: Vec::new(),
-            preserve: Vec::new(),
-            backup: BackupConf::default(),
+            protect: Vec::new(),
+            contract: Vec::new(),
+            backup: Vec::new(),
         }
+    }
+
+    /// 设置现场态声明（builder；供示例 / 测试构造带声明的 `SysConf`）。
+    pub fn with_site_state(
+        mut self,
+        ignore: Vec<String>,
+        protect: Vec<String>,
+        contract: Vec<String>,
+        backup: Vec<String>,
+    ) -> Self {
+        self.ignore = ignore;
+        self.protect = protect;
+        self.contract = contract;
+        self.backup = backup;
+        self
     }
 
     /// `gops sys package` 打包时排除的路径模式（`sys-prj.yml` 的 `ignore:` 节）。
@@ -88,13 +81,45 @@ impl SysConf {
         &self.ignore
     }
 
-    /// 现场态路径（升级不覆盖、不删除）。见字段注释里的不变式。
-    pub fn preserve(&self) -> &[String] {
-        &self.preserve
+    /// 现场态路径（升级/重建不覆盖、不删除）。见字段注释里的不变式。
+    pub fn protect(&self) -> &[String] {
+        &self.protect
     }
 
-    /// 备份选取分级。
-    pub fn backup(&self) -> &BackupConf {
+    /// 对外契约路径（不可重建的公开现场事实）。见字段注释。
+    pub fn contract(&self) -> &[String] {
+        &self.contract
+    }
+
+    /// **升级的保护集**：`protect` ∪ `contract`。
+    ///
+    /// `contract` 语义自足——声明即**自动纳入保护**（升级不碰），所以调用方（`prj sync` /
+    /// `prj upgrade`）读的是这个并集，而不是裸的 `protect`。
+    pub fn protection_paths(&self) -> Vec<String> {
+        let mut out = self.protect.clone();
+        for item in &self.contract {
+            if !out.contains(item) {
+                out.push(item.clone());
+            }
+        }
+        out
+    }
+
+    /// **备份选取**：`backup` ∪ `contract`（**必收**）。
+    ///
+    /// `contract` 是不可重建的现场事实——声明即自动进备份选取，无需再写第二处。
+    pub fn backup_paths(&self) -> Vec<String> {
+        let mut out = self.backup.clone();
+        for item in &self.contract {
+            if !out.contains(item) {
+                out.push(item.clone());
+            }
+        }
+        out
+    }
+
+    /// 备份选取（`sys-prj.yml` 的 `backup:` 节，**不含** contract 派生项）。
+    pub fn backup(&self) -> &[String] {
         &self.backup
     }
 }
@@ -154,8 +179,9 @@ mod tests {
         let with = SysConf {
             test_envs: DependencySet::default(),
             ignore: vec!["sys/*/mods".to_string(), ".env".to_string()],
-            preserve: Vec::new(),
-            backup: BackupConf::default(),
+            protect: Vec::new(),
+            contract: Vec::new(),
+            backup: Vec::new(),
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("ignore"), "yaml={yaml}");
@@ -167,56 +193,144 @@ mod tests {
     }
 
     #[test]
-    fn test_sys_conf_preserve_roundtrip_and_omitted_when_empty() {
-        // 空 → 不写入 preserve 节
+    fn test_sys_conf_protect_roundtrip_and_omitted_when_empty() {
+        // 空 → 不写入 protect 节
         let empty = SysConf::new(DependencySet::default());
         let yaml = serde_yaml::to_string(&empty).unwrap();
-        assert!(!yaml.contains("preserve"), "yaml={yaml}");
+        assert!(!yaml.contains("protect"), "yaml={yaml}");
 
         let with = SysConf {
             test_envs: DependencySet::default(),
             ignore: vec!["configs".to_string()],
-            preserve: vec!["configs".to_string(), ".env".to_string()],
-            backup: BackupConf::default(),
+            protect: vec!["configs".to_string(), ".env".to_string()],
+            contract: Vec::new(),
+            backup: Vec::new(),
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
-        assert!(yaml.contains("preserve"), "yaml={yaml}");
+        assert!(yaml.contains("protect"), "yaml={yaml}");
         let back: SysConf = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(
-            back.preserve(),
+            back.protect(),
             &["configs".to_string(), ".env".to_string()][..]
         );
     }
 
     #[test]
+    fn test_protection_paths_unions_contract() {
+        let conf = SysConf {
+            test_envs: DependencySet::default(),
+            ignore: Vec::new(),
+            protect: vec!["configs".to_string()],
+            contract: vec!["configs/gateway/public".to_string()],
+            backup: Vec::new(),
+        };
+        assert_eq!(
+            conf.protection_paths(),
+            vec!["configs".to_string(), "configs/gateway/public".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_backup_paths_always_includes_contract() {
+        // 不声明 `backup`，contract 也应被收（必收）。
+        let conf = SysConf {
+            test_envs: DependencySet::default(),
+            ignore: Vec::new(),
+            protect: Vec::new(),
+            contract: vec!["configs/gateway/public".to_string()],
+            backup: Vec::new(),
+        };
+        assert_eq!(
+            conf.backup_paths(),
+            vec!["configs/gateway/public".to_string()]
+        );
+
+        // contract 已在 `backup` 里时不重复（去重）。
+        let conf2 = SysConf {
+            test_envs: DependencySet::default(),
+            ignore: Vec::new(),
+            protect: Vec::new(),
+            contract: vec!["configs/gateway/public".to_string()],
+            backup: vec!["configs/gateway/public".to_string()],
+        };
+        assert_eq!(
+            conf2.backup_paths(),
+            vec!["configs/gateway/public".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_sys_conf_reads_legacy_preserve_alias() {
+        // 旧键 `preserve:` 仍可读，落到同一字段；新写一律 `protect`。
+        let conf: SysConf = serde_yaml::from_str(
+            "test_envs:\n  dep_root: ''\n  deps: []\npreserve:\n  - configs\n",
+        )
+        .unwrap();
+        assert_eq!(conf.protect(), &["configs".to_string()][..]);
+    }
+
+    #[test]
+    fn test_example_docker_compose_sys_prj_parses() {
+        // 示例 `example/knowlege/docker-compose/sys-prj.yml` 的声明应能解析出来。
+        let path = std::path::Path::new("example/knowlege/docker-compose/sys-prj.yml");
+        let conf = SysConf::load_conf(path).unwrap();
+        assert!(conf.ignore().iter().any(|p| p == ".env"));
+        assert!(conf.protect().iter().any(|p| p == "web.conf"));
+        assert_eq!(conf.contract(), &["configs".to_string()][..]);
+        assert!(conf.backup().iter().any(|p| p == ".env"));
+        // contract 语义自足：自动进保护集与备份选取
+        assert!(conf.protection_paths().iter().any(|p| p == "configs"));
+        assert!(conf.backup_paths().iter().any(|p| p == "configs"));
+    }
+
+    #[test]
+    fn test_sys_conf_contract_roundtrip_and_omitted_when_empty() {
+        // 空 → 不写入 contract 节
+        let empty = SysConf::new(DependencySet::default());
+        let yaml = serde_yaml::to_string(&empty).unwrap();
+        assert!(!yaml.contains("contract"), "yaml={yaml}");
+
+        let with = SysConf {
+            test_envs: DependencySet::default(),
+            ignore: Vec::new(),
+            protect: Vec::new(),
+            contract: vec!["configs/gateway/public".to_string()],
+            backup: Vec::new(),
+        };
+        let yaml = serde_yaml::to_string(&with).unwrap();
+        assert!(yaml.contains("contract"), "yaml={yaml}");
+        let back: SysConf = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.contract(), &["configs/gateway/public".to_string()][..]);
+    }
+
+    #[test]
     fn test_sys_conf_load_without_ignore_field() {
-        // 旧 sys-prj.yml 无 ignore/preserve 节 → 默认空列表
+        // 旧 sys-prj.yml 无 ignore/protect/contract/backup 节 → 默认空列表
         let conf: SysConf =
             serde_yaml::from_str("test_envs:\n  dep_root: ''\n  deps: []\n").unwrap();
         assert!(conf.ignore().is_empty());
-        assert!(conf.preserve().is_empty());
+        assert!(conf.protect().is_empty());
+        assert!(conf.contract().is_empty());
         assert!(conf.backup().is_empty());
     }
 
     #[test]
-    fn test_backup_conf_roundtrip_and_omitted_when_empty() {
+    fn test_backup_roundtrip_and_omitted_when_empty() {
+        // 空 → 不写入 backup 节
         let empty = SysConf::new(DependencySet::default());
         let yaml = serde_yaml::to_string(&empty).unwrap();
         assert!(!yaml.contains("backup"), "yaml={yaml}");
 
-        let yaml = "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  restore:\n    - configs/gateway/state/*.pem\n  rebuild:\n    - packages\n";
+        // 非空 → 扁平列表，顺序保留
+        let yaml = "test_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  - configs/gateway/state/*.pem\n  - packages\n";
         let conf: SysConf = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
-            conf.backup().restore(),
-            &["configs/gateway/state/*.pem".to_string()]
+            conf.backup(),
+            &[
+                "configs/gateway/state/*.pem".to_string(),
+                "packages".to_string()
+            ][..]
         );
-        assert_eq!(conf.backup().rebuild(), &["packages".to_string()]);
         assert!(!conf.backup().is_empty());
-        // 默认只收 restore 档
-        assert_eq!(
-            conf.backup().patterns_for(false),
-            vec!["configs/gateway/state/*.pem".to_string()]
-        );
-        assert_eq!(conf.backup().patterns_for(true).len(), 2);
     }
 }

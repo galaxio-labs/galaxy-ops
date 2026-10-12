@@ -88,7 +88,7 @@ fn cache_base_from(
 /// 路径被写成一个文件，随后 `create_dir_all(dir/<包名>)` 必失败（ENOTDIR）。
 ///
 /// 现场一例（零历史的新机器）：`~/ds-package` 不存在 → 首个包被下载成 `~/ds-package` 这个“文件”
-/// → `gops prj reimport` 报 `create_dir_all … [path: ~/ds-package/wist-gateway-stack-…]`。
+/// → `gops prj import` / `prj sync` 报 `create_dir_all … [path: ~/ds-package/wist-gateway-stack-…]`。
 /// 而在已经有 `~/ds-package` 的机器上（早期跑过 gops）永远看不到 —— 所以这类 bug 只会在
 /// **首次部署的目标机**上冒出来。
 pub fn ensure_download_dir(dir: &Path) -> MainResult<()> {

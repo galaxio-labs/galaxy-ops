@@ -165,9 +165,18 @@ gops run diagnose                # 诊断
 ```bash
 gops prj new --name customer-a                              # 创建运维工程
 gops prj import --path /path/to/web-stack-0.1.0.tar.gz      # 导入已打包的系统
-gops prj update                                             # 更新本地引用
-gops prj reimport                                           # 重新导入（保留 values/ 客户值）
+gops prj sync                                               # 同步内容到 addr 指向的版本；缺失系统按包导入（非破坏）
+gops prj upgrade --to <version> --on-failure rollback-all   # 一次可回滚的发布升级（备份/重渲/拉镜像/切换/探活）
 ```
+
+「内容 / 版本」类命令的分工（避免 `sync` 与 `upgrade` 混淆）：
+
+| 诉求 | 命令 |
+| --- | --- |
+| 给已交付系统换版本 / 补齐被删的系统，只覆盖包内内容、不动现场态、可安全重入 | `gops prj sync`（旧名 `update` 仍可用） |
+| 要一次**可回滚的发布升级**：含备份、重渲值、拉镜像、切换、探活（仅 `docker-compose`） | `gops prj upgrade` |
+
+> `sync` 与 `upgrade` 的边界：`sync` 是**非事务**的**内容同步**（无备份、无健康检查、无回滚，也不同步运行时）；`upgrade` 是**事务**（有备份与回滚，含运行时切换与探活）。
 
 ### `gops self` — 自身维护
 
@@ -238,7 +247,7 @@ cd ..
 gops prj new --name customer-a
 cd customer-a
 gops prj import --path ../web-stack-0.1.0.tar.gz
-gops prj update
+gops prj sync
 ```
 
 运维项目用于把系统导入到具体环境，并在本地持续维护配置和值文件。
@@ -322,7 +331,7 @@ System / Module Spec
 之后：
 
 - 公共系统定义可以继续演进
-- 客户项目可以通过 `gops prj update` 获取共享定义的更新
+- 客户项目可以通过 `gops prj sync` 获取共享定义的更新
 - 客户自己的值文件和本地配置仍保留在各自项目中
 
 这样可以避免“每交付一个客户，就复制一份完全独立的系统代码”。
@@ -362,14 +371,14 @@ cd ..
 gops prj new --name customer-a
 cd customer-a
 gops prj import --path ../web-stack-0.1.0.tar.gz
-gops prj update
+gops prj sync
 
 # 客户 B
 cd ..
 gops prj new --name customer-b
 cd customer-b
 gops prj import --path ../web-stack-0.1.0.tar.gz
-gops prj update
+gops prj sync
 ```
 
 在这个模型里：

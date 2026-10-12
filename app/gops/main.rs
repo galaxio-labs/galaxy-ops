@@ -4,7 +4,7 @@ mod commands;
 
 use clap::Parser;
 use commands::{CommandDispatcher, GInsCmd, OutputMode};
-use galaxy_ops::error::{MainResult, report_error};
+use galaxy_ops::error::{MainReason, MainResult, report_error};
 use galaxy_ops::prelude::ErrorOwe;
 use orion_vars::vars::setup_start_env_vars;
 
@@ -24,6 +24,15 @@ pub struct GxOps {}
 
 impl GxOps {
     pub async fn run() -> MainResult<()> {
+        // 进程 CWD 若已不存在（例如所在目录被删除 / 重新生成），`getcwd` 会失败，
+        // 导致下面 `setup_start_env_vars` 报晦涩的 `RES ERROR / get current dir`。
+        // 这里先给一条可操作的提示。（本仓的 `example/*` 常被测试清空重建，容易踩到。）
+        if let Err(e) = std::env::current_dir() {
+            return Err(MainReason::resource_detail(format!(
+                "current working directory is no longer available ({e}); it may have been deleted \
+                 or regenerated — `cd` to an existing directory (absolute path) and retry"
+            )));
+        }
         // 进程启动时做一次性环境准备：设置 `GXL_OS_SYS` / `GXL_START_ROOT` / `GXL_PRJ_ROOT`。
         // `sys/setting/list.yml` 等路径模板里的 `${GXL_PRJ_ROOT}` 就依赖它，
         // 因此只在此处设置一次，各命令实现里不要再重复设置。

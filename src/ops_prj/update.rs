@@ -1,12 +1,13 @@
-//! 非破坏性更新：把**交付包的内容**覆盖到已导入的系统目录上，现场态一律不碰。
+//! 系统内容同步：把**交付包的内容**覆盖到已导入的系统目录上，现场态一律不碰；
+//! 系统目录缺失时则按包**导入**（补齐被删的系统）。
 //!
-//! 它补的是这条缺口：`prj update` 以前只更新项目 conf（`src/ops_prj/project.rs`），
-//! `prj import`/`reimport` 则是"删了重装" —— 于是"给已交付的系统换个版本"没有安全出路，
-//! 只能靠人手工搬文件。
+//! 它补的是这条缺口：`prj sync` 以前只更新项目 conf（`src/ops_prj/project.rs`），
+//! 而 `prj import`（以及已移除的 `prj reimport`）都是"删了重装" —— 于是"给已交付的系统
+//! 换个版本"没有安全出路，只能靠人手工搬文件。
 //!
-//! 与 `reimport` 的差别就是这个模块存在的全部理由：**不删任何东西**。
-//!   · `sys-prj.yml: preserve:` 命中的路径：不覆盖、不删（身份材料、运行态、客户值…）
-//!   · 包外且**未声明**的存量：也不删（保守；只有 `prj rebuild` 才会动它们）
+//! 这个模块存在的全部理由：**不删任何东西**。
+//!   · `sys-prj.yml: protect:` / `contract:` 命中的路径：不覆盖、不删（身份材料、运行态、客户值…）
+//!   · 包外且**未声明**的存量：也不删（保守）
 //!   · 包内文件：用新版覆盖
 //!
 //! 白名单**就是交付包本身**（包里有什么就覆盖什么）—— 选取逻辑复用 `gops sys package`
@@ -29,28 +30,30 @@ use crate::types::Accessor;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SysContentUpdate {
     pub name: String,
+    /// 目标目录原本不存在 → 整包**导入**（不再逐文件覆盖；各计数保持 0）
+    pub imported: bool,
     /// 目标里原本没有 → 写入
     pub added: usize,
     /// 目标里已有且内容不同 → 覆盖
     pub replaced: usize,
     /// 目标里已有且内容一致 → 没动
     pub unchanged: usize,
-    /// 因命中 `preserve:` 而跳过（**不覆盖、不删**）
-    pub skipped_preserve: usize,
+    /// 因命中 `protect:` 而跳过（**不覆盖、不删**）
+    pub skipped_protect: usize,
     /// 包外且未声明的顶层条目（**不删**，只列给人看）
     pub undeclared: Vec<String>,
 }
 
-/// 覆盖计划：由「包内文件清单 + preserve 模式」算出的纯函数结果（可单测）。
+/// 覆盖计划：由「包内文件清单 + protect 模式」算出的纯函数结果（可单测）。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct OverlayPlan {
     /// 要写到目标里的相对路径（按原顺序）
     pub write: Vec<PathBuf>,
-    /// 因命中 `preserve:` 被跳过的相对路径
+    /// 因命中 `protect:` 被跳过的相对路径
     pub skipped: Vec<PathBuf>,
 }
 
-/// 纯函数：把包内文件分成“要写”与“因 preserve 跳过”。
+/// 纯函数：把包内文件分成“要写”与“因 protect 跳过”。
 pub fn plan_overlay(files: &[PathBuf], patterns: &[glob::Pattern]) -> OverlayPlan {
     let mut plan = OverlayPlan::default();
     for rel in files {
@@ -64,24 +67,28 @@ pub fn plan_overlay(files: &[PathBuf], patterns: &[glob::Pattern]) -> OverlayPla
 }
 
 impl OpsProject {
-    /// 按 `ops-prj.yml` 记录的系统，逐个把包内内容覆盖到 `<项目根>/<系统名>/`。
+    /// 按 `ops-prj.yml` 记录的系统逐个同步：
     ///
-    /// 未导入的系统跳过（提示用 `prj import`），不报错 —— 这个命令的语义是"更新已有的"。
+    /// · 目录**缺失** → 按包**导入**（补齐被删的系统，不再是静默跳过）；
+    /// · 目录**已在** → 把包内内容**非破坏**地覆盖上去（`protect` / `contract` 一律不碰，不删任何东西）。
     pub async fn update_sys_content(
         &self,
         accessor: Accessor,
         options: &DownloadOptions,
     ) -> MainResult<Vec<SysContentUpdate>> {
         let mut reports = Vec::new();
-        let mut targets: Vec<(String, String)> = Vec::new();
-        for sys in self.conf().sys_models() {
-            targets.push((sys.sys().name().clone(), sys.resolved_addr()?));
-        }
 
-        for (name, addr) in targets {
+        for (name, addr) in self.sys_targets()? {
             let target = self.paths().root().join(&name);
             if !target.is_dir() {
-                println!("跳过 {name}：未导入（先 `gops prj import`）");
+                println!("导入缺失的系统 {name} …");
+                self.install_sys_files(&addr, accessor.clone(), options)
+                    .await?;
+                reports.push(SysContentUpdate {
+                    name,
+                    imported: true,
+                    ..Default::default()
+                });
                 continue;
             }
             let report = self
@@ -126,21 +133,21 @@ pub(crate) fn apply_overlay(
         )));
     }
 
-    // 3) preserve：**包内与目标取并集**（保守 —— 任一方声明过就不碰）
-    let mut preserve = load_preserve(&sys_src.join(SYS_PRJ_CONF_FILE_V2))?;
-    for item in load_preserve(&target.join(SYS_PRJ_CONF_FILE_V2))? {
-        if !preserve.contains(&item) {
-            preserve.push(item);
+    // 3) protect：**包内与目标取并集**（保守 —— 任一方声明过就不碰）
+    let mut protect = load_protect(&sys_src.join(SYS_PRJ_CONF_FILE_V2))?;
+    for item in load_protect(&target.join(SYS_PRJ_CONF_FILE_V2))? {
+        if !protect.contains(&item) {
+            protect.push(item);
         }
     }
-    let patterns = compile_path_patterns(&preserve, "preserve")?;
+    let patterns = compile_path_patterns(&protect, "protect")?;
 
     // 4) 覆盖（逐文件；父目录按需创建；权限沿用源文件）
     let files = walk_files(sys_src)?;
     let plan = plan_overlay(&files, &patterns);
     let mut report = SysContentUpdate {
         name: name.to_string(),
-        skipped_preserve: plan.skipped.len(),
+        skipped_protect: plan.skipped.len(),
         ..Default::default()
     };
     for rel in &plan.write {
@@ -161,27 +168,29 @@ pub(crate) fn apply_overlay(
 
     // 5) 包外且未声明的**顶层条目**：只列出来（不删）—— 让人看见 configs/、data-plane-run/
     //    这类"这次没被碰"的东西，正是它们构成了"为什么不能盲删"的理由。
-    report.undeclared = undeclared_top_entries(target, sys_src, &patterns, &preserve)?;
+    report.undeclared = undeclared_top_entries(target, sys_src, &patterns, &protect)?;
 
     print_report(&report);
     Ok(report)
 }
 
-/// 读一份 `sys-prj.yml` 的 `preserve:`；文件不存在时为空。
-pub(crate) fn load_preserve(conf_file: &Path) -> MainResult<Vec<String>> {
+/// 读一份 `sys-prj.yml` 的**保护集**（`protect` ∪ `contract`）；文件不存在时为空。
+///
+/// `contract`（对外契约）语义自足——声明即自动纳入保护，所以这里并起来。
+pub(crate) fn load_protect(conf_file: &Path) -> MainResult<Vec<String>> {
     if !conf_file.exists() {
         return Ok(Vec::new());
     }
     let conf = SysConf::load_conf(conf_file).source_resource()?;
-    Ok(conf.preserve().to_vec())
+    Ok(conf.protection_paths())
 }
 
-/// 目标里"既不在包内、也不在 preserve"的**顶层条目**名（只列一层：够用且不会扫 900M 的目录）。
+/// 目标里"既不在包内、也不在 protect"的**顶层条目**名（只列一层：够用且不会扫 900M 的目录）。
 pub(crate) fn undeclared_top_entries(
     target: &Path,
     sys_src: &Path,
     patterns: &[glob::Pattern],
-    raw_preserve: &[String],
+    raw_protect: &[String],
 ) -> MainResult<Vec<String>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(target).source_resource().with(target)? {
@@ -196,9 +205,9 @@ pub(crate) fn undeclared_top_entries(
             continue;
         }
         let shown = name.to_string_lossy().to_string();
-        // preserve 声明可能比顶层更深（如 `configs/gateway/state/*.pem`）：
+        // protect 声明可能比顶层更深（如 `configs/gateway/state/*.pem`）：
         // 顶层目录出现在任一声明的路径前缀里，就说明它已是现场态，不算"未声明存量"。
-        if raw_preserve.iter().any(|p| declared_under(p, &shown)) {
+        if raw_protect.iter().any(|p| declared_under(p, &shown)) {
             continue;
         }
         // `values` 是导入时建立的客户值符号链接，不是"未声明存量"
@@ -219,8 +228,8 @@ fn declared_under(pattern: &str, top: &str) -> bool {
 
 fn print_report(report: &SysContentUpdate) {
     println!(
-        "更新 {}：新增 {} / 覆盖 {} / 已是最新 {} / 因 preserve 跳过 {}",
-        report.name, report.added, report.replaced, report.unchanged, report.skipped_preserve
+        "更新 {}：新增 {} / 覆盖 {} / 已是最新 {} / 因 protect 跳过 {}",
+        report.name, report.added, report.replaced, report.unchanged, report.skipped_protect
     );
     if !report.undeclared.is_empty() {
         println!(
@@ -252,53 +261,6 @@ pub(crate) fn walk_files(root: &Path) -> MainResult<Vec<PathBuf>> {
             continue;
         }
         out.push(rel.to_path_buf());
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// 列出**最浅一层**匹配 preserve 的条目（相对路径，目录与文件都可能在列）。
-///
-/// 为什么按「最浅匹配项」而不是逐文件：`path_matches` 是**按祖先**匹配的 —— 一个目录命中，
-/// 它的整棵子树都算保留。于是「保留一棵目录」可以整体 `rename` 搬走，**不必进入**它的内部。
-/// 这对那些「部署账号读不了 / 写不了、但必须原样留着」的子树（如网关容器以 uid 999 写的
-/// 运行期目录 `configs/gateway/state/knowledge/`）是决定性的：逐文件搬会在 `rename` 时
-/// 因**父目录不可写**而 `EACCES`（issue：HK 上 `gops prj rebuild` 重建就卡在这里）。
-///
-/// 与 [`walk_files`] 同一套过滤：跳过 `.git` 与顶层的 `values`（客户值链接，不是包内容）。
-pub(crate) fn preserved_entries(
-    root: &Path,
-    patterns: &[glob::Pattern],
-) -> MainResult<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    // 没有 preserve 模式就不必走树：既省 I/O，也避免在“压根不保留”时误入私有子目录。
-    if patterns.is_empty() {
-        return Ok(out);
-    }
-    let mut pending: Vec<PathBuf> = vec![PathBuf::new()];
-    while let Some(rel_dir) = pending.pop() {
-        let dir = root.join(&rel_dir);
-        for entry in std::fs::read_dir(&dir).source_resource().with(&dir)? {
-            let entry = entry.source_resource()?;
-            let name = entry.file_name();
-            // 与 `walk_files` 同一口径：任意深度的 `.git` 都不算包内容。
-            if name == ".git" {
-                continue;
-            }
-            let rel = rel_dir.join(&name);
-            // 顶层 `values` 是客户值链接（导入/重建维护），不是包内容 —— 与 `walk_files` / backup 一致。
-            if rel.components().count() == 1 && name == "values" {
-                continue;
-            }
-            if path_matches(&rel, patterns) {
-                // 命中即**不再下钻**：祖先匹配规则保证子树全部命中，整目录 rename 一下即可。
-                out.push(rel);
-                continue;
-            }
-            if entry.file_type().source_resource()?.is_dir() {
-                pending.push(rel);
-            }
-        }
     }
     out.sort();
     Ok(out)
@@ -374,68 +336,7 @@ mod tests {
 
     fn patterns(items: &[&str]) -> Vec<glob::Pattern> {
         let raw: Vec<String> = items.iter().map(|s| s.to_string()).collect();
-        compile_path_patterns(&raw, "preserve").unwrap()
-    }
-
-    #[test]
-    fn preserved_entries_stop_at_the_shallowest_match() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().join("sys");
-        std::fs::create_dir_all(root.join("configs/gateway/state/knowledge/kbp-x")).unwrap();
-        std::fs::write(
-            root.join("configs/gateway/state/knowledge/kbp-x/catalog.toml"),
-            "x",
-        )
-        .unwrap();
-        std::fs::write(root.join("configs/gateway/wist-gateway.toml"), "x").unwrap();
-        std::fs::write(root.join("app.txt"), "y").unwrap();
-
-        // 裸 `configs` → **整目录一项**，不下钻（容器私有子树不会被逐个列出 → 逐文件 rename 的 EACCES 就此消失）。
-        assert_eq!(
-            preserved_entries(&root, &patterns(&["configs"])).unwrap(),
-            vec![PathBuf::from("configs")]
-        );
-        // 细到文件 → 仍能下钻到该文件（不被目录级短路影响）。
-        assert_eq!(
-            preserved_entries(&root, &patterns(&["configs/gateway/wist-gateway.toml"])).unwrap(),
-            vec![PathBuf::from("configs/gateway/wist-gateway.toml")]
-        );
-        // 没有模式 → 不走树。
-        assert!(preserved_entries(&root, &[]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn preserved_entries_do_not_descend_into_unreadable_subtrees() {
-        // 复现线上事故：容器（别的 uid）写的运行期目录，属主之外谁也进不去（mode 000）。
-        // 裸 `configs` 保留应**整目录搬**、不进入该子树 —— 逐文件遍历会在这里 EACCES。
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().join("sys");
-        let private = root.join("configs/gateway/state/knowledge");
-        std::fs::create_dir_all(&private).unwrap();
-        std::fs::write(private.join("catalog.toml"), "x").unwrap();
-        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-        assert_eq!(
-            preserved_entries(&root, &patterns(&["configs"])).unwrap(),
-            vec![PathBuf::from("configs")]
-        );
-
-        // 复原，好在 TempDir 析构时能清理。
-        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    #[test]
-    fn preserved_entries_skip_git_and_top_level_values() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().join("sys");
-        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
-        std::fs::write(root.join(".git/config"), "x").unwrap();
-        std::os::unix::fs::symlink("../values", root.join("values")).unwrap();
-        std::fs::write(root.join("app.txt"), "y").unwrap();
-
-        let out = preserved_entries(&root, &patterns(&["**"])).unwrap();
-        assert_eq!(out, vec![PathBuf::from("app.txt")]);
+        compile_path_patterns(&raw, "protect").unwrap()
     }
 
     #[test]
@@ -479,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_overlay_covers_package_keeps_preserve_leaves_undeclared() {
+    fn test_apply_overlay_covers_package_keeps_protect_leaves_undeclared() {
         use crate::system::spec::{SysDefine, SysModelSpec};
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -490,7 +391,7 @@ mod tests {
         let sys_src = tmp.path().join("pkg");
         std::fs::write(
             sys_src.join("sys-prj.yml"),
-            "test_envs:\n  dep_root: ''\n  deps: []\npreserve:\n  - configs\n",
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - configs\n",
         )
         .unwrap();
         std::fs::write(sys_src.join("app.txt"), "new").unwrap();
@@ -514,8 +415,8 @@ mod tests {
         assert!(target.join("sys/sys_model.yml").exists());
         assert!(report.added >= 1);
         assert_eq!(report.replaced, 1);
-        // preserve 命中：包里的 configs/default.toml 不覆盖现场值
-        assert_eq!(report.skipped_preserve, 1);
+        // protect 命中：包里的 configs/default.toml 不覆盖现场值
+        assert_eq!(report.skipped_protect, 1);
         assert_eq!(
             std::fs::read_to_string(target.join("configs/default.toml")).unwrap(),
             "site-value"
@@ -625,11 +526,11 @@ mod tests {
     }
 
     #[test]
-    fn test_load_preserve_errors_on_bad_yaml() {
+    fn test_load_protect_errors_on_bad_yaml() {
         let tmp = tempfile::TempDir::new().unwrap();
         let f = tmp.path().join("sys-prj.yml");
-        std::fs::write(&f, "preserve: [oops\n").unwrap();
-        assert!(load_preserve(&f).is_err(), "坏 YAML 不能静默当空声明");
+        std::fs::write(&f, "protect: [oops\n").unwrap();
+        assert!(load_protect(&f).is_err(), "坏 YAML 不能静默当空声明");
     }
 
     #[test]
@@ -654,7 +555,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let sys_src = tmp.path().join("pkg");
         let target = tmp.path().join("site");
-        // 包内有 sys/；目标里另有 configs/（preserve 声明）与 junk/
+        // 包内有 sys/；目标里另有 configs/（protect 声明）与 junk/
         std::fs::create_dir_all(sys_src.join("sys")).unwrap();
         std::fs::write(sys_src.join("sys/sys_model.yml"), "x").unwrap();
         std::fs::create_dir_all(target.join("sys")).unwrap();
@@ -663,9 +564,9 @@ mod tests {
         std::os::unix::fs::symlink("../values/x", target.join("values")).unwrap();
 
         let raw = vec!["configs/gateway/state/*.pem".to_string()];
-        let pats = compile_path_patterns(&raw, "preserve").unwrap();
+        let pats = compile_path_patterns(&raw, "protect").unwrap();
         let out = undeclared_top_entries(&target, &sys_src, &pats, &raw).unwrap();
-        // configs 被 preserve 声明覆盖，values 是客户值链接，sys 在包内 → 只剩 junk
+        // configs 被 protect 声明覆盖，values 是客户值链接，sys 在包内 → 只剩 junk
         assert_eq!(out, vec!["junk".to_string()]);
     }
 
@@ -677,10 +578,10 @@ mod tests {
     }
 
     #[test]
-    fn test_load_preserve_missing_is_empty_and_present_parses() {
+    fn test_load_protect_missing_is_empty_and_present_parses() {
         let tmp = tempfile::TempDir::new().unwrap();
         assert!(
-            load_preserve(&tmp.path().join("nope.yml"))
+            load_protect(&tmp.path().join("nope.yml"))
                 .unwrap()
                 .is_empty()
         );
@@ -688,12 +589,42 @@ mod tests {
         let f = tmp.path().join("sys-prj.yml");
         std::fs::write(
             &f,
-            "test_envs:\n  dep_root: ''\n  deps: []\npreserve:\n  - .env\n  - configs\n",
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - .env\n  - configs\n",
         )
         .unwrap();
         assert_eq!(
-            load_preserve(&f).unwrap(),
+            load_protect(&f).unwrap(),
             vec![".env".to_string(), "configs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_load_protect_reads_legacy_preserve_alias() {
+        // 回到旧名：存量站点 `sys-prj.yml` 里的 `preserve:` 仍要生效
+        // （`prj sync` / `prj upgrade` 都走 `load_protect`）。
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("sys-prj.yml");
+        std::fs::write(
+            &f,
+            "test_envs:\n  dep_root: ''\n  deps: []\npreserve:\n  - .env\n",
+        )
+        .unwrap();
+        assert_eq!(load_protect(&f).unwrap(), vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn test_load_protect_includes_contract() {
+        // `contract` 语义自足：声明即自动纳入保护（升级/重建不碰）。
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("sys-prj.yml");
+        std::fs::write(
+            &f,
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - .env\ncontract:\n  - configs/gateway/public\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_protect(&f).unwrap(),
+            vec![".env".to_string(), "configs/gateway/public".to_string()]
         );
     }
 
@@ -714,7 +645,7 @@ mod tests {
         assert_eq!(report.replaced, 1, "diff.txt 内容不同 → 覆盖");
         assert_eq!(report.unchanged, 1, "same.txt 内容相同 → 不动");
         assert!(report.added >= 2, "sys/ 下的文件是新增：{}", report.added);
-        assert_eq!(report.skipped_preserve, 0);
+        assert_eq!(report.skipped_protect, 0);
         assert_eq!(
             std::fs::read_to_string(target.join("diff.txt")).unwrap(),
             "NEW"
@@ -722,13 +653,13 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_overlay_preserve_is_union_of_package_and_target() {
+    fn test_apply_overlay_protect_is_union_of_package_and_target() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sys_src = tmp.path().join("pkg");
         make_pkg(&sys_src, "web-stack");
         std::fs::write(
             sys_src.join("sys-prj.yml"),
-            "test_envs:\n  dep_root: ''\n  deps: []\npreserve:\n  - configs\n",
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - configs\n",
         )
         .unwrap();
         std::fs::create_dir_all(sys_src.join("configs")).unwrap();
@@ -742,16 +673,13 @@ mod tests {
         std::fs::create_dir_all(target.join("site_only")).unwrap();
         std::fs::write(
             target.join("sys-prj.yml"),
-            "test_envs:\n  dep_root: ''\n  deps: []\npreserve:\n  - site_only\n",
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - site_only\n",
         )
         .unwrap();
         std::fs::write(target.join("configs/pkg.toml"), "site-configs").unwrap();
 
         let report = apply_overlay("web-stack", &sys_src, &target).unwrap();
-        assert_eq!(
-            report.skipped_preserve, 2,
-            "包侧 configs + 目标侧 site_only"
-        );
+        assert_eq!(report.skipped_protect, 2, "包侧 configs + 目标侧 site_only");
         // 两侧现场值都保住
         assert_eq!(
             std::fs::read_to_string(target.join("configs/pkg.toml")).unwrap(),
@@ -779,13 +707,14 @@ mod tests {
         );
     }
 
+    /// 系统目录缺失 → `sync` 会去**取包并导入**（不再静默跳过）；包不可达时就地报错。
     #[tokio::test]
-    async fn test_update_sys_content_skips_unimported_without_fetch() {
+    async fn test_update_sys_content_imports_missing_system() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("prj");
         std::fs::create_dir_all(root.join("_gal")).unwrap();
         std::fs::write(root.join("_gal/work.gxl"), "mod envs {}\nmod main {}\n").unwrap();
-        // addr 指向不存在的本地包：因为系统未导入，应在取包前就跳过
+        // addr 指向不存在的本地包：目录缺失 → 现在会去导入，因而取包失败（而不是被跳过）
         std::fs::write(
             root.join("ops-prj.yml"),
             "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    path: /nonexistent/web-stack-0.1.0.tar.gz\n",
@@ -795,7 +724,13 @@ mod tests {
         let prj = OpsProject::load(&root).unwrap();
         let accessor = crate::accessor::accessor_for_test();
         let opts = DownloadOptions::from((0usize, ValueDict::default()));
-        let reports = prj.update_sys_content(accessor, &opts).await.unwrap();
-        assert!(reports.is_empty(), "未导入 → 跳过，且不应去取包");
+        let err = prj.update_sys_content(accessor, &opts).await.unwrap_err();
+        // 证明“缺失系统”走了取包这条路（包不存在 → 报错），而非旧行为“静默跳过”
+        assert!(
+            err.to_string().to_lowercase().contains("nonexistent") || err.detail().is_some(),
+            "err={err:?}"
+        );
+        // 未落地系统目录
+        assert!(!root.join("web-stack").exists());
     }
 }

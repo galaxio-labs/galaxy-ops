@@ -9,7 +9,7 @@
 //!    实现上，把 `localize`/`pull`/`up`/`status` 交给注入的 [`RuntimeDispatch`]（docker compose /
 //!    gx 在 app 层，本 crate 不认得）。
 //!
-//! 与 `prj update` 的分工：`update` 只覆盖**内容**；本模块在其上补事务边界（备份、拉取、切换、
+//! 与 `prj sync` 的分工：`update` 只覆盖**内容**；本模块在其上补事务边界（备份、拉取、切换、
 //! 健康、回滚），也是「发布态升级」唯一的动词。
 
 use std::path::{Path, PathBuf};
@@ -646,7 +646,7 @@ impl UpgradeRuntime for ProjectRuntime {
 
     async fn backup(&self) -> MainResult<String> {
         let project = OpsProject::load(&self.project_root)?;
-        let report = project.backup(false)?;
+        let report = project.backup()?;
         Ok(report.archive.display().to_string())
     }
 

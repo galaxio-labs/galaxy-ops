@@ -38,10 +38,10 @@ src/ops_prj/
 
 ### `import.rs`
 
-系统导入与重新导入逻辑，对应 `gops prj import` / `gops prj reimport`。
+系统导入逻辑，对应 `gops prj import`；`gops prj sync` 的“补齐缺失系统”复用同一套落盘逻辑。
 
-- `import_sys`：导入一个新系统
-- `reimport`：按 `ops-prj.yml` 记录的 `sys_models` 重新导入系统，保留 `values/` 客户值（适用于“删除了已导入系统目录、但保留了 values/ + ops-prj.yml”的场景）
+- `import_sys`：导入一个新系统（取包 → 铺盘 → 登记 `ops-prj.yml`）
+- `install_sys_files`：取包 → 铺进 `<项目根>/<系统名>/` → 初始化设置值，**不**改 conf（供 `import` / `sync` 复用）
 
 ### `init.rs`
 
@@ -60,8 +60,7 @@ src/ops_prj/
 ```text
 gops prj new
 gops prj import
-gops prj update
-gops prj reimport
+gops prj sync
 ```
 
 ## 输出对象
@@ -71,7 +70,7 @@ gops prj reimport
 ```text
 <ops-project-root>/
 ├── ops-prj.yml       # name + work_envs + sys_models（已导入系统列表）
-├── values/           # 客户值目录（values/<sys>/value.yml 客户覆盖；prj reimport 保留）
+├── values/           # 客户值目录（values/<sys>/value.yml 客户覆盖；prj sync / import 保留）
 ├── version.txt
 └── _gal/
 ```

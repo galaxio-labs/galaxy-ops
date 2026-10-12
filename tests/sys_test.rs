@@ -34,7 +34,9 @@ async fn test_full_flow() -> MainResult<()> {
     ops_proj
         .import_sys(
             accessor.clone(),
-            out_path.display().to_string().as_str(),
+            // `addr` 以**项目根**为基准解析（`gops prj *` 在项目根运行）——这里给相对项目根的路径，
+            // 而不是相对仓库根的 `out_path`（后者只有从仓库根跑才对）。
+            "../../sys-operators/example_sys_x-1.0.0.tar.gz",
             &DownloadOptions::for_test(),
         )
         .await?;
@@ -75,6 +77,65 @@ async fn test_full_flow() -> MainResult<()> {
     sys_proj
         .localize(sys_value_path, LocalizeOptions::new(sys_value_dict))
         .await?;
+
+    // 生成物应带上示例声明（这些目录被 .gitignore，仅在测试运行时生成）：
+    //  - 系统侧 `sys-prj.yml`：现场态（protect / contract / backup）
+    //  - 项目侧 `ops-prj.yml`：备份决策（backup.target）
+    let src_sys_prj = std::fs::read_to_string(
+        PathBuf::from(SYS_OPERATORS_ROOT)
+            .join("example_sys_x")
+            .join("sys-prj.yml"),
+    )
+    .source_resource()?;
+    for key in ["protect:", "contract:", "backup:"] {
+        assert!(
+            src_sys_prj.contains(key),
+            "sys-prj.yml 缺 {key}：\n{src_sys_prj}"
+        );
+    }
+    let ops_prj = std::fs::read_to_string(
+        PathBuf::from(OPS_PRJ_ROOT)
+            .join("obs_prj_x")
+            .join("ops-prj.yml"),
+    )
+    .source_resource()?;
+    assert!(
+        ops_prj.contains("../../sys-operators/"),
+        "ops-prj.yml 的 addr 应相对项目根：\n{ops_prj}"
+    );
+    assert!(
+        ops_prj.contains("backup:"),
+        "ops-prj.yml 缺 backup：\n{ops_prj}"
+    );
+    assert!(
+        ops_prj.contains("target: ./backup"),
+        "ops-prj.yml 的 backup.target 不符：\n{ops_prj}"
+    );
+    assert!(
+        ops_prj.contains("contract:"),
+        "ops-prj.yml 缺 contract：\n{ops_prj}"
+    );
+    assert!(
+        ops_prj.contains("target: ./contract"),
+        "ops-prj.yml 的 contract.target 不符：\n{ops_prj}"
+    );
+
+    // `sync` 补齐缺失系统：删掉刚导入的系统目录，sync 应按包把它重新导入（不再是静默跳过）。
+    let imported_sys = ops_proj.root_local().join("example_sys_x");
+    std::fs::remove_dir_all(&imported_sys).source_resource()?;
+    let reports = ops_proj
+        .update_sys_content(accessor_for_test(), &DownloadOptions::for_test())
+        .await?;
+    assert!(
+        reports
+            .iter()
+            .any(|r| r.name == "example_sys_x" && r.imported),
+        "缺失系统应被导入，reports={reports:?}"
+    );
+    assert!(
+        imported_sys.join("sys/sys_model.yml").exists(),
+        "sync 应把缺失的系统目录按包重新铺回"
+    );
     Ok(())
 }
 async fn make_workins_example() -> MainResult<OpsProject> {
@@ -103,6 +164,17 @@ async fn make_sys_opr_example() -> MainResult<SysOperator> {
     }
     std::fs::create_dir_all(&prj_path).assert("yes");
     sys_opr.save().assert("save dss_prj");
+    // 对外契约内容（site-owned，随示例入库以便演示）：见 docs/design/contract.md。
+    let cfg_dir = prj_path.join("configs");
+    std::fs::create_dir_all(&cfg_dir).assert("mk configs");
+    std::fs::write(
+        cfg_dir.join("public.yml"),
+        "# 对外契约（external contract）：不可重建的公开现场事实。\n\
+         # 见 docs/design/contract.md。它由 `sys-prj.yml: contract` 指到，内容是现场选的、\n\
+         # 从交付包推不出、丢了（连人工）也补不回的东西。\n\
+         public_url: https://example-sys.example.com\n",
+    )
+    .assert("write contract");
     let loaded_sys_opr = SysOperator::load(&prj_path).assert("dss-project");
     let accessor = accessor_for_test();
     loaded_sys_opr
@@ -127,9 +199,18 @@ fn make_sys_operator(prj_path: &Path, name: &str) -> MainResult<SysOperator> {
             Address::from(HttpResource::from(
                 "https://github.com/galaxio-labs/hello-word.git",
             )),
-            PathTemplate::from(prj_path.join("test_res")),
+            PathTemplate::from("test_res"),
         )
         .with_rename("bit-common"),
     );
-    Ok(SysOperator::new(mod_spec, res, prj_path.to_path_buf()))
+    // 示例演示现场态声明：`.env` 是 `sys localize` 产出（不进包 / 升级不碰 / 必收）；
+    // `configs/` 是对外契约（不可重建的公开现场事实）。
+    Ok(
+        SysOperator::new(mod_spec, res, prj_path.to_path_buf()).with_site_state(
+            vec![".env".to_string()],
+            vec![".env".to_string()],
+            vec!["configs".to_string()],
+            vec![".env".to_string()],
+        ),
+    )
 }

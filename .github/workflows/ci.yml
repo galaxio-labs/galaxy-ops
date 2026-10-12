@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, develop, release/*]
+    branches: [main, develop, alpha, beta, release/*]
   pull_request:
-    branches: [main, develop, release/*]
+    branches: [main, develop, alpha, beta, release/*]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -94,6 +95,20 @@ jobs:
             echo "$ldd_result"
             exit 1
           fi
+
+  prj-e2e:
+    name: prj E2E (obs_prj_x)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 脚本自带“重新生成 obs_prj_x + 逐个跑 gops prj 命令”的全流程；
+      # 先构建 gops，避免脚本内打印构建输出。
+      - name: Build gops
+        run: cargo build --bin gops
+      - name: Run `gops prj` E2E against obs_prj_x
+        run: bash example/ops-projects/run-prj-test.sh
 
   coverage:
     name: Code Coverage

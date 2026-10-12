@@ -186,7 +186,7 @@ impl RefUpdateable<()> for ModOperator {
         options: &DownloadOptions,
     ) -> MainResult<()> {
         self.conf
-            .update_local(accessor.clone(), _path, options)
+            .update_local(accessor.clone(), self.root_local(), options)
             .await?;
         self.mod_spec()
             .update_local(accessor, self.root_local(), options)
@@ -242,7 +242,7 @@ pub fn make_mod_prj_testins(prj_path: &Path) -> MainResult<ModOperator> {
     res.push(
         Dependency::new(
             Address::from(HttpResource::from(EXAMPLE_GIT_URL)),
-            PathTemplate::from(prj_path.join("test_res")),
+            PathTemplate::from("test_res"),
         )
         .with_rename("bit-common"),
     );
@@ -316,7 +316,7 @@ pub mod tests {
         res.push(
             Dependency::new(
                 Address::from(LocalPath::from(dep_src.to_str().unwrap())),
-                PathTemplate::from(prj_path.join("test_res")),
+                PathTemplate::from("test_res"),
             )
             .with_rename("bit-common"),
         );

@@ -32,7 +32,8 @@ example/workins-prj
 example/sys-model-prj
 example/sys-operators
 example/mod-operators
-example/ops-projects
+example/ops-projects/*
+!example/ops-projects/run-prj-test.sh
 postgresql
 example/knowlege/web-stack-0.1.0.tar.gz
 tmp/

@@ -1,3 +1,28 @@
 test_envs:
   dep_root: ''
   deps: []
+
+# ── 现场态 / 对外契约 / 备份（示例）────────────────────────────────────
+# 见 docs/design/contract.md、docs/design/prj-backup-restore.md。
+#
+# 本示例里 `.env` 与 `web.conf` 都是 `gops sys localize` 的产出（**可重建**）；
+# `configs/` 是**对外契约**——不可重建的公开现场事实（对外域名 / 端点）。
+# （示例把契约内容随仓库走以便演示；真实部署里它是 site-owned、不在交付包内。）
+
+# 不进交付包（localize 的产出）
+ignore:
+  - .env
+  - web.conf
+
+# 升级 / 重建不覆盖、也不删
+protect:
+  - .env
+  - web.conf
+
+# 对外契约：声明即自动纳入 protect + backup（不必再写第二处）
+contract:
+  - configs
+
+# 备份选取：**必收**的现场态（只表达“丢失的代价”，不触发删除）
+backup:
+  - .env

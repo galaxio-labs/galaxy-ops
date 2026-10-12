@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod conf;
+pub mod contract;
 pub mod diagnose;
 pub mod import;
 pub mod init;

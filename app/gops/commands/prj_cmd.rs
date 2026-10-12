@@ -1,4 +1,4 @@
-use clap::{Args, Parser};
+use clap::{Args, Parser, Subcommand};
 use derive_getters::Getters;
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
@@ -43,37 +43,17 @@ pub struct PrjImportArgs {
 }
 
 #[derive(Debug, Args, Getters)]
-pub struct PrjUpdateArgs {
+pub struct PrjSyncArgs {
     #[clap(flatten)]
     pub debug_log: DebugLogArgs,
     #[clap(flatten)]
     pub force: ForceArgs,
-}
-
-#[derive(Debug, Args, Getters)]
-pub struct PrjReimportArgs {
-    #[clap(flatten)]
-    pub debug_log: DebugLogArgs,
-    #[clap(flatten)]
-    pub force: ForceArgs,
-}
-
-#[derive(Debug, Args, Getters)]
-pub struct PrjRebuildArgs {
-    #[clap(flatten)]
-    pub debug_log: DebugLogArgs,
-    #[clap(flatten)]
-    pub force: ForceArgs,
-    #[arg(help = "只重建该系统（缺省 = ops-prj.yml 里的全部系统）")]
-    pub name: Option<String>,
 }
 
 #[derive(Debug, Args, Getters)]
 pub struct PrjBackupArgs {
     #[clap(flatten)]
     pub debug_log: DebugLogArgs,
-    #[arg(long, help = "连系统声明的 rebuild 档一起收（默认只收 restore 档）")]
-    pub include_rebuild: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -94,6 +74,41 @@ pub struct PrjDiagnoseArgs {
     pub debug_log: DebugLogArgs,
     #[arg(long, help = "将警告视为错误（用于 CI 卡口）")]
     pub strict: bool,
+}
+
+#[derive(Debug, Args, Getters)]
+pub struct PrjContractArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+    #[command(subcommand)]
+    pub cmd: PrjContractCmd,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PrjContractCmd {
+    #[command(
+        about = "导出对外契约 (Export Contract)",
+        long_about = "把本部署的对外契约（`sys-prj.yml: contract` 列出的文件 / 目录）打成归档，\
+                     文件名带日期时间，用于交付 / 迁移 / 存档。"
+    )]
+    Export,
+    #[command(
+        about = "导入对外契约 (Import Contract)",
+        long_about = "从归档把契约灌回本部署（写进 `contract:` 列出的文件），幂等。"
+    )]
+    Import {
+        #[arg(help = "契约归档 (.tar.gz) 的路径")]
+        archive: String,
+    },
+}
+
+impl DfxArgsGetter for PrjContractArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
 }
 
 #[derive(Debug, Args, Getters)]
@@ -147,26 +162,21 @@ pub enum PrjCmd {
     New(PrjNewArgs),
     #[command(about = "导入系统到工程 (Import System to Project)")]
     Import(PrjImportArgs),
-    #[command(about = "维护工程 (Maintain Project)")]
-    Update(PrjUpdateArgs),
     #[command(
-        about = "补装缺失的系统 (Reimport Missing Systems)",
-        long_about = "按 ops-prj.yml 里记录的 sys_models，把**不在场的**系统重新导入。\
-                     已存在的目录一律不动（只补、不删），并在结束时拒绝并指向 `prj update` / `prj rebuild`。\
-                     适用于删除了已导入系统目录、但保留了 values/ + ops-prj.yml 的场景。"
+        about = "同步 / 补齐工程系统 (Sync Project Systems)",
+        alias = "update",
+        long_about = "按 ops-prj.yml 记录的系统逐个同步：**目录缺失的按包导入**（补齐被删的系统），\
+                     **目录已在的**把包内内容**非破坏性**地覆盖到各自 `addr` 指向的版本 —— 仅覆盖**包内**文件，\
+                     `sys-prj.yml` 的 `protect` / `contract` 一律不碰，**不删**任何东西；\
+                     同时刷新项目 `work_envs` 并回写 `ops-prj.yml`。\n\
+                     与 `prj upgrade` 的区别：本命令**不是事务**（无备份、无健康检查、无回滚），\
+                     也不同步运行时（不拉镜像、不切换、不探活）——要一次可回滚的发布升级请用 `gops prj upgrade`。\
+                     （旧名 `update` 仍可用。）"
     )]
-    Reimport(PrjReimportArgs),
-    #[command(
-        about = "重建系统 (Rebuild Systems)",
-        long_about = "重建系统目录：现场态（`sys-prj.yml: preserve`）先搬走、旧目录改名保留、铺新内容、再搬回；\
-                     中途失败回滚。目录不在场的直接导入。**这是唯一会丢“包外未声明内容”的操作**，\
-                     所以不做成默认；只想升级请用 `gops prj update`。\
-                     可选 `<系统名>` 只重建一个，缺省重建 ops-prj.yml 里的全部系统。"
-    )]
-    Rebuild(PrjRebuildArgs),
+    Sync(PrjSyncArgs),
     #[command(
         about = "备份现场态 (Backup Site State)",
-        long_about = "按系统侧 `sys-prj.yml: backup.{restore,rebuild}` 与项目侧 `ops-prj.yml: backup` 的声明，\
+        long_about = "按系统侧 `sys-prj.yml: backup` 与项目侧 `ops-prj.yml: backup` 的声明，\
                      收集现场态到一个归档（含清单 + sha256），并保留最近 `keep` 份。\
                      含私钥/凭据的条目会被点名，请离机保管。"
     )]
@@ -178,6 +188,12 @@ pub enum PrjCmd {
     )]
     Restore(PrjRestoreArgs),
     #[command(
+        about = "对外契约 (Contract)",
+        long_about = "管理对外契约（不可重建的公开现场事实）：导出 / 导入。\
+                     声明在 `sys-prj.yml: contract`（只列文件 / 目录）；内容 site-owned、不在包内。"
+    )]
+    Contract(PrjContractArgs),
+    #[command(
         about = "升级发布态 (Upgrade Deployed Systems)",
         long_about = "对已导入的系统做一次**升级事务**：diagnose → backup → apply（覆盖包内内容）→ \
                      regenerate（sys update + localize）→ pull → up → health。\n\
@@ -185,7 +201,9 @@ pub enum PrjCmd {
                      默认值未定，现阶段**必填**。\n\
                      第 1 版只支持 `kind: docker-compose` 的系统；`--to` 收**版本**（按 ref 的 `addr` 模板 \
                      `{version}` 解析）或**完整地址**（URL / 本机路径）。\n\
-                     只覆盖包内内容并保留现场态（`sys-prj.yml: preserve`）；备份/回滚走 `prj backup`/`restore`。"
+                     只覆盖包内内容并保留现场态（`sys-prj.yml: protect`）；备份/回滚走 `prj backup`/`restore`。\
+                     与 `prj sync` 的区别：本命令是**事务**（含备份 / 重渲 / 拉镜像 / 切换 / 探活，可回滚）；\
+                     只同步磁盘内容用 `gops prj sync`。"
     )]
     Upgrade(PrjUpgradeArgs),
     #[command(
@@ -193,7 +211,7 @@ pub enum PrjCmd {
         alias = "doctor",
         long_about = "检查运维项目的现场态声明与客户值纳管：values/ 是否存在、每个已导入系统是否有值目录、\
                      values/ 是否被 .gitignore 忽略、是否有未提交改动；以及 sys-prj.yml 的\
-                     `ignore ⊆ preserve`、`backup.restore` 是否声明、ops-prj.yml 的 sys_models 是否重名。\
+                     `ignore ⊆ protect`、`backup` 是否声明、ops-prj.yml 的 sys_models 是否重名。\
                      （旧名 `doctor` 仍可用。）"
     )]
     Diagnose(PrjDiagnoseArgs),
@@ -217,25 +235,7 @@ impl DfxArgsGetter for PrjImportArgs {
     }
 }
 
-impl DfxArgsGetter for PrjUpdateArgs {
-    fn debug_level(&self) -> usize {
-        self.debug_log.debug_level()
-    }
-    fn log_setting(&self) -> Option<String> {
-        self.debug_log.log_setting()
-    }
-}
-
-impl DfxArgsGetter for PrjReimportArgs {
-    fn debug_level(&self) -> usize {
-        self.debug_log.debug_level()
-    }
-    fn log_setting(&self) -> Option<String> {
-        self.debug_log.log_setting()
-    }
-}
-
-impl DfxArgsGetter for PrjRebuildArgs {
+impl DfxArgsGetter for PrjSyncArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -382,7 +382,7 @@ impl PrjCommandHandler {
         Ok(())
     }
 
-    pub async fn handle_update(args: PrjUpdateArgs) -> MainResult<()> {
+    pub async fn handle_sync(args: PrjSyncArgs) -> MainResult<()> {
         galaxy_ops::infra::configure_dfx_logging(&args);
 
         let current_dir = std::env::current_dir().source_resource()?;
@@ -390,37 +390,11 @@ impl PrjCommandHandler {
         let prj = load_project_from_cwd(&current_dir)?;
         let accessor = galaxy_ops::accessor::accessor_for_default();
 
-        // 先做**非破坏性内容更新**（包内覆盖、preserve 不动），再更新项目 conf。
+        // 先做内容同步（缺失系统按包导入；已在系统非破坏覆盖，protect 不动），再更新项目 conf。
         prj.update_sys_content(accessor.clone(), &options)
             .await
             .err_conv()?;
         prj.update_local(accessor, &current_dir, &options)
-            .await
-            .err_conv()?;
-        Ok(())
-    }
-
-    pub async fn handle_reimport(args: PrjReimportArgs) -> MainResult<()> {
-        galaxy_ops::infra::configure_dfx_logging(&args);
-
-        let current_dir = std::env::current_dir().source_resource()?;
-        let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
-        let mut prj = load_project_from_cwd(&current_dir)?;
-        let accessor = galaxy_ops::accessor::accessor_for_default();
-
-        prj.reimport(accessor, &options).await.err_conv()?;
-        Ok(())
-    }
-
-    pub async fn handle_rebuild(args: PrjRebuildArgs) -> MainResult<()> {
-        galaxy_ops::infra::configure_dfx_logging(&args);
-
-        let current_dir = std::env::current_dir().source_resource()?;
-        let options = DownloadOptions::from((*args.force.force(), ValueDict::default()));
-        let mut prj = load_project_from_cwd(&current_dir)?;
-        let accessor = galaxy_ops::accessor::accessor_for_default();
-
-        prj.rebuild(args.name().as_deref(), accessor, &options)
             .await
             .err_conv()?;
         Ok(())
@@ -431,7 +405,7 @@ impl PrjCommandHandler {
         let current_dir = std::env::current_dir().source_resource()?;
         let prj = load_project_from_cwd(&current_dir)?;
 
-        let report = prj.backup(*args.include_rebuild()).err_conv()?;
+        let report = prj.backup().err_conv()?;
         println!(
             "备份完成 → {}（{} 项，共 {} 字节）",
             report.archive.display(),
@@ -483,9 +457,11 @@ impl PrjCommandHandler {
                 report.entries.len(),
                 report.entries.join("、")
             );
-            // 备份只收**现场态**，不含交付包内容：目录是被删掉的场景还要把系统铺回来
+            // 备份到底收了什么，由各系统 `sys-prj.yml: backup`（∪ `contract`）**声明**决定——设计上是现场态，
+            // 但**不保证**一定不含交付包内容。所以这里说“备份里没有的”，而不断言“一定没有 sys/”。
             println!(
-                "提示：备份不含交付包内容（sys/ 等）；若系统目录是被删掉的，请再跑 `gops prj import` 或 `gops prj reimport`"
+                "提示：restore 只放回**备份里有的**内容（= 各系统 `sys-prj.yml: backup` 声明命中的路径）。\n\
+                 交付包内容（`sys/` 等）通常不在其中；若系统目录是被删掉的，请再跑 `gops prj sync` 把缺失系统按包铺回来"
             );
         }
         Ok(())
@@ -614,17 +590,40 @@ impl PrjCommandHandler {
         Ok(())
     }
 
+    pub async fn handle_contract(args: PrjContractArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().source_resource()?;
+        let prj = load_project_from_cwd(&current_dir)?;
+
+        match args.cmd() {
+            PrjContractCmd::Export => {
+                let report = prj.contract_export().err_conv()?;
+                println!("契约已导出 → {}", report.archive.display());
+                if report.entries.is_empty() {
+                    println!("提示：没有任何系统声明 `contract:`，归档为空");
+                }
+                for old in &report.pruned {
+                    println!("  清理过期份：{}", old.display());
+                }
+            }
+            PrjContractCmd::Import { archive } => {
+                let report = prj.contract_import(Path::new(archive), false).err_conv()?;
+                println!("契约已导入：{} 项", report.entries.len());
+            }
+        }
+        Ok(())
+    }
+
     pub async fn execute(cmd: PrjCmd) -> MainResult<()> {
         match cmd {
             PrjCmd::New(args) => Self::handle_new(args).await,
             PrjCmd::Import(args) => Self::handle_import(args).await,
-            PrjCmd::Update(args) => Self::handle_update(args).await,
-            PrjCmd::Reimport(args) => Self::handle_reimport(args).await,
-            PrjCmd::Rebuild(args) => Self::handle_rebuild(args).await,
+            PrjCmd::Sync(args) => Self::handle_sync(args).await,
             PrjCmd::Backup(args) => Self::handle_backup(args).await,
             PrjCmd::Restore(args) => Self::handle_restore(args).await,
             PrjCmd::Upgrade(args) => Self::handle_upgrade(args).await,
             PrjCmd::Diagnose(args) => Self::handle_diagnose(args).await,
+            PrjCmd::Contract(args) => Self::handle_contract(args).await,
         }
     }
 }
@@ -637,27 +636,35 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_prj_rebuild_parses_with_and_without_name() {
-        let with = GInsCmd::try_parse_from(["gops", "prj", "rebuild", "web-stack"]).unwrap();
-        match with {
-            GInsCmd::Prj(PrjCmd::Rebuild(a)) => {
-                assert_eq!(a.name().as_deref(), Some("web-stack"))
-            }
-            other => panic!("expected rebuild, got {other:?}"),
+    fn test_prj_contract_parses_export_and_import() {
+        let export = GInsCmd::try_parse_from(["gops", "prj", "contract", "export"]).unwrap();
+        assert!(matches!(export, GInsCmd::Prj(PrjCmd::Contract(_))));
+
+        let import =
+            GInsCmd::try_parse_from(["gops", "prj", "contract", "import", "c.tar.gz"]).unwrap();
+        match import {
+            GInsCmd::Prj(PrjCmd::Contract(a)) => match a.cmd() {
+                PrjContractCmd::Import { archive } => assert_eq!(archive, "c.tar.gz"),
+                other => panic!("expected import, got {other:?}"),
+            },
+            other => panic!("expected contract, got {other:?}"),
         }
 
-        let without = GInsCmd::try_parse_from(["gops", "prj", "rebuild"]).unwrap();
-        match without {
-            GInsCmd::Prj(PrjCmd::Rebuild(a)) => assert!(a.name().is_none()),
-            other => panic!("expected rebuild, got {other:?}"),
-        }
+        // 子命令必填
+        assert!(GInsCmd::try_parse_from(["gops", "prj", "contract"]).is_err());
     }
 
     #[test]
-    fn test_prj_reimport_no_longer_accepts_recreate_flag() {
-        assert!(GInsCmd::try_parse_from(["gops", "prj", "reimport"]).is_ok());
-        // 改名后旧旗标必须被拒（不做隐藏别名，因为从未发布）
-        assert!(GInsCmd::try_parse_from(["gops", "prj", "reimport", "--recreate"]).is_err());
+    fn test_prj_update_is_sync_alias() {
+        // 主名 `sync`；旧名 `update` 仍可用（隐藏别名）。
+        assert!(matches!(
+            GInsCmd::try_parse_from(["gops", "prj", "sync"]).unwrap(),
+            GInsCmd::Prj(PrjCmd::Sync(_))
+        ));
+        assert!(matches!(
+            GInsCmd::try_parse_from(["gops", "prj", "update"]).unwrap(),
+            GInsCmd::Prj(PrjCmd::Sync(_))
+        ));
     }
 
     #[test]

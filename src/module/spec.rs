@@ -78,8 +78,12 @@ impl RefUpdateable<UpdateUnit> for ModuleSpec {
         options: &DownloadOptions,
     ) -> MainResult<UpdateUnit> {
         for (target, node) in &self.targets {
-            node.update_local(accessor.clone(), &path.join(target.to_string()), options)
-                .await?;
+            node.update_local(
+                accessor.clone(),
+                &path.join(MOD_DIR).join(target.to_string()),
+                options,
+            )
+            .await?;
         }
         Ok(UpdateUnit::from(path.to_path_buf()))
     }
@@ -450,6 +454,52 @@ mod tests {
             let setting = k8s.setting().as_ref().expect("k8s setting missing");
             assert!(setting.localize().is_some());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_module_update_resolves_model_depends_under_model_dir() -> MainResult<()> {
+        use crate::accessor::accessor_for_test;
+        use crate::module::depend::{Dependency, DependencySet};
+        use orion_variate::addr::{Address, LocalPath, types::PathTemplate};
+        use orion_variate::update::DownloadOptions;
+
+        let tmp = TempDir::new().source_resource()?;
+        let module_root = tmp.path().join("demo_mod");
+        std::fs::create_dir_all(&module_root).source_resource()?;
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).source_resource()?;
+        std::fs::write(src.join("a.txt"), "x").source_resource()?;
+
+        // 给 host 模型注入一份 depends，验证它落在 `<模块根>/mod/<模型>` 下。
+        let model = ModelSTD::x86_ubt22_host();
+        let mut spec = ModuleSpec::make_new("demo")?;
+        let mut deps = DependencySet::default();
+        deps.push(Dependency::new(
+            Address::from(LocalPath::from(src.to_str().unwrap())),
+            PathTemplate::from("payload"),
+        ));
+        let op = spec
+            .targets
+            .get(&model)
+            .expect("host target missing")
+            .clone()
+            .with_depends(deps);
+        spec.targets.insert(model.clone(), op);
+
+        spec.update_local(
+            accessor_for_test(),
+            &module_root,
+            &DownloadOptions::default(),
+        )
+        .await?;
+
+        let model_dir = module_root.join(MOD_DIR).join(model.to_string());
+        assert!(
+            model_dir.join("payload").exists(),
+            "model dependency should land under {}",
+            model_dir.display()
+        );
         Ok(())
     }
 }

@@ -1,0 +1,5 @@
+# 对外契约（external contract）：不可重建的公开现场事实。
+#
+# 见 docs/design/contract.md。它由 `sys-prj.yml: contract` 指到，内容是现场选的、
+# 从交付包推不出、丢了（连人工）也补不回的东西——本示例给 nginx 服务一个对外访问地址。
+public_url: https://demo.example.com

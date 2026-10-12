@@ -46,9 +46,9 @@ pub fn pack_system(root: &Path, out: &Path, use_git: bool, ignore: &[String]) ->
 }
 
 /// 编译 ignore glob（去空白、去前导 `./`、去首尾 `/`；忽略空串）。
-/// 编译一组路径模式（`sys-prj.yml` 的 `ignore:` / `preserve:` 等）为 glob。
+/// 编译一组路径模式（`sys-prj.yml` 的 `ignore:` / `protect:` 等）为 glob。
 ///
-/// `what` 只用于报错文案（如 `ignore` / `preserve`），让用户知道是哪一节写错了。
+/// `what` 只用于报错文案（如 `ignore` / `protect`），让用户知道是哪一节写错了。
 ///
 /// 归一化常见 gitignore 写法：`/build`、`./artifacts/` 等应等价于 `build`、`artifacts`。
 /// 不归一化的话，glob 会把前导 `/`、`./` 当作字面量，模式静默失效。
@@ -69,7 +69,7 @@ pub(crate) fn compile_path_patterns(raw: &[String], what: &str) -> MainResult<Ve
 }
 
 /// 归一化单条路径模式：去空白、去前导 `./`、去首尾 `/`；空串返回 `None`。
-/// 供 `compile_path_patterns` 与 `prj diagnose`（比对 `ignore` / `preserve` / `backup`）共用，
+/// 供 `compile_path_patterns` 与 `prj diagnose`（比对 `ignore` / `protect` / `backup`）共用，
 /// 避免两处归一化规则分叉。
 pub(crate) fn normalize_path_pattern(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -85,7 +85,7 @@ pub(crate) fn normalize_path_pattern(raw: &str) -> Option<String> {
 /// `rel` 是否命中任一模式（匹配文件自身**或**其任一祖先目录，类 gitignore 的目录排除）。
 ///
 /// 注意它返回的是“命中”，而不是“被忽略” —— 同一个判定既用于打包时的 `ignore`，
-/// 也用于升级时的 `preserve`（后者是“不覆盖”，不是“不打包”），所以不能叫 `is_ignored`。
+/// 也用于升级时的 `protect`（后者是“不覆盖”，不是“不打包”），所以不能叫 `is_ignored`。
 pub(crate) fn path_matches(rel: &Path, patterns: &[glob::Pattern]) -> bool {
     let opts = glob::MatchOptions {
         // `*` 不跨 `/`（需显式用 `**`），贴近 gitignore 直觉

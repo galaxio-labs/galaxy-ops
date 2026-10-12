@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | `prj sync` | 按 `addr` 重新取包 → overlay 到已导入系统；命中 `protect` 跳过、包外未声明不删 | `src/ops_prj/update.rs:71-109`（`update_sys_content` / `overlay_one_system`）、`apply_overlay:115` |
 | `prj backup` / `prj restore` | 现场态归档（清单 + sha256 + `keep`）/ 合并回现场 | `src/ops_prj/backup.rs` |
-| `prj diagnose` | `ignore ⊆ protect`、`values/` 纳管、`sys_models` 重名 | `src/ops_prj/diagnose.rs:250` |
+| `prj diagnose` | `values/` 纳管、`sys_models` 重名、各声明**自身**齐备（如 `contract:` 是否在场；不跨声明推理） | `src/ops_prj/diagnose.rs:250` |
 | `sys update` / `sys localize` | 解析 vars → `merged_vars.yml`；渲染 `.env` + 模板，并跑系统自己的 `gx run localize` 流程 | `README.md`「发布态」 |
 | `gops run` | `download/install/uninstall/start/stop/status/diagnose` → `docker compose pull/create/down/up -d/stop/ps/config` | `app/gops/commands/run_cmd.rs:48-119`、`compose_subcommand:221-232` |
 | `deliver.lock` / `sys check` | 版本与值指纹 / 值改了没 `localize` 的漂移卡口 | `gops sys package`、`gops sys check` |

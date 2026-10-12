@@ -203,10 +203,11 @@ fn make_sys_operator(prj_path: &Path, name: &str) -> MainResult<SysOperator> {
         )
         .with_rename("bit-common"),
     );
-    // 示例演示现场态声明：`.env` 是 `sys localize` 产出（不进包 / 升级不碰 / 必收）；
-    // `configs/` 是对外契约（不可重建的公开现场事实）。
+    // 示例演示现场态声明：`.env` 是 `sys localize` 产出（`pkg_exclude` 不进包 / `protect` 升级不碰 / `backup` 归档）；
+    // `configs/` 是对外契约（不可重建的公开现场事实，只走 `prj contract export/import`）。
     Ok(
         SysOperator::new(mod_spec, res, prj_path.to_path_buf()).with_site_state(
+            vec![],
             vec![".env".to_string()],
             vec![".env".to_string()],
             vec!["configs".to_string()],

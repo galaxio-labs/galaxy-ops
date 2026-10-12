@@ -5,6 +5,29 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.3.1] - 2026-10-12
+
+### 变更
+
+- **现场态声明彻底解耦**：`sys-prj.yml` 的 `pkg_include` / `pkg_exclude` / `protect` / `contract` / `backup`
+  五个声明**互相独立**，各由各自的命令消费，**不做任何跨声明的推导 / 覆盖 / 交叠判断**：
+  - `pkg_include` / `pkg_exclude`：只服务 `gops sys package`（额外进包 / 不进包；相交时 exclude 优先）；
+  - `protect`：只服务 `gops sys update` / `prj sync` / `prj upgrade`（升级不碰）；
+  - `backup`：只服务 `gops prj backup` / `restore`；
+  - `contract`：只服务 `gops prj contract export` / `import`。
+  随之移除 `SysConf::protection_paths()`（`protect ∪ contract`）、`prj sync` 里对 `contract` 的并入，
+  以及 `diagnose` 的全部跨声明检查（`contract.overlap`、`backup.missing`、`backup.protect.uncovered`、
+  `protect.covers_ignore` / `protect.covers_pkg_exclude`）。`prj diagnose` 只保留各声明**自身**的检查。
+- **`sys-prj.yml` 的 `ignore:` 更名为 `pkg_exclude:`**（旧名 `ignore` 仍可读，`#[serde(alias)]`）：
+  该节只表达“不进交付包”，改名为名实相符；`gops sys package` 的排除即取此节。
+- **`sys-prj.yml` 新增 `pkg_include:`**：在默认（git 入库文件）或 `--full`（整目录）的**基准集之外**
+  额外把命中它的路径纳入交付包 —— 用于让**未被 git 跟踪**的生成物 / 制品随包走（可覆盖 `.gitignore`）。
+  `pkg_exclude`（排除）**优先于** `pkg_include`（相交时以排除为准）。
+- **`contract` 独立于 `protect` / `backup` / 打包**：契约（`sys-prj.yml: contract`）**不**自动纳入 `protect`，
+  也**不**自动进 `prj backup`、**不**自动排除出交付包 —— 契约只走**独立归档**
+  （`gops prj contract export` / `import`），安全要求与备份频率都和常规现场态不同。
+  文档同步更正：此前声称的「声明即自动保护 / 不进包」均已删除（不引入任何隐式逻辑）。
+
 ## [2.3.0] - 2026-10-12
 
 ### 新增功能

@@ -242,12 +242,11 @@ impl DiagnoseRequest {
     }
 }
 
-/// 检查运维项目的现场态声明与客户值纳管情况。
+/// 检查运维项目的客户值纳管与各声明自身的完整性。
 ///
-/// 两件事：
 /// 1. 客户值（`values/`）是否已被版本控制纳管（存在、每系统有值目录、未被 `.gitignore`、无未提交改动）；
-/// 2. 现场态声明是否自洽：`sys-prj.yml` 的 `ignore ⊆ protect`、`backup` 是否声明、
-///    `ops-prj.yml` 的 `sys_models` 是否重名。
+/// 2. `ops-prj.yml` 的 `sys_models` 是否重名；
+/// 3. 每个系统的 `contract:` 声明是否齐备（不在跨声明间做任何关系推理）。
 pub fn project_diagnose(root: &Path, req: &DiagnoseRequest) -> MainResult<DiagnoseReport> {
     let mut report = DiagnoseReport::default();
 
@@ -328,14 +327,14 @@ pub fn project_diagnose(root: &Path, req: &DiagnoseRequest) -> MainResult<Diagno
         );
     }
 
-    // 4) 逐系统的现场态声明自洽（仅在系统目录已导入时）
+    // 4) 逐系统：只查 `contract:` 自身齐备（各声明**互相独立**，不做跨声明推理）
     for sys_name in &names {
         let conf_file = root.join(sys_name).join(SYS_PRJ_CONF_FILE_V2);
         if !conf_file.exists() {
             continue;
         }
         let conf = SysConf::load_conf(&conf_file).source_resource()?;
-        check_sys_conf(sys_name, root, &conf, &mut report);
+        check_contract(sys_name, root, &conf, &mut report);
     }
 
     // 5) git 提交检查（仅在 git work tree 内）
@@ -369,73 +368,8 @@ pub fn project_diagnose(root: &Path, req: &DiagnoseRequest) -> MainResult<Diagno
     Ok(report)
 }
 
-/// 单个系统 `sys-prj.yml` 的自洽检查。
-fn check_sys_conf(sys_name: &str, root: &Path, conf: &SysConf, report: &mut DiagnoseReport) {
-    // 保护集 = protect ∪ contract（contract 语义自足：声明即自动纳入保护）。
-    // ignore ⊆ protect：不进包的按定义就不是包内容，升级必须不动。
-    // 判定放宽到前缀：`ignore: configs/foo` 被 `protect: configs` 覆盖也算合。
-    let protect: Vec<String> = conf
-        .protection_paths()
-        .iter()
-        .filter_map(|p| normalize_path_pattern(p))
-        .collect();
-    let uncovered: Vec<String> = conf
-        .ignore()
-        .iter()
-        .filter_map(|p| normalize_path_pattern(p))
-        .filter(|ign| {
-            !protect
-                .iter()
-                .any(|p| p == ign || ign.starts_with(&format!("{p}/")))
-        })
-        .collect();
-    if !uncovered.is_empty() {
-        report.warn(
-            "protect.covers_ignore",
-            format!("系统 `{sys_name}`：ignore 未全部被 protect 覆盖"),
-            uncovered.join("、"),
-        );
-        report.hint_last("不进包的东西升级时也不应被覆盖，建议补进 protect");
-    }
-
-    // 声明了保护集（有现场态）却没声明备份选取：丢了要重装/换身份，却无法从备份还原。
-    // 没声明保护集的系统没有现场态要保护，这里不报（避免噪音）。
-    // 备份选取 = backup ∪ contract（contract **必收**），所以有 contract 就不会误报。
-    let backup_effective = conf.backup_paths();
-    if !protect.is_empty() && backup_effective.is_empty() {
-        report.warn(
-            "backup.missing",
-            format!("系统 `{sys_name}`：声明了 protect 但未声明 backup"),
-            "",
-        );
-        report.hint_last("现场目录丢失后，身份材料/状态库无法从备份还原");
-    } else if !backup_effective.is_empty() {
-        // 保护集里“不在备份选取里”的路径：**不是问题**（那些本来就该重建），只作提示。
-        let all: Vec<String> = backup_effective
-            .iter()
-            .filter_map(|p| normalize_path_pattern(p))
-            .collect();
-        let not_covered: Vec<String> = protect
-            .iter()
-            .filter(|p| p.as_str() != "values")
-            .filter(|p| !all.iter().any(|b| covered_by(p, b)))
-            .cloned()
-            .collect();
-        if !not_covered.is_empty() {
-            report.ok(
-                "backup.protect.uncovered",
-                format!("系统 `{sys_name}`：以下 protect 未纳入备份"),
-                not_covered.join("、"),
-            );
-            report.hint_last("丢失后只能重建；若不可接受，请加入 backup");
-        }
-    }
-
-    check_contract(sys_name, root, conf, report);
-}
-
-/// 对外契约（`contract:`）的**自身**检查。不涉及与 `ignore`/`protect`/`backup` 的优先级——
-/// 契约语义自足，只查：① 声明了但路径不在场（齐备）；② 与其它声明交叠（声明错误）。
+/// 对外契约（`contract:`）的**自身**检查：声明了但路径不在场（齐备）。
+/// 各声明互相独立，这里**不**与 `pkg_include`/`pkg_exclude`/`protect`/`backup` 做任何交叠判断。
 fn check_contract(sys_name: &str, root: &Path, conf: &SysConf, report: &mut DiagnoseReport) {
     let contract: Vec<String> = conf
         .contract()
@@ -446,7 +380,7 @@ fn check_contract(sys_name: &str, root: &Path, conf: &SysConf, report: &mut Diag
         return;
     }
 
-    // ① 齐备：契约路径的**最长字面前缀**应在场（契约条目可以是 glob）。
+    // 齐备：契约路径的**最长字面前缀**应在场（契约条目可以是 glob）。
     let sys_dir = root.join(sys_name);
     let mut missing: Vec<String> = contract
         .iter()
@@ -468,39 +402,6 @@ fn check_contract(sys_name: &str, root: &Path, conf: &SysConf, report: &mut Diag
             "契约是不可重建的现场事实，缺失可能意味着丢过；用 `prj contract import` 恢复",
         );
     }
-
-    // ② 不交叠：一个路径（含父/子目录）只应写在一处。交叠当**声明错误**，不用优先级解决。
-    let mut others: Vec<(&str, String)> = Vec::new();
-    for p in conf.ignore() {
-        others.push(("ignore", p.clone()));
-    }
-    for p in conf.protect() {
-        others.push(("protect", p.clone()));
-    }
-    for p in conf.backup() {
-        others.push(("backup", p.clone()));
-    }
-    let mut overlaps: Vec<String> = Vec::new();
-    for c in &contract {
-        for (name, other) in &others {
-            let Some(on) = normalize_path_pattern(other) else {
-                continue;
-            };
-            if covered_by(c, &on) {
-                overlaps.push(format!("`{c}`（contract）↔ `{other}`（{name}）"));
-            }
-        }
-    }
-    if !overlaps.is_empty() {
-        overlaps.sort();
-        overlaps.dedup();
-        report.warn(
-            "contract.overlap",
-            format!("系统 `{sys_name}`：contract 与其它声明交叠"),
-            overlaps.join("\n       "),
-        );
-        report.hint_last("每个路径只写一处；contract 语义自足，不必再写进 ignore/protect/backup");
-    }
 }
 
 /// 取 glob 模式的最长**字面前缀**（到第一个含 `*`/`?`/`[` 的路径分量为止）。
@@ -514,12 +415,6 @@ fn literal_prefix(pattern: &str) -> String {
         parts.push(seg);
     }
     parts.join("/")
-}
-
-/// `protect` 模式 `p` 是否被备份模式 `b` 覆盖（任一方向的前缀/自身包含即可）。
-/// 只做**路径前缀**判断，不做 glob 展开 —— 目的是提示，不是精确证明。
-fn covered_by(p: &str, b: &str) -> bool {
-    p == b || b.starts_with(&format!("{p}/")) || p.starts_with(&format!("{b}/"))
 }
 
 fn git_cmd(root: &Path) -> Command {
@@ -642,23 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn test_diagnose_reports_contract_overlap_as_declaration_error() {
-        test_init();
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_project(root, ONE_SYS);
-        // contract 与 protect 交叠：一个路径只应写在一处
-        sys_prj(
-            root,
-            "web-stack",
-            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - configs\ncontract:\n  - configs/gateway/public\n",
-        );
-
-        let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
-        assert!(codes(&report).contains(&"contract.overlap"));
-    }
-
-    #[test]
     fn test_diagnose_contract_present_omits_missing() {
         test_init();
         let tmp = TempDir::new().unwrap();
@@ -691,38 +569,6 @@ mod tests {
 
         let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
         assert!(!codes(&report).contains(&"contract.missing"));
-    }
-
-    #[test]
-    fn test_diagnose_contract_overlap_with_backup() {
-        test_init();
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_project(root, ONE_SYS);
-        sys_prj(
-            root,
-            "web-stack",
-            "test_envs:\n  dep_root: ''\n  deps: []\ncontract:\n  - configs/gateway/public\nbackup:\n  - configs/gateway/public\n",
-        );
-
-        let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
-        assert!(codes(&report).contains(&"contract.overlap"));
-    }
-
-    #[test]
-    fn test_diagnose_contract_unrelated_declarations_do_not_overlap() {
-        test_init();
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_project(root, ONE_SYS);
-        sys_prj(
-            root,
-            "web-stack",
-            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - .env\ncontract:\n  - configs/gateway/public\n",
-        );
-
-        let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
-        assert!(!codes(&report).contains(&"contract.overlap"));
     }
 
     #[test]
@@ -885,96 +731,6 @@ mod tests {
     }
 
     #[test]
-    fn test_diagnose_checks_protect_covers_ignore() {
-        test_init();
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_project(root, ONE_SYS);
-        // ignore 里有 configs 但 protect 没有 → 警告
-        sys_prj(
-            root,
-            "web-stack",
-            "test_envs:\n  dep_root: ''\n  deps: []\nignore:\n  - configs\nprotect:\n  - .env\n",
-        );
-
-        let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
-        let codes = codes(&report);
-        assert!(codes.contains(&"protect.covers_ignore"), "codes: {codes:?}");
-        assert!(codes.contains(&"backup.missing"), "codes: {codes:?}");
-        // 都只是警告，不算失败
-        assert!(report.is_ok());
-    }
-
-    #[test]
-    fn test_diagnose_protect_prefix_covers_deeper_ignore() {
-        test_init();
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_project(root, ONE_SYS);
-        // protect 覆盖了更深的 ignore 项 → 不应报 covers_ignore
-        sys_prj(
-            root,
-            "web-stack",
-            "test_envs:\n  dep_root: ''\n  deps: []\nignore:\n  - configs/foo\nprotect:\n  - configs\nbackup:\n  - configs/*.pem\n",
-        );
-
-        let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
-        assert!(
-            !codes(&report).contains(&"protect.covers_ignore"),
-            "codes: {:?}",
-            codes(&report)
-        );
-    }
-
-    #[test]
-    fn test_diagnose_quiet_when_protect_covers_ignore_and_backup_declared() {
-        test_init();
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_project(root, ONE_SYS);
-        sys_prj(
-            root,
-            "web-stack",
-            "test_envs:\n  dep_root: ''\n  deps: []\nignore:\n  - configs\nprotect:\n  - configs\nbackup:\n  - configs/state/*.pem\n",
-        );
-
-        let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
-        let codes = codes(&report);
-        assert!(
-            !codes.contains(&"protect.covers_ignore"),
-            "codes: {codes:?}"
-        );
-        assert!(!codes.contains(&"backup.missing"), "codes: {codes:?}");
-    }
-
-    #[test]
-    fn test_diagnose_reports_protect_not_covered_by_backup() {
-        test_init();
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_project(root, ONE_SYS);
-        sys_prj(
-            root,
-            "web-stack",
-            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - configs\n  - runtime\nbackup:\n  - configs/state/*.pem\n",
-        );
-
-        let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
-        let it = item(&report, "backup.protect.uncovered");
-        // 只是提示（不是失败）：runtime 丢了大不了重建
-        assert_eq!(it.status(), CheckStatus::Ok);
-        assert!(
-            it.detail().unwrap_or_default().contains("runtime"),
-            "detail={:?}",
-            it.detail()
-        );
-        assert!(it.hint().is_some());
-        // 声明了 backup → 不该再报 missing
-        assert!(!codes(&report).contains(&"backup.missing"));
-        assert!(report.is_ok());
-    }
-
-    #[test]
     fn test_diagnose_notes_non_git_project() {
         test_init();
         let tmp = TempDir::new().unwrap();
@@ -986,17 +742,6 @@ mod tests {
         }
         let report = project_diagnose(root, &DiagnoseRequest::new(false)).assert();
         assert_eq!(item(&report, "git.none").status(), CheckStatus::Ok);
-    }
-
-    #[test]
-    fn test_covered_by_prefix() {
-        assert!(covered_by("configs", "configs/gateway/state/*.pem"));
-        assert!(covered_by(
-            "configs/gateway/state/wist-gateway-store.db",
-            "configs"
-        ));
-        assert!(covered_by("packages", "packages"));
-        assert!(!covered_by("configs", "data-plane-run"));
     }
 
     #[test]

@@ -9,20 +9,24 @@ test_envs:
 # `configs/` 是**对外契约**——不可重建的公开现场事实（对外域名 / 端点）。
 # （示例把契约内容随仓库走以便演示；真实部署里它是 site-owned、不在交付包内。）
 
-# 不进交付包（localize 的产出）
-ignore:
+# 不进交付包（localize 的产出）；旧名 `ignore`
+pkg_exclude:
   - .env
   - web.conf
+
+# 额外纳入（默认模式补“未被 git 跟踪”的生成物；pkg_exclude 优先）——本示例不启用
+# pkg_include:
+#   - artifacts/app.bin
 
 # 升级 / 重建不覆盖、也不删
 protect:
   - .env
   - web.conf
 
-# 对外契约：声明即自动纳入 protect + backup（不必再写第二处）
+# 对外契约：**独立**声明，只由 `prj contract export/import` 处理；与 protect / backup / 打包**互不影响**
 contract:
   - configs
 
-# 备份选取：**必收**的现场态（只表达“丢失的代价”，不触发删除）
+# 备份选取：只有 `prj backup` 收的现场态（只表达“丢失的代价”，不触发删除）
 backup:
   - .env

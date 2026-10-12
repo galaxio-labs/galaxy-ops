@@ -162,7 +162,7 @@ System（共享定义）              Ops Project（客户差异）
 
 ```text
 knowlege/docker-compose/
-├── sys-prj.yml              # 系统根配置：test_envs / ignore / protect / contract / backup
+├── sys-prj.yml              # 系统根配置：test_envs / pkg_include / pkg_exclude / protect / contract / backup
 ├── version.txt
 ├── _gal/
 │   └── work.gxl             # 可选：定义 localize 阶段流程（扩展点），见下
@@ -181,7 +181,7 @@ knowlege/docker-compose/
 - `_gal/work.gxl`：**可选**。这里定义了一个 `localize` 流程做**阶段扩展点**验证（见下）；不定义也行，缺了它纯 compose 系统照样跑
 - **没有 `sys/mod_list.yml`、`sys/workflows/`、`sys/setting/list.yml`**：纯 docker-compose 系统不依赖 GXL / gx（`_gal/work.gxl` 只用于可选的阶段流程），这些缺失时分别按空处理
 - `sys_model.yml` 的 `name`（`web-stack`）是 gops 的**系统名**（决定交付包名 `web-stack-0.1.0.tar.gz`）；docker 的项目名则取自**系统根目录名**（`docker-compose`）——两者用途不同，不必一致
-- `sys-prj.yml` 演示现场态声明：`ignore`（不进包：localize 的产出 `.env`/`web.conf`）、`protect`（升级不碰）、`contract`（对外契约 `configs/`：**声明即自动**纳入 `protect` + `backup`）、`backup`（**必收**的现场态，如 `.env`）。见 [contract 设计](../../docs/design/contract.md)
+- `sys-prj.yml` 演示现场态声明：`pkg_exclude`（不进包：localize 的产出 `.env`/`web.conf`；旧名 `ignore`）、`pkg_include`（额外纳入未被 git 跟踪的生成物；默认模式，exclude 优先）、`protect`（升级不碰）、`contract`（对外契约 `configs/`：**独立**声明，只走 `prj contract export`/`import`，与 protect/backup/打包**互不影响**）、`backup`（只有 `prj backup` 收的现场态，如 `.env`）。见 [contract 设计](../../docs/design/contract.md)
 
 直接体验（含客户化；`values/value.yml` 已内置一份只写差异的覆盖样例）：
 

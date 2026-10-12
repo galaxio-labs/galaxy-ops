@@ -53,7 +53,7 @@ gops sys diff --json    # 机器可读
 
 - **默认只打 git 入库文件**：自动排除 `sys/*/mods/`、`**/local`、`.env` 等产物——适合入库 / 交付源码。
 - **`--full`**（旧名 `--no-git` 保留为隐藏别名）：打当前目录全部，含制品与本地化产物——适合**隔离网络**的一体化交付。
-- **`sys-prj.yml` 支持 `ignore:` 节**：两种模式都生效，由系统自己声明要排除什么。
+- **`sys-prj.yml` 支持 `pkg_exclude:` 节**（旧名 `ignore`）：两种模式都生效，由系统自己声明要排除什么；另有 `pkg_include:` 用于在基准集之外额外补入**未被 git 跟踪**的文件（默认模式，`pkg_exclude` 优先）。
 
 ### 6. `gops self update`：自升级闭环
 
@@ -83,10 +83,10 @@ gops self skill install --source galaxio-labs/gx-skills   # 也可装 gx 的 ski
      各自 `addr` 指向的版本 + 刷新项目 `work_envs`），只换名字以免与 `gops prj upgrade`
      （事务式发布升级：含备份 / 回滚 / 探活）混淆；旧名 `update` 保留为**隐藏别名**，脚本不改也能跑。
    - （2.2.x，**breaking**）**`gops prj reimport` 已移除**：其「补齐缺失系统」的职责已并入 `gops prj sync`
-     —— sync 现在会**导入目录缺失的系统**、对已在的系统做非破坏覆盖（`protect` / `contract` 不碰、不删任何东西）。
+     —— sync 现在会**导入目录缺失的系统**、对已在的系统做非破坏覆盖（`protect` 不碰、不删任何东西）。
      脚本里的 `gops prj reimport` 直接改用 `gops prj sync` 即可。
    - （2.2.x，**breaking**）**`gops prj rebuild` 已移除**：它曾用于连**包外未声明内容**一起清掉的
-     「彻底重建」，但现场态声明（`protect` / `contract` / `backup`）已覆盖保留与还原诉求。改用
+     「彻底重建」，但现场态声明（`protect` / `backup`）已覆盖保留与还原诉求（`contract` 另走独立归档）。改用
      `gops prj sync` —— 它**不删**包外未声明内容。
 2. **迁移存量系统**：在每个系统目录跑一次 `gops sys update`，它会（幂等）：
 

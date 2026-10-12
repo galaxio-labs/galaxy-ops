@@ -167,7 +167,7 @@ pub enum PrjCmd {
         alias = "update",
         long_about = "按 ops-prj.yml 记录的系统逐个同步：**目录缺失的按包导入**（补齐被删的系统），\
                      **目录已在的**把包内内容**非破坏性**地覆盖到各自 `addr` 指向的版本 —— 仅覆盖**包内**文件，\
-                     `sys-prj.yml` 的 `protect` / `contract` 一律不碰，**不删**任何东西；\
+                     `sys-prj.yml` 的 `protect` 一律不碰，**不删**任何东西；\
                      同时刷新项目 `work_envs` 并回写 `ops-prj.yml`。\n\
                      与 `prj upgrade` 的区别：本命令**不是事务**（无备份、无健康检查、无回滚），\
                      也不同步运行时（不拉镜像、不切换、不探活）——要一次可回滚的发布升级请用 `gops prj upgrade`。\
@@ -190,7 +190,7 @@ pub enum PrjCmd {
     #[command(
         about = "对外契约 (Contract)",
         long_about = "管理对外契约（不可重建的公开现场事实）：导出 / 导入。\
-                     声明在 `sys-prj.yml: contract`（只列文件 / 目录）；内容 site-owned、不在包内。"
+                     声明在 `sys-prj.yml: contract`（只列文件 / 目录）；契约内容是 site-owned 的现场事实。"
     )]
     Contract(PrjContractArgs),
     #[command(
@@ -210,8 +210,10 @@ pub enum PrjCmd {
         about = "诊断工程现场态 (Diagnose Project)",
         alias = "doctor",
         long_about = "检查运维项目的现场态声明与客户值纳管：values/ 是否存在、每个已导入系统是否有值目录、\
-                     values/ 是否被 .gitignore 忽略、是否有未提交改动；以及 sys-prj.yml 的\
-                     `ignore ⊆ protect`、`backup` 是否声明、ops-prj.yml 的 sys_models 是否重名。\
+                     values/ 是否被 .gitignore 忽略、是否有未提交改动；sys-prj.yml 的 `contract:` 是否齐备；\
+                     ops-prj.yml 的 sys_models 是否重名。\
+                     只做各声明**自身**的检查，不在 `pkg_include`/`pkg_exclude`/`protect`/`backup`/`contract`\
+                     之间做任何跨声明推理。\
                      （旧名 `doctor` 仍可用。）"
     )]
     Diagnose(PrjDiagnoseArgs),
@@ -457,11 +459,12 @@ impl PrjCommandHandler {
                 report.entries.len(),
                 report.entries.join("、")
             );
-            // 备份到底收了什么，由各系统 `sys-prj.yml: backup`（∪ `contract`）**声明**决定——设计上是现场态，
+            // 备份到底收了什么，由各系统 `sys-prj.yml: backup` **声明**决定——设计上是现场态，
             // 但**不保证**一定不含交付包内容。所以这里说“备份里没有的”，而不断言“一定没有 sys/”。
             println!(
                 "提示：restore 只放回**备份里有的**内容（= 各系统 `sys-prj.yml: backup` 声明命中的路径）。\n\
-                 交付包内容（`sys/` 等）通常不在其中；若系统目录是被删掉的，请再跑 `gops prj sync` 把缺失系统按包铺回来"
+                 交付包内容（`sys/` 等）与 `contract:` 契约内容都**不在**其中；目录被删时请再跑 `gops prj sync` 把缺失系统按包铺回，\
+                 契约内容用 `gops prj contract import` 恢复"
             );
         }
         Ok(())

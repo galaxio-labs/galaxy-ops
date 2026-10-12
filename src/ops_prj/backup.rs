@@ -143,7 +143,8 @@ impl OpsProject {
         let conf_file = root.join(sys_name).join(SYS_PRJ_CONF_FILE_V2);
         let mut raw = if conf_file.exists() {
             let conf = SysConf::load_conf(&conf_file).source_resource()?;
-            conf.backup_paths()
+            // 只收 `backup:`（`contract` 走独立归档，**不并进**常规备份）。
+            conf.backup().to_vec()
         } else {
             Vec::new()
         };
@@ -831,6 +832,42 @@ mod tests {
         assert!(
             paths.contains(&"web-stack/extra/note.txt"),
             "项目侧 include 的现场增量应被收：{paths:?}"
+        );
+    }
+
+    /// `contract:` 的内容**不进** `prj backup`（走独立归档）：只收 `backup:` 声明的现场态。
+    #[test]
+    fn test_ops_project_backup_excludes_contract() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("prj");
+        let dest = tmp.path().join("bk");
+        init_project(
+            &root,
+            &format!(
+                "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    url: http://example.com/web-stack.tar.gz\nbackup:\n  target: {}\n",
+                dest.display()
+            ),
+        );
+        let s = root.join("web-stack");
+        std::fs::create_dir_all(s.join("configs/gateway")).unwrap();
+        std::fs::write(s.join("configs/gateway/public.yml"), "domain: x\n").unwrap();
+        std::fs::write(s.join(".env"), "APP=demo\n").unwrap();
+        std::fs::write(
+            s.join("sys-prj.yml"),
+            "test_envs:\n  dep_root: ''\n  deps: []\ncontract:\n  - configs\nbackup:\n  - .env\n",
+        )
+        .unwrap();
+
+        let prj = OpsProject::load(&root).unwrap();
+        let report = prj.backup().unwrap();
+        let paths: Vec<&str> = report.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            paths.contains(&"web-stack/.env"),
+            "backup 应含 .env：{paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("configs")),
+            "contract（configs）不应被收进 backup：{paths:?}"
         );
     }
 

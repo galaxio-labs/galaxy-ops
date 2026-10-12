@@ -380,12 +380,14 @@ impl SysCommandHandler {
         };
 
         // 3. 打包：默认只含 git 入库文件（不含制品）；`--full` 打整目录（含制品，用于隔离网络）。
-        //    两种模式都排除 `sys-prj.yml` 的 `ignore:` 节。
+        //    两种模式都排除 `sys-prj.yml` 的 `pkg_exclude:` 节（旧名 `ignore`）；
+        //    `pkg_include:` 额外补入（主要默认模式，补未被 git 跟踪的生成物；exclude 优先）。
         pack_system(
             &current_dir,
             &out_path,
             !args.full,
-            operator.conf().ignore(),
+            operator.conf().pkg_include(),
+            operator.conf().pkg_exclude(),
         )?;
         println!("系统已打包: {}", out_path.display());
         Ok(())

@@ -6,12 +6,12 @@
 //! 换个版本"没有安全出路，只能靠人手工搬文件。
 //!
 //! 这个模块存在的全部理由：**不删任何东西**。
-//!   · `sys-prj.yml: protect:` / `contract:` 命中的路径：不覆盖、不删（身份材料、运行态、客户值…）
+//!   · `sys-prj.yml: protect:` 命中的路径：不覆盖、不删（身份材料、运行态、客户值…）
 //!   · 包外且**未声明**的存量：也不删（保守）
 //!   · 包内文件：用新版覆盖
 //!
 //! 白名单**就是交付包本身**（包里有什么就覆盖什么）—— 选取逻辑复用 `gops sys package`
-//! 那一套（git 入库文件 − `ignore:`），不在这里重写 git/glob 判定。
+//! 那一套（git 入库文件 − `pkg_exclude:`），不在这里重写 git/glob 判定。
 
 use std::path::{Path, PathBuf};
 
@@ -70,7 +70,7 @@ impl OpsProject {
     /// 按 `ops-prj.yml` 记录的系统逐个同步：
     ///
     /// · 目录**缺失** → 按包**导入**（补齐被删的系统，不再是静默跳过）；
-    /// · 目录**已在** → 把包内内容**非破坏**地覆盖上去（`protect` / `contract` 一律不碰，不删任何东西）。
+    /// · 目录**已在** → 把包内内容**非破坏**地覆盖上去（只跳过 `protect` 声明的路径，不删任何东西）。
     pub async fn update_sys_content(
         &self,
         accessor: Accessor,
@@ -174,15 +174,13 @@ pub(crate) fn apply_overlay(
     Ok(report)
 }
 
-/// 读一份 `sys-prj.yml` 的**保护集**（`protect` ∪ `contract`）；文件不存在时为空。
-///
-/// `contract`（对外契约）语义自足——声明即自动纳入保护，所以这里并起来。
+/// 读一份 `sys-prj.yml` 的 **`protect`** 声明（升级不覆盖/不删的路径）；文件不存在时为空。
 pub(crate) fn load_protect(conf_file: &Path) -> MainResult<Vec<String>> {
     if !conf_file.exists() {
         return Ok(Vec::new());
     }
     let conf = SysConf::load_conf(conf_file).source_resource()?;
-    Ok(conf.protection_paths())
+    Ok(conf.protect().to_vec())
 }
 
 /// 目标里"既不在包内、也不在 protect"的**顶层条目**名（只列一层：够用且不会扫 900M 的目录）。
@@ -613,8 +611,8 @@ mod tests {
     }
 
     #[test]
-    fn test_load_protect_includes_contract() {
-        // `contract` 语义自足：声明即自动纳入保护（升级/重建不碰）。
+    fn test_load_protect_is_protect_only() {
+        // 各声明互相独立：`load_protect` 只读 `protect`，不含 `contract`。
         let tmp = tempfile::TempDir::new().unwrap();
         let f = tmp.path().join("sys-prj.yml");
         std::fs::write(
@@ -622,10 +620,7 @@ mod tests {
             "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - .env\ncontract:\n  - configs/gateway/public\n",
         )
         .unwrap();
-        assert_eq!(
-            load_protect(&f).unwrap(),
-            vec![".env".to_string(), "configs/gateway/public".to_string()]
-        );
+        assert_eq!(load_protect(&f).unwrap(), vec![".env".to_string()]);
     }
 
     #[test]

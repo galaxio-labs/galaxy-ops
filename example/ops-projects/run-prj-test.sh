@@ -103,7 +103,10 @@ else
 fi
 
 # ---- 4. backup ----
-log "4. prj backup（收集现场态）"
+# 造一个现场态文件：`.env` 在 `sys-prj.yml` 的 `backup:` 里（模拟 `sys localize` 产出）。
+# 注意 `contract: configs`（对外契约）**不进** `backup`，故 `prj backup` 只收这里声明的现场态。
+printf 'APP_ENV=demo\n' > example_sys_x/.env
+log "4. prj backup（收集现场态：backup 声明的 .env；不含 contract）"
 if "$GOPS" prj backup; then
   BKP="$(ls -t backup/*.tar.gz 2>/dev/null | head -1)"
   if [ -n "$BKP" ]; then ok "生成备份：$BKP"; else bad "未生成备份归档"; fi
@@ -115,14 +118,10 @@ fi
 # ---- 5. restore：--list / --dry-run ----
 log "5. prj restore --list / --dry-run"
 if [ -n "$BKP" ]; then
-  if "$GOPS" prj restore --list "$BKP"; then
-    if "$GOPS" prj restore --list "$BKP" | grep -q 'example_sys_x/'; then
-      ok "--list 列出系统条目"
-    else
-      bad "--list 未列出预期的系统条目"
-    fi
+  if "$GOPS" prj restore --list "$BKP" | grep -q 'example_sys_x/.env'; then
+    ok "--list 列出备份的现场态（example_sys_x/.env）"
   else
-    bad "restore --list 失败"
+    bad "--list 未列出预期的现场态条目"
   fi
   if "$GOPS" prj restore --dry-run "$BKP"; then
     ok "--dry-run 通过（未改动现场）"

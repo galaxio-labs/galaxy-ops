@@ -92,12 +92,15 @@ impl SysOperator {
     /// 注入现场态声明（builder；供示例 / 测试；语义见 [`SysConf::with_site_state`]）。
     pub fn with_site_state(
         mut self,
-        ignore: Vec<String>,
+        pkg_include: Vec<String>,
+        pkg_exclude: Vec<String>,
         protect: Vec<String>,
         contract: Vec<String>,
         backup: Vec<String>,
     ) -> Self {
-        self.conf = self.conf.with_site_state(ignore, protect, contract, backup);
+        self.conf = self
+            .conf
+            .with_site_state(pkg_include, pkg_exclude, protect, contract, backup);
         self
     }
     pub fn kind(&self) -> SysKind {

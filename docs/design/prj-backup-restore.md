@@ -52,12 +52,8 @@ data-plane-run/                              1.0 G  ← 引擎运行态（输出
 
 ## 3. 概念：现场态（site state）
 
-**定义**：系统目录里**不属于交付包**、且**升级不得覆盖**的东西。它是备份的选取依据，也是
-非破坏更新的排除依据。
-
-**不变式**：`sys-prj.yml: ignore ⊆ protect`。
-凡是"不进交付包"的，按定义就不是包内容，因此必须升级不动 —— 不一致由 `prj diagnose`（现名 `doctor`）报出。
-（注意两者**不相等**：`.env`、`values/`、`deliver.lock` 都不在 `ignore` 里，但都属于现场态。）
+**定义**：系统目录里**不属于交付包**的文件。`protect` / `backup` / `contract` 各自声明其中一部分 ——
+三个声明**互相独立**，各由各自的命令消费（`sys update`/`prj sync`、`prj backup`、`prj contract export`）。
 
 `values/` 是其中一个特例（在系统目录外层、以符号链接暴露），保留现有机制不变。
 
@@ -66,12 +62,13 @@ data-plane-run/                              1.0 G  ← 引擎运行态（输出
 ### 4.1 系统侧 `sys-prj.yml`（布局与分级，所有部署一致）
 
 ```yaml
-ignore: [...]        # 既有：不进交付包（`gops sys package` 用）
-protect: [...]       # 升级/重建不覆盖、也不删（ignore ⊆ protect）
-contract: [...]      # 对外契约：声明即自动纳入 protect + backup（见 docs/design/contract.md）
-backup: [...]        # **必收**的现场态（扁平列表；只表达“丢失的代价”，**不触发任何删除**）
-# 不在 backup 里的 = 不收、不碰 —— 不需要单独声明一档
-# （“故意不收”与“忘了写”的区分交给 `prj diagnose`，不是靠多一个档名）
+pkg_include: [...]   # 打包纳入（基准集之外补入；默认模式；pkg_exclude 优先）—— 只服务 `sys package`
+pkg_exclude: [...]   # 打包排除（旧名 `ignore`）—— 只服务 `sys package`
+protect: [...]       # 升级不覆盖、也不删 —— 只服务 `sys update` / `prj sync` / `prj upgrade`
+contract: [...]      # 对外契约（不可重建的公开现场事实）—— 只服务 `prj contract export` / `import`
+backup: [...]        # 备份选取（扁平列表）—— 只服务 `prj backup` / `restore`
+# 五个声明**互相独立**，各由各自的命令消费；不做跨声明的推导 / 覆盖 / 交叠判断。
+# 不在 backup 里的 = 不收、不碰（不触发任何删除）。
 ```
 
 例（`wist-gateway-stack`）：
@@ -115,15 +112,15 @@ backup:
 | 命令 | 现状（评审时） | 目标 |
 | --- | --- | --- |
 | `prj sync` | 只更新 conf | **非破坏更新系统内容 + 补齐缺失系统**：已在的只覆盖**包内含**路径、`protect` 一律不碰；缺失的按包导入 ← 缺的就是这条 |
-| `prj backup` | — | 按 `backup`（含 `contract` 派生）收；输出清单 + sha256；**点名含私钥的条目**并提示离机保管 |
+| `prj backup` | — | 按 `backup`（**不含** `contract`）收；输出清单 + sha256；**点名含私钥的条目**并提示离机保管 |
 | `prj restore` | — | 把备份里的**现场态**合并回现场（目录在就覆盖；目录没了就按归档重建这部分）；先解到临时再合并 |
-| `prj diagnose` | 现名 `prj doctor`，只查 `values/` | 加：`ignore ⊆ protect`、备份是否覆盖了 `protect` 声明、“不在 `backup` 里”的路径（提示而非报错）、`sys_models` 重名 |
+| `prj diagnose` | 现名 `prj doctor`，只查 `values/` | 各声明**自身**的检查（`values/` 纳管、`contract` 齐备、`sys_models` 重名）；**不做**跨声明关系推理 |
 
 **改名 `doctor` → `diagnose`**：与 agentd 侧的 `diagnose` 同一口径（用户侧只记一个词）。
 这是对外命令改名，建议按本仓既有做法把 `doctor` 留为**隐藏别名**（同 `sys package --no-git` → `--full`）；
 若决定不留，按 breaking change 记入 `UPGRADE.md` / CHANGELOG 的变更表。
 
-**可复用的既有实现**：`gops sys package` 已经实现了"git 入库文件 + `ignore:`"的选取逻辑
+**可复用的既有实现**：`gops sys package` 已经实现了"git 入库文件 + `pkg_exclude:`"的选取逻辑
 （`src/system/pack.rs:18-47`，含 glob 归一化等细节）。**非破坏性更新应当直接以它为白名单** ——
 "交付包里有什么，就覆盖什么"，不要在新代码或 shell 脚本里重写一遍 git/glob 逻辑。
 
@@ -144,8 +141,8 @@ backup:
 
 ## 6. 设计约束（会坚持的三条）
 
-1. **没声明就保守**：未声明的路径**绝不删、升级不覆盖**（宁可留垃圾）；备份时列为"未纳入"让人看见。
-2. **秘密显性**：备份中含私钥/凭据的条目必须点名 + 提示离机保管；且**不随交付包走**（与 `ignore` 配合）。
+1. **没声明就保守**：未声明的路径**绝不删、升级不覆盖**（宁可留垃圾）。
+2. **秘密显性**：备份中含私钥/凭据的条目必须点名 + 提示离机保管；且**不随交付包走**（与 `pkg_exclude` 配合）。
 3. **原子**：`restore` 先解到临时再替换；导入/覆盖都不留可回滚的中间态。
 
 ## 7. 落地顺序（均已完成）
@@ -154,8 +151,8 @@ backup:
    —— 立刻解决"升级只能靠人搬文件"。
 2. ✅ `prj backup` / `prj restore`（sha256 清单 + 私钥点名 + `keep` 清理 + 先解临时再合并）。
 3. ✅ “补齐缺失系统”归入 `prj sync`（`reimport` 命令后续**移除**）。
-4. ✅ `prj doctor` → `prj diagnose`（`doctor` 留为隐藏别名），新增 `ignore ⊆ protect`、
-   `sys_models` 重名、`backup` 缺失、protect 未被备份覆盖等检查。
+4. ✅ `prj doctor` → `prj diagnose`（`doctor` 留为隐藏别名）：各声明**自身**的检查（`values/` 纳管、
+   `contract` 齐备、`sys_models` 重名）。
 
 ## 8. 未定问题
 

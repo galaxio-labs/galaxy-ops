@@ -70,11 +70,9 @@ src/system/
 ```text
 # gops sys —— 定义 / 交付 / 工件
 gops sys new [--kind gxl|docker-compose]
-gops sys update
+gops sys resolve
 gops sys package
 gops sys localize
-gops sys setting
-gops sys check
 gops sys diff
 
 # gops run —— 运行时运维
@@ -88,7 +86,7 @@ gops run download/install/uninstall/start/stop/status/diagnose
 
 ## 值变更表（`sys diff` / `localize` 末尾）
 
-与 `check` 关注的“`.env` 漂移”不同，`diff` 回答的是“**哪些值被覆盖、被哪一层覆盖**”：
+`diff` 回答的是“**哪些值被覆盖、被哪一层覆盖**”：
 
 ```text
 gops sys diff [--json]
@@ -123,7 +121,7 @@ CPU  1000     2000       mod-setting  module      changed
 ```
 
 - 初始层 = 模块默认值（`sys/<model>/mods/<mod>/vars.yml`）；生效层 = 默认值 ⊕ `values/<mod>/value.yml`(`mod-cust`) ⊕ `values/<mod>/mod_value.yml`(`mod-setting`) ⊕ 系统层。
-- 模块内容未下载（`sys/<model>/mods/<mod>` 缺失）时打 `[WARN]` 并跳过——先 `gops sys update`。
+- 模块内容未下载（`sys/<model>/mods/<mod>` 缺失）时打 `[WARN]` 并跳过——先 `gops sys resolve`。
 - 值文件键**大小写不敏感**（加载时归一化为大写）；`sys diff --json` 为 `{ "system": [...], "modules": [{ "module": …, "changes": [...] }] }`，只含有变更的分组。
 
 ### 文件覆盖层（`sys diff`）
@@ -208,7 +206,7 @@ sys start (compose)      →  orion_sec::load_sec_dict()
     ├── sys_model.yml       # 系统定义（name / model 可选 / kind / vender；kind 决定命令分派）
     ├── docker-compose.yaml # 纯 docker-compose 系统的 compose 定义（sys new 默认生成，用 ${VAR} 占位）
     ├── mod_list.yml        # 可选，缺失时视为空模块列表
-    ├── merged_vars.yml    # 聚合变量（sys update 生成：模块变量 ⊕ 系统变量，需入库）
+    ├── merged_vars.yml    # 聚合变量（sys resolve 生成：模块变量 ⊕ 系统变量，需入库）
     ├── setting/
     │   ├── vars.yml        # system 段变量定义（源，版本化）
     │   └── list.yml        # 可选，按模块的本地化列表；纯 docker-compose 系统可省略

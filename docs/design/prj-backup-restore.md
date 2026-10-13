@@ -53,7 +53,7 @@ data-plane-run/                              1.0 G  ← 引擎运行态（输出
 ## 3. 概念：现场态（site state）
 
 **定义**：系统目录里**不属于交付包**的文件。`protect` / `backup` / `contract` 各自声明其中一部分 ——
-三个声明**互相独立**，各由各自的命令消费（`sys update`/`prj sync`、`prj backup`、`prj contract export`）。
+三个声明**互相独立**，各由各自的命令消费（`sys resolve`/`prj sync`、`prj backup`、`prj contract export`）。
 
 `values/` 是其中一个特例（在系统目录外层、以符号链接暴露），保留现有机制不变。
 
@@ -64,7 +64,7 @@ data-plane-run/                              1.0 G  ← 引擎运行态（输出
 ```yaml
 pkg_include: [...]   # 打包纳入（基准集之外补入；默认模式；pkg_exclude 优先）—— 只服务 `sys package`
 pkg_exclude: [...]   # 打包排除（旧名 `ignore`）—— 只服务 `sys package`
-protect: [...]       # 升级不覆盖、也不删 —— 只服务 `sys update` / `prj sync` / `prj upgrade`
+protect: [...]       # 升级不覆盖、也不删 —— 只服务 `sys resolve` / `prj sync` / `prj upgrade`
 contract: [...]      # 对外契约（不可重建的公开现场事实）—— 只服务 `prj contract export` / `import`
 backup: [...]        # 备份选取（扁平列表）—— 只服务 `prj backup` / `restore`
 # 五个声明**互相独立**，各由各自的命令消费；不做跨声明的推导 / 覆盖 / 交叠判断。

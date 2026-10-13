@@ -172,7 +172,7 @@ knowlege/docker-compose/
 │   ├── sys_model.yml        # name: web-stack / kind: docker-compose
 │   ├── docker-compose.yaml  # 共享定义，用 ${NGINX_TAG}/${HTTP_PORT}/${SEC_DB_PASSWORD} 占位
 │   ├── setting/vars.yml     # 非密钥系统变量（system 段）
-│   └── merged_vars.yml      # 聚合变量（sys update 生成，需入库）
+│   └── merged_vars.yml      # 聚合变量（sys resolve 生成，需入库）
 └── values/
     └── value.yml            # 客户覆盖（版本化）：只写要覆盖的项
 ```
@@ -227,9 +227,9 @@ gops run uninstall  # = docker compose down
 
 2. **`gops sys new` 需要交互选择系统型号**（`dialoguer::Select`）。脚本化时可通过环境变量 `TEST_MODE=1` 自动选择第一个支持型号。
 
-3. **`gops mod update` / `sys update`**：负责下载依赖、解析变量（生成 `sys/merged_vars.yml`）并初始化值文件。生成的 `values/sys_value.yml` 是**注释模板**（可用变量已注释，默认不生效）——取消注释需要覆盖的项即可，其余取系统默认值。该步骤**需要网络**（下载 `mod_list.yml` 指向的仓库、`artifact.yml` 指向的构件）。
+3. **`gops mod update` / `sys resolve`**：负责下载依赖、解析变量（生成 `sys/merged_vars.yml`）并初始化值文件。生成的 `values/sys_value.yml` 是**注释模板**（可用变量已注释，默认不生效）——取消注释需要覆盖的项即可，其余取系统默认值。该步骤**需要网络**（下载 `mod_list.yml` 指向的仓库、`artifact.yml` 指向的构件）。
 
-4. **`gops mod localize` / `sys localize`**：`sys localize` 在系统变量未解析时会**自动先 `update`**，再渲染 `.env`（= `sys/merged_vars.yml` 默认值 ⊕ `values/sys_value.yml` ⊕ `values/value.yml`，后两者可选、可只写要覆盖的项）；`--only` 跳过 update。`mod localize` 仍依赖先 `mod update`。
+4. **`gops mod localize` / `sys localize`**：`sys localize` 在系统变量未解析时会**自动先 `resolve`**，再渲染 `.env`（= `sys/merged_vars.yml` 默认值 ⊕ `values/sys_value.yml` ⊕ `values/value.yml`，后两者可选、可只写要覆盖的项）；`--only` 跳过 resolve。`mod localize` 仍依赖先 `mod update`。
 
 5. **`gops prj import --path <path>`**：`path` 必须是一个**打包产物**（本地 `.tar.gz` 或 git/http 地址），**不是裸目录**。推荐直接用 `gops sys package` 生成（见上），它会先执行 `update` 解析变量再打包：
 
@@ -244,9 +244,9 @@ gops run uninstall  # = docker compose down
 
 ## 当前已知问题（已知限制）
 
-- **`prj import` 要求系统已解析变量**：导入流程依赖 `sys/merged_vars.yml`（由 `gops sys update` 解析模块并合并变量后生成）。该文件需要入库（不 gitignore），保证源码、交付包与导入期望一致；若导入一个从未 `update` 过、且未提交 `merged_vars.yml` 的系统，会明确报错：`系统变量未解析：缺少 .../sys/merged_vars.yml。请先在该系统上执行 gops sys update 解析变量`。推荐直接使用 `gops sys package`（内部先 update 再打包）。
-- **执行链依赖外部环境**：工作流模板引用了 `galaxy-operators/*.git` 等外部仓库，`update` / 执行需网络，离线不可用。
-- 已修复的问题：`prj import` 的 `values` 符号链接冲突、`convert_addr` 对裸目录的 panic、`mod new` 硬编码 postgresql 构件地址、`merged_vars.yml` 缺失时的晦涩报错（现改为清晰可操作的提示），并新增 `gops sys package` 固化“先 update 再打包”的交付约束。
+- **`prj import` 要求系统已解析变量**：导入流程依赖 `sys/merged_vars.yml`（由 `gops sys resolve` 解析模块并合并变量后生成）。该文件需要入库（不 gitignore），保证源码、交付包与导入期望一致；若导入一个从未 `resolve` 过、且未提交 `merged_vars.yml` 的系统，会明确报错：`系统变量未解析：缺少 .../sys/merged_vars.yml。请先在该系统上执行 gops sys resolve 解析变量`。推荐直接使用 `gops sys package`（内部先 resolve 再打包）。
+- **执行链依赖外部环境**：工作流模板引用了 `galaxy-operators/*.git` 等外部仓库，`resolve` / 执行需网络，离线不可用。
+- 已修复的问题：`prj import` 的 `values` 符号链接冲突、`convert_addr` 对裸目录的 panic、`mod new` 硬编码 postgresql 构件地址、`merged_vars.yml` 缺失时的晦涩报错（现改为清晰可操作的提示），并新增 `gops sys package` 固化“先 resolve 再打包”的交付约束。
 
 ## 参考
 

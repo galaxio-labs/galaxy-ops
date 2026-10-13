@@ -209,7 +209,7 @@ impl SysOperator {
 
     /// 变量定义是否比已解析结果更新：`sys/merged_vars.yml` 缺失，或其定义输入
     /// （`sys/setting/vars.yml` / `sys/mod_list.yml` / `sys/sys_model.yml`）比它更新。
-    /// 供 `gops sys check` 提示「改了定义未重新解析」（定义层陈旧，仅比对 `.env` 看不到）。
+    /// 供 `gops sys localize` 结尾提示「改了定义未重新解析」（定义层陈旧，仅比对 `.env` 看不到）。
     pub fn vars_need_resolve(&self) -> MainResult<bool> {
         let merged = self.paths.resolve_merged_vars_file();
         if !merged.exists() {
@@ -303,7 +303,7 @@ impl SysOperator {
         // 系统变量必须先解析：本地化基线来自 sys/merged_vars.yml
         if !self.has_resolved_vars() {
             return Err(crate::error::MainReason::logic_detail(format!(
-                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量",
+                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys resolve` 解析变量",
                 self.paths.merged_vars_file().display()
             )));
         }

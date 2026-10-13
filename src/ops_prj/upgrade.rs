@@ -216,7 +216,7 @@ pub trait UpgradeRuntime: Send + Sync {
     async fn backup(&self) -> MainResult<String>;
     /// 取包并覆盖到指定系统目录（只动磁盘内容，**不停服务**）。
     async fn apply(&self, sys: &str) -> MainResult<()>;
-    /// 重渲染值 / `.env`（`sys update` + `localize`），为切换做准备。
+    /// 重渲染值 / `.env`（`sys resolve` + `localize`），为切换做准备。
     async fn regenerate(&self, sys: &str) -> MainResult<()>;
     /// 拉制品（`docker compose pull` / `gx run download`）。
     async fn pull(&self, sys: &str) -> MainResult<()>;
@@ -238,7 +238,7 @@ pub trait UpgradeRuntime: Send + Sync {
 /// 运行时动作（按 `kind` 分派到 docker compose / gx）—— app 层实现。
 #[async_trait]
 pub trait RuntimeDispatch: Send + Sync {
-    /// `sys update` + `localize`（含渲染与 localize 阶段流程）。
+    /// `sys resolve` + `localize`（含渲染与 localize 阶段流程）。
     async fn localize(&self, sys_dir: &Path) -> MainResult<()>;
     /// 拉制品。
     async fn pull(&self, sys_dir: &Path) -> MainResult<()>;

@@ -3,7 +3,7 @@
 //! 跑真实 `gops` 二进制 + 隔离 `$HOME`，覆盖：
 //! 默认 `localize` **无条件**先重解析（改完 `vars.yml` 一条命令即生效）；
 //! `--only` 始终跳过解析（用现有 `merged_vars.yml`）；
-//! `gops sys check` 能报出「定义比已解析结果更新」的陈旧（仅比对 `.env` 看不到）。
+//! `gops sys localize --only` 在「定义比已解析结果更新」时给一行 `[WARN]`（仅比对 `.env` 看不到）。
 
 #![cfg(unix)]
 
@@ -144,46 +144,49 @@ fn localize_only_never_resolves() {
     );
 }
 
-/// `gops sys check` 在「定义比已解析结果更新」时报 `[WARN]`（仅比对 `.env` 看不到）。
+/// `gops sys localize --only` 在「定义比已解析结果更新」时报 `[WARN]`（仅比对 `.env` 看不到）。
 #[test]
-fn check_warns_when_definition_newer_than_merged() {
+fn localize_only_warns_when_definition_newer_than_merged() {
     let (home, _root, sys) = setup();
     write_vars(&sys, "a.example");
     let out = run_gops(home.path(), &sys, &["sys", "localize"]);
     assert!(out.status.success(), "{}", stderr(&out));
 
-    // 制造陈旧：把所有“非 vars.yml”输入都钉到不新于 merged，再让 vars.yml 更新
+    // 制造陈旧：merged 比定义新，再让 vars.yml 更新到 merged 之后
     let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     set_mtime(&sys.join("sys/sys_model.yml"), base);
-    set_mtime(&sys.join("sys/setting/vars.yml"), base);
     set_mtime(
         &sys.join("sys/merged_vars.yml"),
         base + Duration::from_secs(10),
     );
-    write_vars(&sys, "b.example");
-    set_mtime(
-        &sys.join("sys/setting/vars.yml"),
-        base + Duration::from_secs(60),
-    );
     set_mtime(
         &sys.join("sys/setting/vars.yml"),
         base + Duration::from_secs(60),
     );
 
-    let chk = run_gops(home.path(), &sys, &["sys", "check"]);
+    // --only 跳过解析 → 定义比 merged 新 → 应提示
+    let out = run_gops(home.path(), &sys, &["sys", "localize", "--only"]);
+    assert!(out.status.success(), "--only failed: {}", stderr(&out));
     assert!(
-        stdout(&chk).contains("[WARN]"),
-        "check should warn about stale vars, got: {}",
-        stdout(&chk)
+        stdout(&out).contains("[WARN]"),
+        "--only should warn about stale vars, got: {}",
+        stdout(&out)
     );
 
-    // 重新 localize 后不再陈旧
+    // 默认 localize 会重解析（merged 刷新）→ 它本身不该再报陈旧
     let out = run_gops(home.path(), &sys, &["sys", "localize"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let chk = run_gops(home.path(), &sys, &["sys", "check"]);
     assert!(
-        !stdout(&chk).contains("[WARN]"),
-        "no stale warning after localize, got: {}",
-        stdout(&chk)
+        !stdout(&out).contains("[WARN]"),
+        "default localize re-resolves → must not warn stale, got: {}",
+        stdout(&out)
+    );
+    // 且此后 --only 也不再陈旧
+    let out = run_gops(home.path(), &sys, &["sys", "localize", "--only"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        !stdout(&out).contains("[WARN]"),
+        "no stale warning after re-resolve, got: {}",
+        stdout(&out)
     );
 }

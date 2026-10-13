@@ -1,5 +1,4 @@
 mod conf;
-pub mod drift;
 pub mod init;
 pub mod lock;
 pub mod mod_list;

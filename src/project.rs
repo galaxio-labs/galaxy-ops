@@ -59,7 +59,7 @@ pub fn load_sys_opr_value(prj_root: &Path) -> MainResult<OriginDict> {
         };
         if !vars_file.exists() {
             return Err(crate::error::MainReason::logic_detail(format!(
-                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys update` 解析变量，再打包导入",
+                "系统变量未解析：缺少 `{}`。请先在该系统上执行 `gops sys resolve` 解析变量，再打包导入",
                 vars_file.display()
             )));
         }
@@ -183,7 +183,7 @@ pub fn mod_value_layers(
 
 /// 把值字典渲染为 dotenv 文本（`KEY=VALUE` 行，键保持大写）。
 ///
-/// 与 [`export_env_file`] 同源，供漂移比对复用（无需写盘）。
+/// 与 [`export_env_file`] 同源：返回渲染后的 dotenv 文本（无需写盘）。
 pub fn render_env(dict: &OriginDict) -> String {
     let mut content = String::new();
     for (key, value) in dict.iter() {

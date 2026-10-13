@@ -47,7 +47,7 @@ async fn test_full_flow() -> MainResult<()> {
     let sys_value_dict =
         OriginDict::from(ValueDict::load_yaml(&sys_value_path.sys_value_file()).source_conf()?)
             .with_origin("sys-setting");
-    // 预置旧布局内容与旧 `.gitignore`，验证 `sys update` 会迁移
+    // 预置旧布局内容与旧 `.gitignore`，验证 `sys resolve` 会迁移
     let legacy_dir = sys_path.join("sys/mods/legacy-mod/arm-mac14-host");
     std::fs::create_dir_all(&legacy_dir).unwrap();
     std::fs::write(legacy_dir.join("vars.yml"), "spoof").unwrap();

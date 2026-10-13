@@ -135,10 +135,12 @@ gops mod
 
 gops sys
   ├── new         创建系统（--kind gxl|docker-compose 指定部署类型）
-  ├── update      更新系统引用
+  ├── resolve     解析系统定义（取模块 / 解析变量 → merged_vars.yml；旧名 update）
   ├── package     解析变量并打包为 .tar.gz 交付产物
   ├── localize    生成系统本地化结果（并导出 .env 供 docker-compose 使用）
-  ├── setting     初始化系统设置
+  └── diff        展示系统值变更
+
+gops run
   └── download / install / uninstall / start / stop / status / diagnose
                   （按 sys/sys_model.yml 的 kind 分派：gxl → 外部 gx（`gx run <cmd>`）；docker-compose → docker compose）
 

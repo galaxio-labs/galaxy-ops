@@ -34,7 +34,7 @@ pub struct SysConf {
     /// 与 `pkg_include` 相交时**以排除为准**（`pkg_exclude` 胜出）。
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "ignore")]
     pkg_exclude: Vec<String>,
-    /// **升级保护**（glob，相对系统根）：`gops sys update` / `prj sync` / `prj upgrade`
+    /// **升级保护**（glob，相对系统根）：`gops sys resolve` / `prj sync` / `prj upgrade`
     /// **不覆盖、也不删**的路径。与 `pkg_include` / `pkg_exclude` / `contract` / `backup` **互相独立**，各自管各的。
     ///
     /// 旧名 `preserve` 仍可读（`#[serde(alias)]`），新写一律用 `protect`。
@@ -93,7 +93,7 @@ impl SysConf {
         &self.pkg_exclude
     }
 
-    /// 升级保护路径（`sys update` / `prj sync` / `prj upgrade` 不覆盖、不删除）。
+    /// 升级保护路径（`sys resolve` / `prj sync` / `prj upgrade` 不覆盖、不删除）。
     pub fn protect(&self) -> &[String] {
         &self.protect
     }

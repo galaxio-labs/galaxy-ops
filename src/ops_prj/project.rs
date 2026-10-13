@@ -100,7 +100,7 @@ impl OpsProject {
 /// 若 `sys_dir` 是某个运维项目下已导入的系统（其父目录存在 `ops-prj.yml` 且列出该系统名），
 /// 返回该项目为该系统维护的值目录 `values/<sys_name>`。
 ///
-/// 用于让 `gops sys localize` / `sys update` 在运维项目内直接使用项目值（客户值），
+/// 用于让 `gops sys localize` / `sys resolve` 在运维项目内直接使用项目值（客户值），
 /// 不必依赖 `<sys>/values` 符号链接是否完整。
 pub fn owner_project_value_dir(sys_dir: &Path) -> Option<PathBuf> {
     let sys_name = sys_dir.file_name()?.to_str()?;

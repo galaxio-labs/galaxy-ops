@@ -5,6 +5,27 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.3.2] - 2026-10-13
+
+### 变更
+
+- **`gops sys update` 更名为 `gops sys resolve`**（旧名 `update` 保留为**隐藏别名**）：该命令做的是
+  「解析系统定义」—— 按 `sys/mod_list.yml` 各模块的 `addr` 把它们取到新布局 `sys/<model>/mods/<mod>/`、
+  解析依赖、把模块变量 ⊕ 系统 `sys/setting/vars.yml` 变量聚合写入 `sys/merged_vars.yml`（解析结果，需入库），
+  并刷新 `values/sys_value.yml` 注释模板。原名 `update` 易被误解为「升级 / 更新运行中的系统」，故改名。
+  **行为不变**：不生成 `.env`（用 `sys localize`）、不碰运行中的服务（用 `gops run`）。
+  相关文案（缺失变量报错、`sys package` 前置解析、`sys localize` 默认先跑的那一步、`prj upgrade` 事务的 regenerate）同步更新。
+
+### 移除
+
+- **移除 `gops sys setting`**：该命令只在 `--init` 时把 `sys/setting/` 覆盖成**示例占位**（`SYS_KEY1=sys_value1` 等），
+  且与 `gops sys new`（本就生成 `sys/setting/`、幂等、只补缺失）重叠，还会破坏已有配置。
+  需要 setting 骨架时用 `gops sys new --name <系统名>`（只补缺失，不覆盖）。
+- **移除 `gops sys check`**：它是只读的「重算值 vs 磁盘 `.env`」漂移卡口，但 `.env` 是 gitignored，
+  做不成仓库侧 CI 卡口；而 `sys localize` 默认已先重解析，“改了值没重新 localize”的空间很小。
+  保留其唯一有效的部分：**`gops sys localize` 结尾**在「变量定义比已解析结果新」时给一行 `[WARN]`
+  （仅比对 `.env` 看不到的那一层）。
+
 ## [2.3.1] - 2026-10-12
 
 ### 变更

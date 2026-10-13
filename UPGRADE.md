@@ -24,7 +24,7 @@ gops run start     # 新
 
 ### 2. 模块布局按模型分组：一套定义，多部署目标并存
 
-`gops sys update` 现在把模块落到 **`sys/<model>/mods/<mod>/`**（旧：`sys/mods/<mod>/<model>/`）——**同一部署目标的模块集中一处**，host / k8s 等多目标可并存。
+`gops sys resolve` 现在把模块落到 **`sys/<model>/mods/<mod>/`**（旧：`sys/mods/<mod>/<model>/`）——**同一部署目标的模块集中一处**，host / k8s 等多目标可并存。
 
 **价值**：目录结构直接映射「按部署目标（模型）分组」；找模块、共享 host 级缓存（`sys/<model>/local/cache/`）、按目标打包都更自然。
 
@@ -88,18 +88,18 @@ gops self skill install --source galaxio-labs/gx-skills   # 也可装 gx 的 ski
    - （2.2.x，**breaking**）**`gops prj rebuild` 已移除**：它曾用于连**包外未声明内容**一起清掉的
      「彻底重建」，但现场态声明（`protect` / `backup`）已覆盖保留与还原诉求（`contract` 另走独立归档）。改用
      `gops prj sync` —— 它**不删**包外未声明内容。
-2. **迁移存量系统**：在每个系统目录跑一次 `gops sys update`，它会（幂等）：
+2. **迁移存量系统**：在每个系统目录跑一次 `gops sys resolve`，它会（幂等）：
 
    - 清理遗留 `sys/mods/`；
    - 给 `.gitignore` 补 `sys/*/mods`；
    - 把 `sys/setting/list.yml` 里旧布局的 `dst` 迁到 `sys/<model>/mods/<mod>/local/`。
 
-3. **核对配置**：`gops sys diff` / `gops sys localize` 复核生效值；`gops sys check` 应干净（退出 0）。
+3. **核对配置**：`gops sys diff` / `gops sys localize` 复核生效值（`localize` 若提示变量定义陈旧会给一行 `[WARN]`）。
 4. **（docker-compose 系统）** 视需要把 compose 内收到 `sys/docker-compose.yaml`。
 5. **算子模板**：系统 / 模块脚手架的 `extern` 需指向 `galaxio-hub/ops-gxl` 的 **`2.0`** 通道（`main` 只服务旧布局 / 旧 gops）。
 
 ## 升级后要注意的行为变化
 
 - **值文件键改为大小写不敏感**：`values/*.yml` / `values/<mod>/mod_value.yml` 加载时统一按大写处理。此前写成小写、以为「没生效」的覆盖，现在会**真的生效**——升级后请用 `gops sys diff` 复核一遍。
-- **`sys check` 会提示定义陈旧**：`sys/setting/vars.yml` 等定义比已解析结果新时给 `[WARN]`（不改变退出码）。
+- **变量定义陈旧会提示**：`sys/setting/vars.yml` 等定义比已解析结果新时，`gops sys localize` 结尾给一行 `[WARN]`（不改变退出码）。
 - **下载不再留半包**：中断的 `gops run download` 不再在目标位置留下不完整文件（由旧版遗留的截断文件仍会被复用，可删除或强制重下）。

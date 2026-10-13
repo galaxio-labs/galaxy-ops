@@ -4,7 +4,7 @@ use std::process::Command;
 use clap::{Args, Parser};
 use derive_getters::Getters;
 use dialoguer::Select;
-use galaxy_ops::const_vars::{SETTING_DIR, SPEC_DIR, USER_VALUE_FILE, VALUE_DIR};
+use galaxy_ops::const_vars::{SPEC_DIR, USER_VALUE_FILE, VALUE_DIR};
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::module::ModelSTD;
@@ -12,11 +12,9 @@ use galaxy_ops::module::model::MMOperator;
 use galaxy_ops::prelude::{ErrorConv, ErrorOwe};
 use galaxy_ops::project::load_value_file;
 use galaxy_ops::report;
-use galaxy_ops::system::drift::{DriftStatus, detect_drift};
 use galaxy_ops::system::lock::DeliverLock;
 use galaxy_ops::system::operator::SysOperator;
 use galaxy_ops::system::pack::pack_system;
-use galaxy_ops::system::setting::SysSetting;
 use galaxy_ops::system::{SysKind, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_infra::path::ensure_path;
@@ -67,11 +65,11 @@ pub struct SysNewArgs {
 }
 
 #[derive(Debug, Args, Getters)]
-pub struct SysUpdateArgs {
+pub struct SysResolveArgs {
     #[clap(flatten)]
     pub debug_log: DebugLogArgs,
 
-    #[arg(short, long, help = "update force", default_value = "false")]
+    #[arg(short, long, help = "force refetch", default_value = "false")]
     pub force: bool,
 }
 
@@ -114,18 +112,6 @@ pub struct SysLocalizeArgs {
 }
 
 #[derive(Debug, Args, Getters)]
-pub struct SysSettingArgs {
-    #[arg(long, help = "init sys setting")]
-    pub init: bool,
-}
-
-#[derive(Debug, Args, Getters)]
-pub struct SysCheckArgs {
-    #[clap(flatten)]
-    pub debug_log: DebugLogArgs,
-}
-
-#[derive(Debug, Args, Getters)]
 pub struct SysDiffArgs {
     #[clap(flatten)]
     pub debug_log: DebugLogArgs,
@@ -144,13 +130,17 @@ pub enum SysCmd {
     )]
     New(SysNewArgs),
 
-    /// 更新系统配置 (Update System Configuration)
+    /// 解析系统定义 (Resolve System Definition)
     #[command(
-        about = "更新系统配置 (Update System Configuration)",
-        long_about = "更新现有系统的配置、规范或依赖关系。支持强制更新以在不确认的情况下覆盖现有配置。\n\
-                     Update an existing system's configuration, specifications, or dependencies. Supports force updates to override existing configurations without confirmation."
+        about = "解析系统定义 (Resolve System Definition)",
+        alias = "update",
+        long_about = "解析系统的声明式定义：按 `sys/mod_list.yml` 各模块的 `addr` 把它们取到新布局 \
+                     `sys/<model>/mods/<mod>/`、解析模块/系统依赖，并把模块变量 ⊕ 系统 `sys/setting/vars.yml` \
+                     变量聚合写成 `sys/merged_vars.yml`（解析结果，需入库）；同时刷新 `values/sys_value.yml` 注释模板。\n\
+                     只动定义与磁盘内容：不生成 `.env`（用 `sys localize`）、不碰运行中的服务（用 `gops run`）。\n\
+                     （旧名 `update` 仍可用。）"
     )]
-    Update(SysUpdateArgs),
+    Resolve(SysResolveArgs),
 
     /// 打包系统 (Package System)
     #[command(
@@ -167,26 +157,6 @@ pub enum SysCmd {
                      Generate localized configuration files for the system based on environment-specific values. Useful for adapting system configurations to different deployment environments."
     )]
     Localize(SysLocalizeArgs),
-
-    /// 初始化系统设置 (Initialize System Settings)
-    #[command(
-        about = "初始化系统设置 (Initialize System Settings)",
-        long_about = "在当前目录下创建系统设置文件。这会生成一个包含默认配置的系统设置示例文件，\
-                     可作为系统配置的基础模板。\n\
-                     Create system settings files in the current directory. This generates a sample system settings \
-                     file with default configurations that can serve as a base template for system configuration."
-    )]
-    Setting(SysSettingArgs),
-
-    /// 检查系统配置漂移 (Check Configuration Drift)
-    #[command(
-        about = "检查系统配置漂移 (Check Configuration Drift)",
-        long_about = "只读比对：重新计算本地化会产出的值与已生成的 .env，报告“值已变更但未重新 localize”。\
-                     不做完整 reconcile；存在漂移时返回非零退出码，可用于 CI 卡口。\n\
-                     Read-only: report values changed but not re-localized (drift).\n\
-                     Usage: gops sys check"
-    )]
-    Check(SysCheckArgs),
 
     /// 展示系统值变更 (Show System Value Diff)
     #[command(
@@ -209,7 +179,7 @@ impl DfxArgsGetter for SysNewArgs {
     }
 }
 
-impl DfxArgsGetter for SysUpdateArgs {
+impl DfxArgsGetter for SysResolveArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -228,14 +198,6 @@ impl DfxArgsGetter for SysPackageArgs {
 }
 
 impl DfxArgsGetter for SysLocalizeArgs {
-    fn debug_level(&self) -> usize {
-        self.debug_log.debug_level()
-    }
-    fn log_setting(&self) -> Option<String> {
-        self.debug_log.log_setting()
-    }
-}
-impl DfxArgsGetter for SysCheckArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -329,7 +291,7 @@ impl SysCommandHandler {
         Ok(())
     }
 
-    pub async fn handle_update(args: SysUpdateArgs) -> MainResult<()> {
+    pub async fn handle_resolve(args: SysResolveArgs) -> MainResult<()> {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         galaxy_ops::infra::configure_dfx_logging(&args);
 
@@ -451,6 +413,16 @@ impl SysCommandHandler {
             .await?;
         }
         Self::print_value_changes(&sys_rows, &module_rows, false);
+
+        // 变量定义（`sys/setting/vars.yml` 等）比已解析结果新 —— 常见于 `--only` 跳过了解析。
+        // 一行 WARN，避免“改了定义没重新解析”被静默（原 `sys check` 唯一有效的那块）。
+        // 纯告警：取不到 mtime 等异常不应让一次成功的 localize 失败。
+        if spec.has_resolved_vars() && spec.vars_need_resolve().unwrap_or(false) {
+            println!(
+                "[WARN] 变量定义（sys/setting/vars.yml 等）比 sys/merged_vars.yml 更新，可能尚未重新解析；\
+                 去掉 `--only`，或运行 `gops sys resolve` 使其生效。"
+            );
+        }
         Ok(())
     }
 
@@ -543,7 +515,7 @@ impl SysCommandHandler {
             }
             let Some(root) = mref.content_dir().cloned() else {
                 eprintln!(
-                    "[WARN] 模块 {} 尚无内容（未下载？先 `gops sys update`）；跳过",
+                    "[WARN] 模块 {} 尚无内容（未下载？先 `gops sys resolve`）；跳过",
                     mref.name()
                 );
                 continue;
@@ -658,17 +630,6 @@ impl SysCommandHandler {
         Ok(())
     }
 
-    pub async fn handle_setting(args: SysSettingArgs) -> MainResult<()> {
-        let current_dir = std::env::current_dir().expect("无法获取当前目录");
-        if args.init {
-            let setting = SysSetting::example();
-            let setting_path =
-                ensure_path(current_dir.join("sys").join(SETTING_DIR)).source_resource()?;
-            setting.save_local(&setting_path)?;
-        }
-        Ok(())
-    }
-
     /// 阶段扩展点：内置动作完成后，若项目定义了**同名 gx 流程**则执行。
     ///
     /// 机制与阶段名无关（`flow_name` 由调用方给出，如 `localize`）；当前**只对
@@ -740,57 +701,12 @@ impl SysCommandHandler {
         }
     }
 
-    pub async fn handle_check(args: SysCheckArgs) -> MainResult<()> {
-        galaxy_ops::infra::configure_dfx_logging(&args);
-        let current_dir = std::env::current_dir().source_resource()?;
-
-        let op = SysOperator::load(&current_dir).err_conv()?;
-        let report = detect_drift(&op, &current_dir).err_conv()?;
-
-        // 变量定义比已解析结果更新（仅比对 `.env` 看不到）：先提醒。
-        if report.vars_stale() {
-            println!(
-                "[WARN] 变量定义（sys/setting/vars.yml 等）比 sys/merged_vars.yml 更新：可能尚未重新解析；\n\
-                 运行 `gops sys localize` 使其生效（或 `gops sys update`）。"
-            );
-        }
-
-        match report.status() {
-            DriftStatus::NoBaseline => {
-                println!("[INFO] 尚无 .env 基线（未 localize）；跳过漂移检查");
-                Ok(())
-            }
-            DriftStatus::Clean => {
-                println!("[OK] 值与 {} 一致，无漂移", report.env_path().display());
-                Ok(())
-            }
-            DriftStatus::Drifted => {
-                println!(
-                    "[DRIFT] 检测到 {} 处值变更，但 {} 未更新：",
-                    report.changes().len(),
-                    report.env_path().display()
-                );
-                for change in report.changes() {
-                    println!("  {}", change.describe());
-                }
-                println!("提示：运行 `gops sys localize` 重新生成本地化配置。");
-                Err(format!(
-                    "sys check: 检测到 {} 处漂移",
-                    report.changes().len()
-                ))
-                .source_resource()?
-            }
-        }
-    }
-
     pub async fn execute(cmd: SysCmd) -> MainResult<()> {
         match cmd {
             SysCmd::New(args) => Self::handle_new(args).await,
-            SysCmd::Update(args) => Self::handle_update(args).await,
+            SysCmd::Resolve(args) => Self::handle_resolve(args).await,
             SysCmd::Package(args) => Self::handle_package(args).await,
             SysCmd::Localize(args) => Self::handle_localize(args).await,
-            SysCmd::Setting(args) => Self::handle_setting(args).await,
-            SysCmd::Check(args) => Self::handle_check(args).await,
             SysCmd::Diff(args) => Self::handle_diff(args).await,
         }
     }
@@ -898,9 +814,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sys_update_args_getter() {
+    fn test_sys_resolve_args_getter() {
         once_init_log();
-        let args = SysUpdateArgs {
+        let args = SysResolveArgs {
             debug_log: DebugLogArgs {
                 debug: 2,
                 log: Some("info".to_string()),
@@ -950,6 +866,40 @@ mod tests {
             SysCmd::Package(a) => assert!(a.full),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_sys_resolve_parses_and_update_alias() {
+        // 新名 resolve
+        match SysCmd::try_parse_from(["gops", "resolve"]).unwrap() {
+            SysCmd::Resolve(_) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 旧名 update 保留为隐藏别名（兼容 2.3.x）
+        match SysCmd::try_parse_from(["gops", "update"]).unwrap() {
+            SysCmd::Resolve(_) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sys_resolve_force_flag_parses() {
+        match SysCmd::try_parse_from(["gops", "resolve", "--force"]).unwrap() {
+            SysCmd::Resolve(a) => assert!(a.force),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sys_setting_removed() {
+        // `sys setting` 已移除（与 `sys new` 重叠）
+        assert!(SysCmd::try_parse_from(["gops", "setting"]).is_err());
+    }
+
+    #[test]
+    fn test_sys_check_removed() {
+        // `sys check` 已移除（漂移检查并入 `sys localize` 结尾的 [WARN]）
+        assert!(SysCmd::try_parse_from(["gops", "check"]).is_err());
     }
 
     #[test]
@@ -1248,7 +1198,7 @@ exit 0
         // 3. 解析变量（生成 sys/merged_vars.yml，并初始化项目值文件）
         {
             let _wd = WorkDirWithLock::change(prj.join("my-sys")).unwrap();
-            SysCommandHandler::handle_update(SysUpdateArgs {
+            SysCommandHandler::handle_resolve(SysResolveArgs {
                 debug_log: DebugLogArgs {
                     debug: 0,
                     log: None,
@@ -1399,7 +1349,7 @@ exit 0
         let sys_dir = temp_dir.path().join("diff_demo");
         {
             let _wd = WorkDirWithLock::change(&sys_dir).unwrap();
-            SysCommandHandler::handle_update(SysUpdateArgs {
+            SysCommandHandler::handle_resolve(SysResolveArgs {
                 debug_log: DebugLogArgs {
                     debug: 0,
                     log: None,

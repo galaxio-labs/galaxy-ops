@@ -20,9 +20,9 @@
 | `prj sync` | 按 `addr` 重新取包 → overlay 到已导入系统；命中 `protect` 跳过、包外未声明不删 | `src/ops_prj/update.rs:71-109`（`update_sys_content` / `overlay_one_system`）、`apply_overlay:115` |
 | `prj backup` / `prj restore` | 现场态归档（清单 + sha256 + `keep`）/ 合并回现场 | `src/ops_prj/backup.rs` |
 | `prj diagnose` | `values/` 纳管、`sys_models` 重名、各声明**自身**齐备（如 `contract:` 是否在场；不跨声明推理） | `src/ops_prj/diagnose.rs:250` |
-| `sys update` / `sys localize` | 解析 vars → `merged_vars.yml`；渲染 `.env` + 模板，并跑系统自己的 `gx run localize` 流程 | `README.md`「发布态」 |
+| `sys resolve` / `sys localize` | 解析 vars → `merged_vars.yml`；渲染 `.env` + 模板，并跑系统自己的 `gx run localize` 流程 | `README.md`「发布态」 |
 | `gops run` | `download/install/uninstall/start/stop/status/diagnose` → `docker compose pull/create/down/up -d/stop/ps/config` | `app/gops/commands/run_cmd.rs:48-119`、`compose_subcommand:221-232` |
-| `deliver.lock` / `sys check` | 版本与值指纹 / 值改了没 `localize` 的漂移卡口 | `gops sys package`、`gops sys check` |
+| `deliver.lock` | 版本与值指纹 | `gops sys package` |
 
 三个缺口：
 
@@ -106,7 +106,7 @@ gops prj upgrade [<sys>] --to <version|url|path> --on-failure <rollback-all|halt
 1. prj diagnose（全系统）            ← 有 fail 即停；--dry-run 打印计划后退出
 2. prj backup（全系统）              ← 回滚点，含 state/*.db*
 3. apply：prj sync（全系统）        ← 只动磁盘内容，不停服务
-4. regenerate：sys update?(按需) + sys localize（全系统）
+4. regenerate：sys resolve?(按需) + sys localize（全系统）
 5. pull：run download（全系统）       ← 新镜像没全到齐，绝不进入下一步
 6. up：run start（全系统）            ← 第一次真正切换
 7. health：--health-cmd（重试至 timeout）+ run status（全系统）
@@ -185,11 +185,11 @@ prj restore(全部系统的 backup_id) → run start(全部) → health(全部) 
 | system ref 的 version（§3.1） | 探活脚本内容（如 `curl -f https://<域名>/…`） |
 | `prj upgrade` 事务 / `--on-failure` 处置 / 幂等 / 状态文件 / `--dry-run` / `--json` | 镜像 tag 语义（`GATEWAY_TAG`/`WEB_TAG`/`WPARSE_TAG`） |
 | backup→update→localize→pull→up 的编排 + 健康钩子调用 | 「先栈后 agent」的顺序与授权 |
-| 复用 `prj backup/restore`、`sys check` 漂移卡口 | 触发与调度（timer 轮询 / 上级 push）、执行器进程 |
+| 复用 `prj backup/restore` | 触发与调度（timer 轮询 / 上级 push）、执行器进程 |
 
 ## 5. 现场证据（`wist-gateway-stack`，2026-10-03）
 
-- **手工升级序列**（`README.md`「发布态」）：`prj sync` → `sys update`/`sys localize` →
+- **手工升级序列**（`README.md`「发布态」）：`prj sync` → `sys resolve`/`sys localize` →
   `run download` → `run start`。今天全靠人肉执行 + 记得先备份；顺序错（先停后拉）就没救。
 - **网关在栈内**：换 `gateway` 容器时**控制面会断** → 执行器必须在 **host 侧**、回滚**不能依赖网关**；
   上级要容忍这段空窗。

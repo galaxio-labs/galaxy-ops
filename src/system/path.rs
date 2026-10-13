@@ -131,7 +131,7 @@ impl SysOperatorPath {
     /// 只含真正的解析输入：`sys/setting/vars.yml`、`sys/mod_list.yml`、`sys/sys_model.yml`。
     /// **不含 `sys/setting/list.yml`**——它是按模块的本地化目的地映射，不参与变量解析；
     /// 而且 `update_local` 会在写 `merged_vars.yml` **之后**运行其迁移（重写 `list.yml`），
-    /// 若纳入会导致刚 localize 完 `sys check` 就误报“定义更新”。
+    /// 若纳入会导致刚 localize 完就误报“变量定义比已解析结果新”。
     pub fn var_input_files(&self) -> Vec<PathBuf> {
         let sys = self.sys_dir();
         [

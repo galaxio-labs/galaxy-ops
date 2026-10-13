@@ -196,7 +196,7 @@ pub enum PrjCmd {
     #[command(
         about = "升级发布态 (Upgrade Deployed Systems)",
         long_about = "对已导入的系统做一次**升级事务**：diagnose → backup → apply（覆盖包内内容）→ \
-                     regenerate（sys update + localize）→ pull → up → health。\n\
+                     regenerate（sys resolve + localize）→ pull → up → health。\n\
                      失败处置由 `--on-failure` 指定（rollback-all = 整工程回滚；halt = 停在那里不回滚）；\
                      默认值未定，现阶段**必填**。\n\
                      第 1 版只支持 `kind: docker-compose` 的系统；`--to` 收**版本**（按 ref 的 `addr` 模板 \

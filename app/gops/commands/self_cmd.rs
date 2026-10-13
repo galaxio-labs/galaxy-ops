@@ -89,6 +89,9 @@ pub struct SelfCheckArgs {
 
     #[arg(long, action = ArgAction::SetTrue, default_value = "false")]
     pub json: bool,
+
+    #[clap(flatten)]
+    pub mirror: MirrorArgs,
 }
 
 #[derive(Debug, Args, Clone, Getters)]
@@ -107,6 +110,54 @@ pub struct SelfUpdateArgs {
 
     #[arg(long, action = ArgAction::SetTrue, default_value = "false")]
     pub force: bool,
+
+    #[clap(flatten)]
+    pub mirror: MirrorArgs,
+}
+
+/// 可选的下载镜像（GitHub 加速站）。
+///
+/// 只把 manifest 与制品 URL 套上前缀，不改变校验（sha256 照常）。值可以是内置预设名，
+/// 也可以是自定义前缀 URL。
+#[derive(Debug, Args, Clone, Getters)]
+pub struct MirrorArgs {
+    /// 下载镜像：预设名或自定义前缀 URL。如 `--mirror githubproxy` / `--mirror https://githubproxy.cc/`
+    #[arg(long = "mirror", value_name = "PRESET|URL")]
+    pub mirror: Option<String>,
+}
+
+/// 内置镜像预设：`名称 -> 前缀`（前缀以 `/` 结尾）。
+const MIRROR_PRESETS: &[(&str, &str)] = &[("githubproxy", "https://githubproxy.cc/")];
+
+impl MirrorArgs {
+    /// 解析出实际的下载前缀（未指定时 `Ok(None)` = 直连）。
+    ///
+    /// 值可以是预设名（见 `MIRROR_PRESETS`）或**带 scheme** 的前缀 URL；其它视为错误，
+    /// 免得把裸字当 URL 用、报出难懂的 fetch 错。
+    pub fn resolve_prefix(&self) -> Result<Option<String>, String> {
+        let Some(raw) = self
+            .mirror
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+        if let Some((_, url)) = MIRROR_PRESETS.iter().find(|(name, _)| *name == raw) {
+            return Ok(Some((*url).to_string()));
+        }
+        if raw.contains("://") {
+            return Ok(Some(raw.to_string()));
+        }
+        let presets = MIRROR_PRESETS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!(
+            "unknown mirror '{raw}': use a preset ({presets}) or a full URL with scheme"
+        ))
+    }
 }
 
 #[derive(Debug, Args, Clone, Getters)]
@@ -139,7 +190,17 @@ impl SelfCommandHandler {
             SelfCmd::Check(args) => {
                 let svc = SelfUpdateService::new()?;
                 let channel = parse_channel(args.channel.as_str())?;
-                let out = svc.check(CheckRequest { channel }).await?;
+                let url_prefix = args.mirror.resolve_prefix().map_err(|e| {
+                    MainReason::Uvs(UvsReason::validation_error())
+                        .to_err()
+                        .with_detail(e)
+                })?;
+                let out = svc
+                    .check(CheckRequest {
+                        channel,
+                        url_prefix,
+                    })
+                    .await?;
                 if args.json {
                     println!(
                         "{}",
@@ -158,12 +219,18 @@ impl SelfCommandHandler {
             SelfCmd::Update(args) => {
                 let svc = SelfUpdateService::new()?;
                 let channel = parse_channel(args.channel.as_str())?;
+                let url_prefix = args.mirror.resolve_prefix().map_err(|e| {
+                    MainReason::Uvs(UvsReason::validation_error())
+                        .to_err()
+                        .with_detail(e)
+                })?;
                 let req = UpdateRequest {
                     channel,
                     to_version: args.to_version.clone(),
                     yes: args.yes,
                     dry_run: args.dry_run,
                     force: args.force,
+                    url_prefix,
                 };
                 let out = svc.update(req).await?;
                 println!("channel={}", out.channel.as_str());
@@ -349,7 +416,7 @@ fn render_relation_message(relation: VersionRelation, use_color: bool) -> String
 #[cfg(test)]
 mod tests {
     use super::{
-        SelfCheckArgs, SelfCmd, SkillCmd, format_self_check_report, parse_channel,
+        MirrorArgs, SelfCheckArgs, SelfCmd, SkillCmd, format_self_check_report, parse_channel,
         parse_skill_targets, render_relation_message,
     };
     use clap::Parser;
@@ -381,6 +448,50 @@ mod tests {
                 assert!(!args.force);
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mirror_flag_parses_and_resolves() {
+        // 默认：直连（无前缀）
+        match SelfCmd::try_parse_from(["self", "check"]).unwrap() {
+            SelfCmd::Check(args) => assert_eq!(args.mirror.resolve_prefix().unwrap(), None),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 内置预设：githubproxy
+        match SelfCmd::try_parse_from(["self", "check", "--mirror", "githubproxy"]).unwrap() {
+            SelfCmd::Check(args) => assert_eq!(
+                args.mirror.resolve_prefix().unwrap().as_deref(),
+                Some("https://githubproxy.cc/")
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 自定义前缀 URL
+        match SelfCmd::try_parse_from(["self", "update", "--mirror", "https://mirror.example.com/"])
+            .unwrap()
+        {
+            SelfCmd::Update(args) => assert_eq!(
+                args.mirror.resolve_prefix().unwrap().as_deref(),
+                Some("https://mirror.example.com/")
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 空值 → 直连
+        match SelfCmd::try_parse_from(["self", "update", "--mirror", "  "]).unwrap() {
+            SelfCmd::Update(args) => assert_eq!(args.mirror.resolve_prefix().unwrap(), None),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 未知预设名（非 URL）→ 明确报错，而不是把裸字当 URL 用
+        match SelfCmd::try_parse_from(["self", "update", "--mirror", "nope"]).unwrap() {
+            SelfCmd::Update(args) => {
+                let err = args.mirror.resolve_prefix().unwrap_err();
+                assert!(err.contains("unknown mirror"), "unexpected error: {err}");
+                assert!(
+                    err.contains("githubproxy"),
+                    "available presets should be listed: {err}"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
         }
     }
 
@@ -420,6 +531,7 @@ mod tests {
         let args = SelfCheckArgs {
             channel: "beta".to_string(),
             json: true,
+            mirror: MirrorArgs { mirror: None },
         };
         assert_eq!(args.json(), &true);
     }

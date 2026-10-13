@@ -5,6 +5,20 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.4.0] - 2026-10-14
+
+### 新增功能
+
+- **`gops self check` / `gops self update` 支持下载镜像前缀 `--mirror <PRESET|URL>`**：可用内置预设
+  `--mirror githubproxy`（`https://githubproxy.cc/`），或传自定义前缀 URL。前缀只作用于自升级的
+  manifest 与制品下载地址，sha256 校验照常；仅对绝对的 http(s) URL 生效。未知预设名会报明确错误，
+  不会被当成 URL 直接使用。
+
+### 变更
+
+- 升级 `wp-self-update` 到 `0.5.0`（`SourceConfig` 新增必填字段 `url_prefix`，属破坏性变更），
+  `gops` 依赖由本地 path 切回 crates.io。
+
 ## [2.3.2] - 2026-10-13
 
 ### 变更

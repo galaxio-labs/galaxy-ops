@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-ops"
-version = "2.3.2"
+version = "2.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3854,9 +3854,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wp-self-update"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2f17caa0ad042992c0b20924c02ffe41c79ab1b0cba154f2ef52ef62285fc9c"
+checksum = "4849667e40ea6612e5e795f9b5d014b6284c1de6917843e4e258fa7882ae5f54"
 dependencies = [
  "derive_more",
  "flate2",

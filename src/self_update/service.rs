@@ -17,6 +17,8 @@ const MAX_BACKUPS: usize = 5;
 #[derive(Clone, Debug, Default)]
 pub struct CheckRequest {
     pub channel: ReleaseChannel,
+    /// 可选下载前缀（如 `https://githubproxy.cc/`）；`None` = 直连。
+    pub url_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -26,6 +28,8 @@ pub struct UpdateRequest {
     pub yes: bool,
     pub dry_run: bool,
     pub force: bool,
+    /// 可选下载前缀（如 `https://githubproxy.cc/`）；`None` = 直连。
+    pub url_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +60,7 @@ impl SelfUpdateService {
         let mut state = self.storage.load_state()?;
         let channel = req.channel;
 
-        let wp_source = wp_source(channel);
+        let wp_source = wp_source(channel, req.url_prefix.clone());
         let wp_req = wp_self_update::CheckRequest {
             product: PRODUCT_NAME.to_string(),
             source: wp_source,
@@ -101,7 +105,7 @@ impl SelfUpdateService {
         let channel = req.channel;
         let current = env!("CARGO_PKG_VERSION").to_string();
 
-        let wp_source = wp_source(channel);
+        let wp_source = wp_source(channel, req.url_prefix.clone());
 
         // 先检查以获取远端版本
         let check_req = wp_self_update::CheckRequest {
@@ -312,13 +316,14 @@ impl SelfUpdateService {
     }
 }
 
-fn wp_source(channel: ReleaseChannel) -> wp_self_update::SourceConfig {
+fn wp_source(channel: ReleaseChannel, url_prefix: Option<String>) -> wp_self_update::SourceConfig {
     wp_self_update::SourceConfig {
         channel: wp_self_update::UpdateChannel::from(channel),
         kind: wp_self_update::SourceKind::Manifest {
             updates_base_url: MANIFEST_BASE_URL.to_string(),
             updates_root: None,
         },
+        url_prefix,
     }
 }
 

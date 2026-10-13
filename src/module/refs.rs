@@ -202,17 +202,46 @@ mod tests {
 
     use crate::module::{CpuArch, ModelSTD, OsCPE, RunSPC, refs::ModuleSpecRef};
 
-    fn copy_dir_all(src: &Path, dst: &Path) {
-        std::fs::create_dir_all(dst).unwrap();
-        for entry in std::fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            let to = dst.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_dir_all(&entry.path(), &to);
-            } else {
-                std::fs::copy(entry.path(), &to).unwrap();
-            }
-        }
+    /// 写入一个可被 `MMOperator::load_from_model` 加载的最小模块内容目录。
+    ///
+    /// 内容与 `example/mod-operators/redis2_mock/mod/arm-mac14-host` 对齐，但**内联在测试里**：
+    /// 该 example 目录被 `.gitignore` 忽略，CI 检出时并不存在。`load_from_model` 只强制要求
+    /// `spec/artifact.yml`、`spec/depends.yml`、`vars.yml`；`workflows/` 与 `_gal/` 缺失时退化为空。
+    fn write_mock_module(root: &Path) {
+        let spec = root.join("spec");
+        std::fs::create_dir_all(&spec).unwrap();
+        std::fs::write(
+            spec.join("artifact.yml"),
+            r#"- name: redis2_mock
+  version: 0.1.0
+  origin_addr:
+    url: http://your-artifact-repo/redis2_mock-0.1.0.tar.gz
+  cache_addr:
+    url: '{{ART_CACHE_REPO}}'
+  cache_enable: false
+  local: redis2_mock-0.1.0.tar.gz
+"#,
+        )
+        .unwrap();
+        std::fs::write(spec.join("depends.yml"), "dep_root: ''\ndeps: []\n").unwrap();
+        std::fs::write(
+            root.join("vars.yml"),
+            r#"immutable:
+- name: app_name
+  value: redis2_mock
+system:
+- name: sys_domain
+  value: http://test.galaxy.org/alpha
+- name: ART_CACHE_REPO
+  value: http://unknow.net
+module:
+- name: cpu
+  value: 1000
+- name: mem
+  value: 1048
+"#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -298,10 +327,7 @@ mod tests {
         );
         // 内容只放在旧布局
         let legacy = r.legacy_mod_dir(&sys_root);
-        copy_dir_all(
-            Path::new("./example/mod-operators/redis2_mock/mod/arm-mac14-host"),
-            &legacy,
-        );
+        write_mock_module(&legacy);
         let new = r.mod_dir(&sys_root);
         r.set_local_with_legacy(new, legacy);
 
@@ -320,14 +346,8 @@ mod tests {
         );
         let new = r.mod_dir(&sys_root);
         let legacy = r.legacy_mod_dir(&sys_root);
-        copy_dir_all(
-            Path::new("./example/mod-operators/redis2_mock/mod/arm-mac14-host"),
-            &new,
-        );
-        copy_dir_all(
-            Path::new("./example/mod-operators/redis2_mock/mod/arm-mac14-host"),
-            &legacy,
-        );
+        write_mock_module(&new);
+        write_mock_module(&legacy);
         r.set_local_with_legacy(new.clone(), legacy);
 
         let spec = r.get_target_spec().unwrap().unwrap();

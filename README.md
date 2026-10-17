@@ -57,8 +57,8 @@ gx --version
 
 ```bash
 gops self status                          # 当前版本与安装目录
-gops self check --channel alpha           # 查询通道最新版本（--json 机器可读）
-gops self update --channel alpha --yes    # 升级到最新版
+gops self check -c alpha                  # 查询通道最新版本（-c 是 --channel 短写；--json 机器可读）
+gops self update -c alpha --yes           # 升级到最新版
 gops self rollback                        # 回滚到上一版本
 ```
 
@@ -166,8 +166,16 @@ gops run diagnose                # 诊断
 gops prj new --name customer-a                              # 创建运维工程
 gops prj import --path /path/to/web-stack-0.1.0.tar.gz      # 导入已打包的系统
 gops prj sync                                               # 同步内容到 addr 指向的版本；缺失系统按包导入（非破坏）
-gops prj upgrade --to <version> --on-failure rollback-all   # 一次可回滚的发布升级（备份/重渲/拉镜像/切换/探活）
+gops prj upgrade latest -c alpha --on-failure rollback-all  # 一次可回滚的发布升级（按通道取最新）
+gops prj upgrade web-stack patch --on-failure halt          # 只升 web-stack 到下一个 patch
+gops prj upgrade web-stack 0.10.0-alpha --on-failure rollback-all  # 精确版本
+gops prj upgrade --to /path/to/pkg.tar.gz --on-failure halt # 完整地址逃生口
 ```
+
+`prj import` 会自动把 `pkg-1.0.0.tar.gz` 里的版本改写成 `{version}` 模板并写入 `version: 1.0.0`，
+后续可直接用 `prj upgrade latest|patch|minor|major`。目标版本与现场版本一致时默认 **no-op**
+（不备份、不覆盖、不切换），`--force` 可强制重跑。`--on-failure` 默认 `rollback-all`，
+需要停在现场排查时显式传 `--on-failure halt`。
 
 「内容 / 版本」类命令的分工（避免 `sync` 与 `upgrade` 混淆）：
 

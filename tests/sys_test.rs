@@ -103,6 +103,15 @@ async fn test_full_flow() -> MainResult<()> {
         ops_prj.contains("../../sys-operators/"),
         "ops-prj.yml 的 addr 应相对项目根：\n{ops_prj}"
     );
+    // `prj import` 应自动把具体版本地址改写成 `{version}` 模板并声明 version。
+    assert!(
+        ops_prj.contains("example_sys_x-{version}.tar.gz"),
+        "ops-prj.yml 的 addr 应自动模板化：\n{ops_prj}"
+    );
+    assert!(
+        ops_prj.contains("version: 1.0.0"),
+        "ops-prj.yml 应声明导入包版本：\n{ops_prj}"
+    );
     assert!(
         ops_prj.contains("backup:"),
         "ops-prj.yml 缺 backup：\n{ops_prj}"

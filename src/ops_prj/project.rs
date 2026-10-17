@@ -23,7 +23,12 @@ impl OpsProject {
         }
     }
     pub fn import_ops_sys(&mut self, ops_sys: OpsSystem) {
-        self.conf.import_sys(ops_sys);
+        self.conf.upsert_sys(ops_sys);
+    }
+
+    /// 更新某系统声明的 `version:`（升级成功后回写用）；返回值表示是否有变化。
+    pub fn set_sys_version(&mut self, sys: &str, version: &str) -> MainResult<bool> {
+        self.conf.set_sys_version(sys, version)
     }
     pub fn load(root_local: &Path) -> MainResult<Self> {
         let mut ctx = OperationContext::doing("load project")

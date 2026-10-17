@@ -77,23 +77,36 @@ sys_models:
 （`prj import` / `sync` / `upgrade`）都走它。含 `{version}` 但没写 `version`、
 或给了版本但 addr 没有占位 —— 都在解析处**明确报错**，绝不拿字面量 `{version}` 去下载。
 
-> 通道 `channel: stable|alpha|beta`（对齐 `gops self` / `galaxio-labs/get`，见 `src/self_update/`）
-> 仍未做，属后续超集。
->
-> 注：升级前后的版本仍从 `deliver.lock`（§3.4）读，状态文件里的 `from_version` / `to_version` 不缺。
+`prj import` 会从导入地址的最后两段识别版本（文件名 / 相邻 release tag 目录），
+自动把具体地址改写成 `{version}` 模板并写入 `version:`；git 地址或识别不到版本的地址保持原样。
+
+`latest` / `patch` / `minor` / `major` 需要**可枚举的版本目录**：当前从 GitHub Releases、
+git tag、本地包目录读取；普通 HTTP 包地址无法枚举版本，此时只支持精确版本或 `--to`。
+通道 `stable|alpha|beta` 对齐 `gops self`，`-c/--channel` 缺省按当前部署版本后缀推断。
+解析出的具体版本在**任何副作用之前**确定，并在成功后回写 `ops-prj.yml` 的 `version:`
+（`--no-save` 可关闭）。
+
+> 注：升级前后的版本仍从 `version.txt` / `deliver.lock`（§3.4）读，状态文件里的 `from_version` / `to_version` 不缺。
 
 ### 3.2 新命令 `gops prj upgrade` 与阶段序
 
 ```
-gops prj upgrade [<sys>] --to <version|url|path> --on-failure <rollback-all|halt> [--dry-run] [--health-cmd ...] [--json]
+gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|alpha|beta>] \
+  [--to <url|path>] [--on-failure <rollback-all|halt>] [--dry-run] [--health-cmd ...] [--json] [--no-save]
 ```
+
+`<spec>` 支持 `latest` / `patch` / `minor`（`feat` 别名）/ `major` / 精确版本；缺省使用
+`ops-prj.yml` 的 `version:`。第一个位置参数命中已导入系统时当 `sys`，否则当 `spec`。
 
 | flag | 作用 |
 | --- | --- |
-| `--to <version\|url\|path>` | 目标版本（按 ref 的 addr 模板 `{version}` 渲染）或完整地址；**必填**（见 §3.1） |
+| `<spec>` / `-v, --version <spec>` | 版本 spec：`latest` / `patch` / `minor|feat` / `major` / `X.Y.Z`；与 `--to` 互斥 |
+| `-c, --channel <stable\|alpha\|beta>` | 只对 keyword spec 生效；缺省按当前部署版本后缀推断 |
+| `--to <url\|path>` | 完整包地址；与版本 spec / channel 互斥 |
+| `--no-save` | 成功后不回写 `ops-prj.yml` 的 `version:`（默认回写） |
 | `--dry-run` | 只出计划：会覆盖哪些文件、跳过哪些（protect）、拉哪些镜像；**不动现场** |
 | `--health-cmd <shell>` / `--health-timeout <sec>` | 栈外探活；**给了才做回滚判定**（没给则只切换、不判定） |
-| `--on-failure <rollback-all\|halt>` | 失败处置（§3.3）。**默认未定 → 现阶段必填**，不给就拒绝 |
+| `--on-failure <rollback-all\|halt>` | 失败处置（§3.3）。**默认 `rollback-all`**；`halt` 需显式指定 |
 | `--json` | 机读结果（契约见 §3.4） |
 
 **不提供 `--no-backup`**：备份是事务的前提，不开逃生门（以后确需再加）。
@@ -102,7 +115,9 @@ gops prj upgrade [<sys>] --to <version|url|path> --on-failure <rollback-all|halt
 **阶段序**（每个阶段对**全部**目标系统做完再进下一阶段；步骤都复用既有实现，不新造）：
 
 ```
-0. 解析目标地址；与当前 deliver.lock 比对 → 相同则 no-op 退出
+0. 解析目标（地址或版本 spec；关键字 spec 查版本目录）→ 得到具体版本 + 地址，
+   并**先确认包存在**（本地 `is_file` / HTTP `HEAD`（必要时 `GET Range`）/ git `ls-remote`）；
+   若目标版本与现场版本全部相同且未 `--force` → **no-op**（写成功状态，不执行后续事务）
 1. prj diagnose（全系统）            ← 有 fail 即停；--dry-run 打印计划后退出
 2. prj backup（全系统）              ← 回滚点，含 state/*.db*
 3. apply：prj sync（全系统）        ← 只动磁盘内容，不停服务
@@ -117,7 +132,7 @@ gops prj upgrade [<sys>] --to <version|url|path> --on-failure <rollback-all|halt
 > **先拉后停**在这里是结构性的：第 5 步 `pull` 对全部系统做完，才允许第 6 步 `up` ——
 > 「镜像拉不到」这个最常见的失败源，在**没停任何服务**时就被挡下。
 
-### 3.3 失败处置：`--on-failure`（参数已定，**默认未定**）
+### 3.3 失败处置：`--on-failure`（默认 `rollback-all`）
 
 失败时**做什么**由参数指定，不写死在实现里：
 
@@ -132,7 +147,7 @@ gops prj upgrade [<sys>] --to <version|url|path> --on-failure <rollback-all|halt
 prj restore(全部系统的 backup_id) → run start(全部) → health(全部) → 报「已回滚（整工程）」
 ```
 
-**默认值未定** → 现阶段 `--on-failure` **必填**：不给就拒绝，**不替人选默认**。等定了默认值再放开。
+**默认值已定：`rollback-all`**。默认行为偏安全；如果明确要在原地排查中间态，显式传 `--on-failure halt`。
 
 两种取值的代价（写清，别让人意外）：
 
@@ -204,7 +219,7 @@ prj restore(全部系统的 backup_id) → run start(全部) → health(全部) 
 
 ## 6. 落地顺序
 
-1. ✅ **`prj upgrade`（先只走 docker-compose 路）**：阶段序（§3.2）+ `--on-failure`（§3.3，**暂必填**）+
+1. ✅ **`prj upgrade`（先只走 docker-compose 路）**：阶段序（§3.2）+ `--on-failure`（§3.3，默认 `rollback-all`）+
    `--dry-run` + `--json`；**无 `--no-backup`**。复用 `diagnose`/`backup`/`update`/`restore` +
    `run download/start/status`。
 2. ✅ **system ref `version` + `{version}` 模板**（§3.1），`--to <ver>` 生效 → 再补通道解析。
@@ -213,8 +228,7 @@ prj restore(全部系统的 backup_id) → run start(全部) → health(全部) 
 
 ## 7. 未定问题
 
-- **`--on-failure` 的默认值**（未决）：`rollback-all` 还是 `halt`？取决于「中间态可接受度」与「两次停机」
-  哪个更痛；**现阶段必填、不猜**（§3.3）。
+- ✅ **`--on-failure` 的默认值**：已定为 `rollback-all`（§3.3）；`halt` 作为显式覆盖。
 - **`deliver.lock` 是否记「上一版包内文件清单」**（未决）：决定 `prj upgrade` 能否清掉「上一版包内、
   这一版包外」的旧版本残渣。**本方案不依赖它**：先只覆盖、不删残渣；与
   [prj-backup-restore.md](./prj-backup-restore.md) §8 是同一个未定问题。

@@ -56,12 +56,30 @@ impl OpsSystem {
         super::import::addr_to_path_string(&self.addr)
     }
 
+    /// 声明的版本（去空白；空值视为未声明）。
+    pub fn declared_version(&self) -> Option<&str> {
+        self.version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    }
+
+    /// `addr` 是否含 `{version}` 占位（决定 `version:` / `-v` 是否有意义）。
+    pub fn has_version_placeholder(&self) -> bool {
+        self.addr_template().contains(VERSION_PLACEHOLDER)
+    }
+
+    /// 更新声明版本（`prj upgrade` 成功后回写 `ops-prj.yml` 用）。
+    pub fn set_version(&mut self, version: impl Into<String>) {
+        self.version = Some(version.into());
+    }
+
     /// 声明版本渲染出的可下载地址。
     /// - `addr` 不含 `{version}`：原样返回（第 1 步的纯地址）。
     /// - 含 `{version}`：按 `self.version` 替换；没写 `version` 就报错。
     pub fn resolved_addr(&self) -> MainResult<String> {
         let raw = self.addr_template();
-        render_addr(&raw, self.version.as_deref(), self.sys.name())
+        render_addr(&raw, self.declared_version(), self.sys.name())
     }
 
     /// 用**显式版本**覆盖声明版本后渲染地址（`prj upgrade --to <ver>` 用）。

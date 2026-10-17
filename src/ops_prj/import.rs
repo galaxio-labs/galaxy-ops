@@ -12,7 +12,9 @@ use crate::{
     error::MainResult,
     ops_prj::{
         project::OpsProject,
-        system::{OpsSystem, OpsTargetSystem},
+        system::{OpsSystem, OpsTargetSystem, VERSION_PLACEHOLDER},
+        upgrade::read_sys_version,
+        version::same_version,
     },
     types::Accessor,
 };
@@ -30,8 +32,14 @@ impl OpsProject {
         // 2. 取包、铺进项目根、初始化设置值（不改 conf）
         let target = self.install_sys_files(path, accessor, up_opt).await?;
 
-        // 3. 登记到 ops-prj.yml（同名系统在 conf 层去重）
-        let ops_sys = OpsSystem::new(target.spec().define().clone(), addr);
+        // 3. 登记到 ops-prj.yml：若导入地址里带版本，自动改写成 `{version}` 模板，
+        //    这样后续 `prj sync` / `prj upgrade latest|patch|...` 无需手工改 addr。
+        let installed_version = read_sys_version(&target.installation_path);
+        let (addr, version) = versioned_import_addr(path, addr, &installed_version);
+        let mut ops_sys = OpsSystem::new(target.spec().define().clone(), addr);
+        if let Some(version) = version {
+            ops_sys.set_version(version);
+        }
         self.import_ops_sys(ops_sys);
         self.save()?;
         Ok(())
@@ -163,6 +171,125 @@ impl OpsProject {
     }
 }
 
+/// 把具体包地址里的版本改写成 `{version}` 模板；返回模板地址与应声明的版本。
+///
+/// 优先从地址的最后两段识别版本（文件名 / release tag 目录）；识别不到时保留原地址。
+/// git 地址不含版本坐标（版本在 tag 里），不做改写。
+fn versioned_import_addr(
+    input: &str,
+    addr: Address,
+    installed_version: &str,
+) -> (Address, Option<String>) {
+    let Some(path_version) = detect_version(input).or_else(|| {
+        let installed = installed_version.trim();
+        (!installed.is_empty() && input.contains(installed)).then(|| installed.to_string())
+    }) else {
+        return (addr, None);
+    };
+
+    let Some(template) = templatize_version(input, &path_version) else {
+        return (addr, None);
+    };
+    let Ok(template_addr) = convert_addr(&template) else {
+        return (addr, None);
+    };
+
+    let installed = installed_version.trim();
+    if !installed.is_empty() && !same_version(installed, &path_version) {
+        println!(
+            "提示：包内版本 {installed} 与导入地址版本 {path_version} 不一致；\n  \
+             已按地址版本生成 {VERSION_PLACEHOLDER} 模板（version: {path_version}）。"
+        );
+    }
+    (template_addr, Some(path_version))
+}
+
+/// 从地址最后两段里识别 `1.2.3[-pre][+build]`（可带 `v` 前缀）。
+fn detect_version(input: &str) -> Option<String> {
+    let re =
+        regex::Regex::new(r"(?i)v?(\d+(?:\.\d+){2,}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)")
+            .ok()?;
+    for segment in input.split('/').rev().take(2) {
+        for caps in re.captures_iter(segment) {
+            let Some(version) = caps.get(1) else {
+                continue;
+            };
+            let version = strip_archive_suffix(version.as_str());
+            if is_version_coordinate(version) {
+                return Some(version.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// semver（3 段）或日期版本（4+ 段纯数字）都可作为版本坐标。
+fn is_version_coordinate(version: &str) -> bool {
+    if semver::Version::parse(version).is_ok() {
+        return true;
+    }
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() >= 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// 正则的预发布段会把 `.tar.gz` 一起吃进去；按常见制品后缀反复剥离。
+fn strip_archive_suffix(mut version: &str) -> &str {
+    loop {
+        let before = version;
+        for suffix in [
+            ".tar.gz", ".tgz", ".tar", ".gz", ".zip", ".sig", ".asc", ".sha256",
+        ] {
+            if let Some(stripped) = version.strip_suffix(suffix) {
+                version = stripped;
+                break;
+            }
+        }
+        if version == before {
+            break;
+        }
+    }
+    version.trim_end_matches(['.', '-'])
+}
+
+/// 把版本字符串替换成 `{version}`：只动文件名与紧邻的 release tag 目录，
+/// 避免误改 owner/repo 等与版本无关的路径段。
+fn templatize_version(input: &str, version: &str) -> Option<String> {
+    let version = version.trim();
+    if version.is_empty() || input.contains(VERSION_PLACEHOLDER) {
+        return None;
+    }
+    if input.starts_with("git@") || input.ends_with(".git") {
+        return None;
+    }
+
+    let mut segments: Vec<String> = input.split('/').map(str::to_string).collect();
+    let last = segments.len().checked_sub(1)?;
+    let mut changed = false;
+
+    if segments[last].contains(version) {
+        segments[last] = segments[last].replace(version, VERSION_PLACEHOLDER);
+        changed = true;
+    }
+
+    if last > 0 {
+        let parent = &segments[last - 1];
+        let without_v = parent
+            .strip_prefix('v')
+            .or_else(|| parent.strip_prefix('V'))
+            .unwrap_or(parent);
+        if without_v == version {
+            segments[last - 1] = parent.replace(version, VERSION_PLACEHOLDER);
+            changed = true;
+        }
+    }
+
+    changed.then(|| segments.join("/"))
+}
+
 /// 把 `Address` 反推回可用于 `convert_addr` / `build_pkg` 的路径字符串。
 /// 用于从 `ops-prj.yml` 记录的 addr 反推路径（`OpsSystem::addr_template`）。
 pub(crate) fn addr_to_path_string(addr: &Address) -> String {
@@ -177,6 +304,123 @@ pub(crate) fn addr_to_path_string(addr: &Address) -> String {
 mod tests {
     use super::*;
     use orion_variate::addr::{GitRepository, HttpResource, LocalPath};
+
+    #[test]
+    fn test_detect_version_from_filename_and_release_tag() {
+        assert_eq!(
+            detect_version("../../sys-operators/example_sys_x-1.0.0.tar.gz"),
+            Some("1.0.0".to_string())
+        );
+        assert_eq!(
+            detect_version(
+                "https://github.com/o/r/releases/download/v0.10.0-alpha/s-v0.10.0-alpha.tar.gz"
+            ),
+            Some("0.10.0-alpha".to_string())
+        );
+        // 版本只在 release tag 目录里。
+        assert_eq!(
+            detect_version("https://github.com/o/r/releases/download/v1.2.3/pkg.tar.gz"),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            detect_version("https://example.com/pkg-1.2.3-rc.1+build.5.tar.gz"),
+            Some("1.2.3-rc.1+build.5".to_string())
+        );
+        assert_eq!(
+            detect_version("https://example.com/pkg-1.2.3.tgz"),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            detect_version("https://example.com/pkg-1.2.3.zip"),
+            Some("1.2.3".to_string())
+        );
+        // 日期式 4 段版本也不能被截成 3 段。
+        assert_eq!(
+            detect_version("https://example.com/pkg-2026.10.17.1.tar.gz"),
+            Some("2026.10.17.1".to_string())
+        );
+        assert_eq!(detect_version("https://example.com/pkg.tar.gz"), None);
+    }
+
+    #[test]
+    fn test_templatize_version_touches_filename_and_tag_dir_only() {
+        assert_eq!(
+            templatize_version("../pkgs/s-1.0.0.tar.gz", "1.0.0"),
+            Some("../pkgs/s-{version}.tar.gz".to_string())
+        );
+        assert_eq!(
+            templatize_version(
+                "https://github.com/o/r/releases/download/v1.0.0/s-v1.0.0.tar.gz",
+                "1.0.0"
+            ),
+            Some(
+                "https://github.com/o/r/releases/download/v{version}/s-v{version}.tar.gz"
+                    .to_string()
+            )
+        );
+        // owner/repo 里即使出现相同版本数字也不改。
+        assert_eq!(
+            templatize_version(
+                "https://github.com/acme-1.0.0/r/releases/download/v2.0.0/pkg.tar.gz",
+                "2.0.0"
+            ),
+            Some(
+                "https://github.com/acme-1.0.0/r/releases/download/v{version}/pkg.tar.gz"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            templatize_version(
+                "https://example.com/pkg-2026.10.17.1.tar.gz",
+                "2026.10.17.1"
+            ),
+            Some("https://example.com/pkg-{version}.tar.gz".to_string())
+        );
+        assert_eq!(
+            templatize_version("https://github.com/o/r.git", "1.0.0"),
+            None
+        );
+        assert_eq!(
+            templatize_version("https://example.com/pkg.tar.gz", "1.0.0"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_versioned_import_addr_uses_path_version_and_falls_back() {
+        let input = "../../sys-operators/example_sys_x-1.0.0.tar.gz";
+        let addr = convert_addr(input).unwrap();
+        let (addr, version) = versioned_import_addr(input, addr, "1.0.0");
+        assert_eq!(
+            addr_to_path_string(&addr),
+            "../../sys-operators/example_sys_x-{version}.tar.gz"
+        );
+        assert_eq!(version.as_deref(), Some("1.0.0"));
+
+        // 地址里有版本但包内版本不一致：仍按地址版本生成模板。
+        let input = "https://github.com/o/r/releases/download/v1.0.0/pkg.tar.gz";
+        let addr = convert_addr(input).unwrap();
+        let (addr, version) = versioned_import_addr(input, addr, "0.9.0");
+        assert_eq!(
+            addr_to_path_string(&addr),
+            "https://github.com/o/r/releases/download/v{version}/pkg.tar.gz"
+        );
+        assert_eq!(version.as_deref(), Some("1.0.0"));
+
+        // 地址里识别不到版本：保留原地址，不写 version。
+        let input = "https://example.com/pkg.tar.gz";
+        let addr = convert_addr(input).unwrap();
+        let (addr, version) = versioned_import_addr(input, addr, "1.0.0");
+        assert_eq!(addr_to_path_string(&addr), input);
+        assert!(version.is_none());
+
+        // git 地址的版本在 tag 里，不在 URL 中 → 不改写。
+        let input = "https://github.com/o/r.git";
+        let addr = convert_addr(input).unwrap();
+        let (addr, version) = versioned_import_addr(input, addr, "1.0.0");
+        assert_eq!(addr_to_path_string(&addr), input);
+        assert!(version.is_none());
+    }
 
     #[test]
     fn test_addr_to_path_string() {

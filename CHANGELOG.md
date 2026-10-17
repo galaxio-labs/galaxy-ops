@@ -5,6 +5,30 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.5.0] - 2026-10-17
+
+### 新增功能
+
+- **`gops self check` / `gops self update` 的 `--channel` 支持短选项 `-c`**：
+  `gops self check -c alpha` / `gops self update -c alpha --yes` 与长选项等价。
+- **`gops prj upgrade` 支持版本 spec 与通道**：`upgrade [<sys>] <spec>` / `-v/--version <spec>`
+  接受 `latest`、`patch`、`minor`（`feat` 别名）、`major` 或精确版本；`-c/--channel stable|alpha|beta`
+  选择通道（缺省按当前部署版本后缀推断）。关键字 spec 会在**任何副作用之前**从版本目录
+  （GitHub Releases / git tag / 本地包目录）解析成具体版本；成功后把具体版本回写到
+  `ops-prj.yml` 的 `version:`（`--no-save` 可关闭）。`--to <url|path>` 仍是完整地址逃生口。
+- **升级前预检目标包存在性**：在 diagnose/backup 之前检查本地文件、HTTP（`HEAD`，
+  不支持时退回 `GET Range`）或 git 仓库；包不存在/不可访问时直接失败，不产生备份或部分覆盖。
+- **同版本 no-op**：目标版本与现场版本全部一致时，不执行 diagnose/backup/apply/pull/up/health，
+  直接写一条 `succeeded` 状态（`no_op: true`）；`--force` 可强制重跑。`--dry-run` 会显示 no-op。
+- **`prj import` 自动模板化版本地址**：导入 `.../pkg-1.0.0.tar.gz` 时自动把 `ops-prj.yml` 里的
+  addr 改写成 `.../pkg-{version}.tar.gz` 并写入 `version: 1.0.0`；支持文件名与相邻 release tag 目录
+  （如 `.../v1.0.0/pkg.tar.gz`），git 地址与无法识别版本的地址保持原样。
+
+### 变更
+
+- **`gops prj upgrade --on-failure` 默认值定为 `rollback-all`**：不再强制必填；
+  需要停在原地排查时显式传 `--on-failure halt`。
+
 ## [2.4.0] - 2026-10-14
 
 ### 新增功能

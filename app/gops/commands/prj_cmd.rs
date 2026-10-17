@@ -21,8 +21,23 @@ use std::time::Duration;
 
 use galaxy_ops::error::MainReason;
 use galaxy_ops::ops_prj::upgrade::{
-    FailurePolicy, ProjectRuntime, RuntimeDispatch, imported_systems, record_path, run_upgrade,
+    FailurePolicy, ProjectRuntime, RuntimeDispatch, UpgradeOutcome, UpgradeTarget,
+    imported_systems, record_path, run_upgrade,
 };
+use galaxy_ops::ops_prj::version::VersionSpec;
+use galaxy_ops::self_update::ReleaseChannel;
+
+fn parse_channel_arg(input: &str) -> Result<String, String> {
+    ReleaseChannel::parse(input)
+        .map(|channel| channel.as_str().to_string())
+        .ok_or_else(|| format!("channel={input}, expected=stable|alpha|beta"))
+}
+
+fn parse_failure_policy_arg(input: &str) -> Result<String, String> {
+    FailurePolicy::parse(input)
+        .map(|policy| policy.as_str().to_string())
+        .ok_or_else(|| format!("on-failure={input}, expected=rollback-all|halt"))
+}
 
 #[derive(Debug, Args, Getters)]
 pub struct PrjNewArgs {
@@ -116,20 +131,53 @@ pub struct PrjUpgradeArgs {
     #[clap(flatten)]
     pub debug_log: DebugLogArgs,
 
-    #[arg(help = "只升级该系统（缺省 = ops-prj.yml 里已导入的全部系统）")]
+    #[arg(
+        value_name = "SYS|SPEC",
+        help = "系统名（缺省 = 全部）；若它不是已导入系统，则视为版本 spec（latest/patch/minor/major/X.Y.Z）"
+    )]
     pub name: Option<String>,
 
     #[arg(
-        long = "to",
-        value_name = "VERSION|URL|PATH",
-        help = "目标版本（按 ref 的 addr 模板 `{version}` 解析）或完整地址（URL / 本机路径）"
+        value_name = "SPEC",
+        help = "第二个位置参数：版本 spec（与 -v/--version 二选一）"
     )]
-    pub to: String,
+    pub spec: Option<String>,
+
+    #[arg(
+        short = 'v',
+        long = "version",
+        value_name = "latest|patch|minor|major|X.Y.Z",
+        conflicts_with = "spec",
+        help = "目标版本 spec（`feat` 是 `minor` 的别名）"
+    )]
+    pub version: Option<String>,
+
+    #[arg(
+        long = "to",
+        value_name = "URL|PATH",
+        conflicts_with_all = ["version", "spec", "channel"],
+        help = "完整包地址（URL / 本机路径）；与版本 spec 互斥"
+    )]
+    pub to: Option<String>,
+
+    #[arg(
+        short = 'c',
+        long = "channel",
+        value_name = "stable|alpha|beta",
+        value_parser = parse_channel_arg,
+        help = "发布通道：仅对 latest/patch/minor/major 生效；缺省按当前部署版本后缀推断"
+    )]
+    pub channel: Option<String>,
+
+    #[arg(long = "no-save", help = "升级成功后不回写 ops-prj.yml 的 `version:`")]
+    pub no_save: bool,
 
     #[arg(
         long = "on-failure",
         value_name = "rollback-all|halt",
-        help = "失败处置：rollback-all = 整工程回滚；halt = 停在那里不回滚。默认未定，现阶段必填"
+        default_value = "rollback-all",
+        value_parser = parse_failure_policy_arg,
+        help = "失败处置：rollback-all = 整工程回滚（默认）；halt = 停在那里不回滚"
     )]
     pub on_failure: String,
 
@@ -197,10 +245,14 @@ pub enum PrjCmd {
         about = "升级发布态 (Upgrade Deployed Systems)",
         long_about = "对已导入的系统做一次**升级事务**：diagnose → backup → apply（覆盖包内内容）→ \
                      regenerate（sys resolve + localize）→ pull → up → health。\n\
-                     失败处置由 `--on-failure` 指定（rollback-all = 整工程回滚；halt = 停在那里不回滚）；\
-                     默认值未定，现阶段**必填**。\n\
-                     第 1 版只支持 `kind: docker-compose` 的系统；`--to` 收**版本**（按 ref 的 `addr` 模板 \
-                     `{version}` 解析）或**完整地址**（URL / 本机路径）。\n\
+                     失败处置由 `--on-failure` 指定（rollback-all = 整工程回滚，**默认**；halt = 停在那里不回滚）。\n\
+                     第 1 版只支持 `kind: docker-compose` 的系统。\n\
+                     版本 spec 支持 `latest` / `patch` / `minor`（`feat` 别名）/ `major` / `X.Y.Z`；\
+                     可写成 `upgrade [<sys>] <spec>` 或 `-v/--version <spec>`；缺省使用 `ops-prj.yml` 的 `version:`。\n\
+                     `-c/--channel stable|alpha|beta` 只对 keyword spec 生效，缺省按当前部署版本后缀推断。\n\
+                     `latest/patch/...` 从版本目录选择（GitHub Releases / git tag / 本地包目录）；\
+                     普通 HTTP 地址无法枚举版本时，请用精确版本或 `--to <完整地址>`。\n\
+                     成功后把解析出的具体版本回写 `ops-prj.yml`（`--no-save` 关闭）。\n\
                      只覆盖包内内容并保留现场态（`sys-prj.yml: protect`）；备份/回滚走 `prj backup`/`restore`。\
                      与 `prj sync` 的区别：本命令是**事务**（含备份 / 重渲 / 拉镜像 / 切换 / 探活，可回滚）；\
                      只同步磁盘内容用 `gops prj sync`。"
@@ -360,6 +412,134 @@ fn load_project_from_cwd(current_dir: &std::path::Path) -> MainResult<OpsProject
     .source_resource()?
 }
 
+fn system_names(project: &OpsProject) -> Vec<String> {
+    project
+        .conf()
+        .sys_models()
+        .iter()
+        .map(|s| s.sys().name().clone())
+        .collect()
+}
+
+/// 把位置参数拆成“系统名 + 目标”：
+/// - 第一个位置参数命中已导入系统 → 系统名；否则视为版本 spec；
+/// - 第二个位置参数、`-v/--version` 二选一，作为版本 spec；
+/// - `--to` 是完整地址，与 spec / channel 互斥；
+/// - 什么都没给 → 使用 `ops-prj.yml` 声明的 `version:`。
+fn parse_upgrade_request(
+    project: &OpsProject,
+    args: &PrjUpgradeArgs,
+) -> MainResult<(Option<String>, UpgradeTarget)> {
+    let known = |name: &str| {
+        project
+            .conf()
+            .sys_models()
+            .iter()
+            .any(|s| s.sys().name().as_str() == name)
+    };
+
+    let (sys, positional_spec) = match (args.name().as_deref(), args.spec().as_deref()) {
+        (None, None) => (None, None),
+        (None, Some(spec)) => (None, Some(spec.to_string())),
+        (Some(first), second) => {
+            if known(first) {
+                (Some(first.to_string()), second.map(str::to_string))
+            } else if second.is_some() {
+                return Err(MainReason::logic_detail(format!(
+                    "第一个位置参数 `{first}` 不是已导入系统，后面不能再跟版本 spec `{}`",
+                    second.unwrap_or_default()
+                )));
+            } else if VersionSpec::looks_like(first) {
+                (None, Some(first.to_string()))
+            } else {
+                return Err(MainReason::logic_detail(format!(
+                    "未知系统或无效版本 spec：`{first}`。\n  已导入系统：{}",
+                    system_names(project).join("、")
+                )));
+            }
+        }
+    };
+
+    if args.version().is_some() && positional_spec.is_some() {
+        return Err(MainReason::logic_detail(
+            "版本 spec 只能给一次：位置参数 或 -v/--version",
+        ));
+    }
+    let explicit_spec = args.version().as_deref().or(positional_spec.as_deref());
+
+    if args.to().is_some() && explicit_spec.is_some() {
+        return Err(MainReason::logic_detail(
+            "--to 是完整地址，不能同时给版本 spec",
+        ));
+    }
+    if args.to().is_some() && args.channel().is_some() {
+        return Err(MainReason::logic_detail(
+            "--channel 只用于 latest/patch/minor/major，不能和 --to 一起用",
+        ));
+    }
+
+    match (args.to().as_deref(), explicit_spec) {
+        (Some(addr), None) => Ok((sys, UpgradeTarget::Address(addr.to_string()))),
+        (None, Some(spec)) => {
+            let spec = VersionSpec::parse(spec)?;
+            if args.channel().is_some() && !spec.is_keyword() {
+                return Err(MainReason::logic_detail(format!(
+                    "--channel 只用于 latest/patch/minor/major；`{}` 是精确/声明版本",
+                    spec.as_str()
+                )));
+            }
+            Ok((sys, UpgradeTarget::Spec(spec)))
+        }
+        (None, None) => {
+            if args.channel().is_some() {
+                return Err(MainReason::logic_detail(
+                    "--channel 需要显式版本 spec：latest/patch/minor/major",
+                ));
+            }
+            Ok((sys, UpgradeTarget::Spec(VersionSpec::Declared)))
+        }
+        (Some(_), Some(_)) => Err(MainReason::logic_detail(
+            "--to 是完整地址，不能同时给版本 spec",
+        )),
+    }
+}
+
+/// 升级成功后把解析出的具体版本回写到 `ops-prj.yml` 的 `version:`。
+/// 只处理有具体版本的目标（完整地址目标 / 非版本化系统不写）。
+fn persist_upgrade_versions(
+    root: &Path,
+    outcome: &UpgradeOutcome,
+    machine_output: bool,
+) -> MainResult<()> {
+    let mut project = OpsProject::load(root)?;
+    let mut changed = Vec::new();
+    for (sys, version) in outcome
+        .plan
+        .systems
+        .iter()
+        .zip(&outcome.plan.target_versions)
+    {
+        let Some(version) = version.as_deref().filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        if project.set_sys_version(sys, version)? {
+            changed.push(format!("{sys}={version}"));
+        }
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    project.save()?;
+    let line = format!("回写版本  {}", changed.join("、"));
+    if machine_output {
+        // `--json` 的 stdout 必须是单行 JSON。
+        eprintln!("{line}");
+    } else {
+        println!("  {line}");
+    }
+    Ok(())
+}
+
 impl PrjCommandHandler {
     pub async fn handle_new(args: PrjNewArgs) -> MainResult<()> {
         let current_dir = std::env::current_dir().source_resource()?;
@@ -474,7 +654,10 @@ impl PrjCommandHandler {
         galaxy_ops::infra::configure_dfx_logging(&args);
         let current_dir = std::env::current_dir().source_resource()?;
         // 先确认 CWD 是项目根：backup/restore 的落点就是它，倒错地方代价很大。
-        let _ = load_project_from_cwd(&current_dir)?;
+        let project = load_project_from_cwd(&current_dir)?;
+
+        let (sys_name, target) = parse_upgrade_request(&project, &args)?;
+        let plan_target = target.label();
 
         let policy = FailurePolicy::parse(args.on_failure()).ok_or_else(|| {
             MainReason::logic_detail(format!(
@@ -483,15 +666,21 @@ impl PrjCommandHandler {
             ))
         })?;
 
-        let systems = imported_systems(&current_dir, args.name().as_deref())?;
+        let systems = imported_systems(&current_dir, sys_name.as_deref())?;
         // 早停：本版运行时只支持 docker-compose。非 compose 系统在**动现场之前**就拒，
         // 而不是先覆盖内容、localize 完到 pull 才报错（那就留下了中间态）。
         ensure_upgradeable(&systems, &current_dir)?;
         let state_path = record_path(&current_dir);
 
+        let channel = args
+            .channel()
+            .as_deref()
+            .map(|channel| ReleaseChannel::parse(channel).expect("channel is validated by clap"));
+
         let runtime = ProjectRuntime::new(
             current_dir.clone(),
-            args.to().clone(),
+            target,
+            channel,
             *args.force().force() > 0,
             args.health_cmd().clone(),
             Duration::from_secs(*args.health_timeout()),
@@ -501,7 +690,7 @@ impl PrjCommandHandler {
         let outcome = run_upgrade(
             &runtime,
             &systems,
-            args.to(),
+            &plan_target,
             policy,
             args.health_cmd().is_some(),
             *args.dry_run(),
@@ -517,6 +706,14 @@ impl PrjCommandHandler {
 
         if outcome.exit_code() != 0 {
             std::process::exit(1);
+        }
+
+        // 成功后才回写期望版本；失败 / 回滚 / dry-run 一律不写。
+        if !*args.dry_run()
+            && !*args.no_save()
+            && let Err(err) = persist_upgrade_versions(&current_dir, &outcome, *args.json())
+        {
+            eprintln!("警告：升级成功，但回写 ops-prj.yml 的 version 失败：{err}");
         }
         Ok(())
     }
@@ -535,14 +732,35 @@ impl PrjCommandHandler {
                     "无（不探活）"
                 }
             );
-            println!("  阶段序    diagnose → backup → apply → regenerate → pull → up → health");
-            for (sys, addr) in outcome.plan.systems.iter().zip(&outcome.plan.resolved) {
-                println!("  解析      {sys} → {addr}");
+            if outcome.plan.no_op {
+                println!("  结果      no-op（已是目标版本，不执行事务）");
+            } else {
+                println!("  阶段序    diagnose → backup → apply → regenerate → pull → up → health");
+            }
+            for (idx, (sys, addr)) in outcome
+                .plan
+                .systems
+                .iter()
+                .zip(&outcome.plan.resolved)
+                .enumerate()
+            {
+                match outcome
+                    .plan
+                    .target_versions
+                    .get(idx)
+                    .and_then(|v| v.as_deref())
+                {
+                    Some(version) => {
+                        println!("  解析      {sys} → {addr}（版本 {version}）")
+                    }
+                    None => println!("  解析      {sys} → {addr}"),
+                }
             }
             return;
         }
         if let Some(record) = &outcome.record {
             let label = match record.status.as_str() {
+                "succeeded" if outcome.plan.no_op => "已是目标版本（no-op）",
                 "succeeded" => "升级成功",
                 "rolled_back" => "已回滚（整工程）",
                 _ => "升级失败",
@@ -701,16 +919,27 @@ mod tests {
     }
 
     #[test]
-    fn test_prj_upgrade_requires_to_and_on_failure() {
-        // 两个都必填：缺一即拒（默认值未定，不替人选）。
-        assert!(
-            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "--to", "http://x/p.tar.gz"])
-                .is_err()
-        );
-        assert!(
-            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "--on-failure", "halt"]).is_err()
-        );
+    fn test_prj_upgrade_on_failure_defaults_to_rollback_all() {
+        // 缺省 → rollback-all（安全优先）。
+        let cmd = GInsCmd::try_parse_from(["gops", "prj", "upgrade", "latest"]).unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => {
+                assert_eq!(a.on_failure(), FailurePolicy::default().as_str());
+                assert_eq!(a.name().as_deref(), Some("latest"));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
 
+        // 显式 halt 仍可覆盖。
+        let cmd =
+            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "latest", "--on-failure", "halt"])
+                .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => assert_eq!(a.on_failure(), "halt"),
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 地址逃生口：--to 不再必填，但仍可用。
         let cmd = GInsCmd::try_parse_from([
             "gops",
             "prj",
@@ -725,15 +954,106 @@ mod tests {
         .unwrap();
         match cmd {
             GInsCmd::Prj(PrjCmd::Upgrade(a)) => {
-                assert_eq!(a.to(), "http://x/p.tar.gz");
+                assert_eq!(a.to().as_deref(), Some("http://x/p.tar.gz"));
                 assert_eq!(a.on_failure(), "rollback-all");
                 assert!(*a.dry_run());
                 assert!(*a.json());
                 assert_eq!(*a.health_timeout(), 60);
                 assert!(a.name().is_none());
+                assert!(a.spec().is_none());
+                assert!(a.version().is_none());
+                assert!(a.channel().is_none());
             }
             other => panic!("expected upgrade, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_prj_upgrade_parses_version_spec_and_channel() {
+        // 位置参数 spec：`upgrade latest -c alpha`
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "latest",
+            "-c",
+            "alpha",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => {
+                assert_eq!(a.name().as_deref(), Some("latest"));
+                assert!(a.spec().is_none());
+                assert_eq!(a.channel().as_deref(), Some("alpha"));
+                assert!(a.to().is_none());
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 系统名 + 第二个位置参数 spec：`upgrade web-stack patch`
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "web-stack",
+            "patch",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => {
+                assert_eq!(a.name().as_deref(), Some("web-stack"));
+                assert_eq!(a.spec().as_deref(), Some("patch"));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // `-v/--version` 与位置 spec 互斥；与 --to 也互斥。
+        assert!(
+            GInsCmd::try_parse_from([
+                "gops",
+                "prj",
+                "upgrade",
+                "web-stack",
+                "patch",
+                "-v",
+                "latest",
+                "--on-failure",
+                "halt",
+            ])
+            .is_err()
+        );
+        assert!(
+            GInsCmd::try_parse_from([
+                "gops",
+                "prj",
+                "upgrade",
+                "--to",
+                "http://x/p.tar.gz",
+                "-c",
+                "alpha",
+                "--on-failure",
+                "halt",
+            ])
+            .is_err()
+        );
+        // 非法 channel 由 clap value_parser 拒绝。
+        assert!(
+            GInsCmd::try_parse_from([
+                "gops",
+                "prj",
+                "upgrade",
+                "latest",
+                "-c",
+                "gamma",
+                "--on-failure",
+                "halt",
+            ])
+            .is_err()
+        );
     }
 
     fn make_project(root: &std::path::Path) {
@@ -744,6 +1064,347 @@ mod tests {
             "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\n",
         )
         .unwrap();
+    }
+
+    fn make_project_with_sys(root: &std::path::Path) {
+        make_project(root);
+        std::fs::write(
+            root.join("ops-prj.yml"),
+            "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\nsys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    path: ./s-v{version}.tar.gz\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_parse_upgrade_request_disambiguates_system_and_spec() {
+        let tmp = TempDir::new().unwrap();
+        make_project_with_sys(tmp.path());
+        let project = load_project_from_cwd(tmp.path()).unwrap();
+
+        // 位置参数 spec。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "latest",
+            "-c",
+            "alpha",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                let (sys, target) = parse_upgrade_request(&project, &args).unwrap();
+                assert!(sys.is_none());
+                assert!(matches!(target, UpgradeTarget::Spec(VersionSpec::Latest)));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 系统名 + 第二个位置参数 spec。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "web-stack",
+            "patch",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                let (sys, target) = parse_upgrade_request(&project, &args).unwrap();
+                assert_eq!(sys.as_deref(), Some("web-stack"));
+                assert!(matches!(target, UpgradeTarget::Spec(VersionSpec::Patch)));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 精确版本不能配 --channel。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "web-stack",
+            "-v",
+            "0.10.0",
+            "-c",
+            "alpha",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                assert!(parse_upgrade_request(&project, &args).is_err());
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 未知系统名 / 非法 spec：明确报错，而不是当成版本去下载。
+        let cmd =
+            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "typo", "--on-failure", "halt"])
+                .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                assert!(parse_upgrade_request(&project, &args).is_err());
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_upgrade_request_defaults_and_negative_cases() {
+        let tmp = TempDir::new().unwrap();
+        make_project_with_sys(tmp.path());
+        let project = load_project_from_cwd(tmp.path()).unwrap();
+
+        // 什么都没给 → 声明版本。
+        let cmd =
+            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "--on-failure", "halt"]).unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                let (sys, target) = parse_upgrade_request(&project, &args).unwrap();
+                assert!(sys.is_none());
+                assert!(matches!(target, UpgradeTarget::Spec(VersionSpec::Declared)));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 只给系统名 → 声明版本。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "web-stack",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                let (sys, target) = parse_upgrade_request(&project, &args).unwrap();
+                assert_eq!(sys.as_deref(), Some("web-stack"));
+                assert!(matches!(target, UpgradeTarget::Spec(VersionSpec::Declared)));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // `-v latest` 与 `--to` 都可以不带位置 spec。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "-v",
+            "latest",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                let (sys, target) = parse_upgrade_request(&project, &args).unwrap();
+                assert!(sys.is_none());
+                assert!(matches!(target, UpgradeTarget::Spec(VersionSpec::Latest)));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "web-stack",
+            "--to",
+            "./pkg.tar.gz",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                let (sys, target) = parse_upgrade_request(&project, &args).unwrap();
+                assert_eq!(sys.as_deref(), Some("web-stack"));
+                assert!(matches!(target, UpgradeTarget::Address(_)));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 声明版本 / 精确版本 + channel → 拒绝。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "web-stack",
+            "-c",
+            "alpha",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                assert!(parse_upgrade_request(&project, &args).is_err());
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 位置 spec 与 -v 重复 → 拒绝。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "latest",
+            "-v",
+            "patch",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                assert!(parse_upgrade_request(&project, &args).is_err());
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 第一个位置参数不是系统时，不能再跟第二个 spec。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "latest",
+            "patch",
+            "--on-failure",
+            "halt",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                assert!(parse_upgrade_request(&project, &args).is_err());
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_upgrade_request_accepts_bump_aliases_and_no_save() {
+        let tmp = TempDir::new().unwrap();
+        make_project_with_sys(tmp.path());
+        let project = load_project_from_cwd(tmp.path()).unwrap();
+
+        for (input, expected) in [
+            ("patch", VersionSpec::Patch),
+            ("minor", VersionSpec::Minor),
+            ("feat", VersionSpec::Minor),
+            ("major", VersionSpec::Major),
+        ] {
+            let cmd =
+                GInsCmd::try_parse_from(["gops", "prj", "upgrade", input, "--on-failure", "halt"])
+                    .unwrap();
+            match cmd {
+                GInsCmd::Prj(PrjCmd::Upgrade(args)) => {
+                    let (sys, target) = parse_upgrade_request(&project, &args).unwrap();
+                    assert!(sys.is_none());
+                    assert!(matches!(target, UpgradeTarget::Spec(spec) if spec == expected));
+                }
+                other => panic!("expected upgrade, got {other:?}"),
+            }
+        }
+
+        // 显式 halt 仍可覆盖（大小写/空白归一化）。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "latest",
+            "--on-failure",
+            "  HALT ",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => assert_eq!(a.on_failure(), "halt"),
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 非法值在 CLI 解析阶段就拒绝。
+        assert!(
+            GInsCmd::try_parse_from([
+                "gops",
+                "prj",
+                "upgrade",
+                "latest",
+                "--on-failure",
+                "continue",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_persist_upgrade_versions_writes_concrete_version() {
+        let tmp = TempDir::new().unwrap();
+        make_project_with_sys(tmp.path());
+        let outcome = UpgradeOutcome {
+            plan: galaxy_ops::ops_prj::upgrade::UpgradePlan {
+                systems: vec!["web-stack".to_string()],
+                target: "latest".to_string(),
+                policy: "halt".to_string(),
+                health: false,
+                resolved: vec!["./s-v0.10.0.tar.gz".to_string()],
+                target_versions: vec![Some("0.10.0".to_string())],
+                no_op: false,
+            },
+            dry_run: false,
+            record: None,
+            record_path: tmp.path().join("upgrade.json"),
+        };
+
+        persist_upgrade_versions(tmp.path(), &outcome, true).unwrap();
+
+        let reloaded = OpsProject::load(tmp.path()).unwrap();
+        let sys = &reloaded.conf().sys_models()[0];
+        assert_eq!(sys.declared_version(), Some("0.10.0"));
+    }
+
+    #[test]
+    fn test_persist_upgrade_versions_skips_address_targets_and_keeps_other_conf() {
+        let tmp = TempDir::new().unwrap();
+        make_project(tmp.path());
+        std::fs::write(
+            tmp.path().join("ops-prj.yml"),
+            "name: cust\nwork_envs:\n  dep_root: ''\n  deps: []\nbackup:\n  target: ./backup\nsys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    path: ./s-v{version}.tar.gz\n- sys:\n    name: api-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    path: ./api-v{version}.tar.gz\n",
+        )
+        .unwrap();
+        let outcome = UpgradeOutcome {
+            plan: galaxy_ops::ops_prj::upgrade::UpgradePlan {
+                systems: vec!["web-stack".to_string(), "api-stack".to_string()],
+                target: "latest".to_string(),
+                policy: "halt".to_string(),
+                health: false,
+                resolved: vec!["./s-v0.10.0.tar.gz".to_string(), "./api.tar.gz".to_string()],
+                target_versions: vec![Some("0.10.0".to_string()), None],
+                no_op: false,
+            },
+            dry_run: false,
+            record: None,
+            record_path: tmp.path().join("upgrade.json"),
+        };
+
+        persist_upgrade_versions(tmp.path(), &outcome, true).unwrap();
+
+        let reloaded = OpsProject::load(tmp.path()).unwrap();
+        let web = &reloaded.conf().sys_models()[0];
+        let api = &reloaded.conf().sys_models()[1];
+        assert_eq!(web.declared_version(), Some("0.10.0"));
+        assert_eq!(api.declared_version(), None);
+        assert_eq!(
+            reloaded.conf().backup().as_ref().unwrap().target(),
+            "./backup",
+            "persist must not drop other ops-prj.yml sections"
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::prelude::*;
 
+use crate::error::MainReason;
 use crate::module::depend::DependencySet;
 use crate::ops_prj::system::OpsSystem;
 use crate::types::{Accessor, RefUpdateable};
@@ -112,6 +113,43 @@ impl OpsProjectConf {
             self.sys_models.push(sys);
         }
     }
+
+    /// 按系统名 upsert：`prj import` 重复导入同名系统时更新原记录，而不是追加重复项。
+    pub fn upsert_sys(&mut self, sys: OpsSystem) {
+        if let Some(existing) = self
+            .sys_models
+            .iter_mut()
+            .find(|s| s.sys().name() == sys.sys().name())
+        {
+            *existing = sys;
+        } else {
+            self.sys_models.push(sys);
+        }
+    }
+
+    /// 更新某系统声明的 `version:`；返回值表示是否真的发生变化。
+    pub fn set_sys_version(&mut self, sys: &str, version: &str) -> MainResult<bool> {
+        let version = version.trim();
+        if version.is_empty() {
+            return Err(MainReason::logic_detail(format!(
+                "系统 `{sys}` 的版本不能为空"
+            )));
+        }
+        let Some(entry) = self
+            .sys_models
+            .iter_mut()
+            .find(|s| s.sys().name().as_str() == sys)
+        else {
+            return Err(MainReason::logic_detail(format!(
+                "ops-prj.yml 里没有系统 `{sys}`"
+            )));
+        };
+        if entry.declared_version() == Some(version) {
+            return Ok(false);
+        }
+        entry.set_version(version);
+        Ok(true)
+    }
     pub fn load(path: &Path) -> MainResult<Self> {
         let conf_file = path.join(OPS_PRJ_CONF_FILE);
         let ins = Self::load_conf(&conf_file).source_conf()?;
@@ -191,5 +229,48 @@ mod tests {
         let c = conf.contract().as_ref().unwrap();
         assert_eq!(c.target(), "./contract");
         assert_eq!(*c.keep(), 10); // 缺省 10
+    }
+
+    #[test]
+    fn test_upsert_sys_replaces_same_name() {
+        let yaml = |version: &str, path: &str| {
+            format!(
+                "sys:\n  name: web-stack\n  kind: docker-compose\n  vender: ''\nversion: {version}\naddr:\n  path: {path}\n"
+            )
+        };
+        let a: OpsSystem = serde_yaml::from_str(&yaml("0.9.0", "./old-v{version}.tar.gz")).unwrap();
+        let b: OpsSystem =
+            serde_yaml::from_str(&yaml("0.10.0", "./new-v{version}.tar.gz")).unwrap();
+
+        let mut conf = OpsProjectConf::new("cust", DependencySet::default());
+        conf.upsert_sys(a);
+        conf.upsert_sys(b);
+
+        assert_eq!(conf.sys_models().len(), 1, "same name must be upserted");
+        assert_eq!(conf.sys_models()[0].declared_version(), Some("0.10.0"));
+        assert_eq!(
+            conf.sys_models()[0].addr_template(),
+            "./new-v{version}.tar.gz",
+            "upsert must replace the whole entry"
+        );
+    }
+
+    #[test]
+    fn test_set_sys_version_updates_and_roundtrips() {
+        let yaml = format!(
+            "{BASE}sys_models:\n- sys:\n    name: web-stack\n    kind: docker-compose\n    vender: ''\n  addr:\n    path: ./s-v{{version}}.tar.gz\n"
+        );
+        let mut conf: OpsProjectConf = serde_yaml::from_str(&yaml).unwrap();
+        assert!(conf.set_sys_version("web-stack", "0.10.0").unwrap());
+        // 同值不重复写。
+        assert!(!conf.set_sys_version("web-stack", " 0.10.0 ").unwrap());
+        assert!(conf.set_sys_version("nope", "1.0.0").is_err());
+        assert!(
+            conf.set_sys_version("web-stack", "  ").is_err(),
+            "empty version must be rejected"
+        );
+
+        let saved = serde_yaml::to_string(&conf).unwrap();
+        assert!(saved.contains("version: 0.10.0"), "saved={saved}");
     }
 }

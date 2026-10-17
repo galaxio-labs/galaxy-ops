@@ -84,7 +84,7 @@ pub struct SkillListArgs {
 
 #[derive(Debug, Args, Clone, Getters)]
 pub struct SelfCheckArgs {
-    #[arg(long, default_value = "stable")]
+    #[arg(short = 'c', long, default_value = "stable")]
     pub channel: String,
 
     #[arg(long, action = ArgAction::SetTrue, default_value = "false")]
@@ -96,7 +96,7 @@ pub struct SelfCheckArgs {
 
 #[derive(Debug, Args, Clone, Getters)]
 pub struct SelfUpdateArgs {
-    #[arg(long, default_value = "stable")]
+    #[arg(short = 'c', long, default_value = "stable")]
     pub channel: String,
 
     #[arg(long = "to")]
@@ -448,6 +448,18 @@ mod tests {
                 assert!(!args.force);
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn short_channel_flag_parses_for_check_and_update() {
+        match SelfCmd::try_parse_from(["self", "check", "-c", "alpha"]).unwrap() {
+            SelfCmd::Check(args) => assert_eq!(args.channel, "alpha"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match SelfCmd::try_parse_from(["self", "update", "-c", "beta"]).unwrap() {
+            SelfCmd::Update(args) => assert_eq!(args.channel, "beta"),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 

@@ -23,16 +23,19 @@ use super::install::fetch_and_prepare;
 use super::prelude::*;
 use super::project::OpsProject;
 use super::update::apply_overlay;
+use super::version::{self, VersionSpec, infer_channel};
 use crate::accessor::accessor_for_default;
-use crate::error::MainReason;
+use crate::error::{MainError, MainReason};
+use crate::self_update::ReleaseChannel;
 use crate::system::lock::DeliverLock;
 
 /// 失败发生时**做什么**（`--on-failure`）。
 ///
 /// 默认值**尚未确定**，所以 CLI 目前要求显式给出 —— 见设计稿 §3.3。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FailurePolicy {
     /// 整工程原子：任一系统失败 → 全部回滚（含已成功的）。
+    #[default]
     RollbackAll,
     /// 停在那里：不继续，已切换的不回滚；如实报告停在哪个系统/哪一步。
     Halt,
@@ -147,6 +150,13 @@ pub struct UpgradeRecord {
     pub detail: String,
 }
 
+/// 一个系统解析后的目标：地址 + 具体版本（地址型目标 / 非版本化目标没有版本）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTarget {
+    pub version: Option<String>,
+    pub addr: String,
+}
+
 /// 本次事务的静态计划（`--dry-run` 也返回它）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UpgradePlan {
@@ -154,8 +164,14 @@ pub struct UpgradePlan {
     pub target: String,
     pub policy: String,
     pub health: bool,
-    /// dry-run 时解析出的每系统目标地址（与 `systems` 同序）；非 dry-run 为空。
+    /// 每系统解析出的目标地址（与 `systems` 同序）。
     pub resolved: Vec<String>,
+    /// 每系统解析出的具体版本（与 `systems` 同序）；地址型目标为 `None`。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_versions: Vec<Option<String>>,
+    /// 目标版本全部等于现场版本（且未 `--force`）→ 不执行事务。
+    #[serde(default)]
+    pub no_op: bool,
 }
 
 /// 事务结果。
@@ -197,6 +213,8 @@ impl UpgradeOutcome {
             "on_failure": self.plan.policy,
             "health": self.plan.health,
             "resolved": self.plan.resolved,
+            "target_versions": self.plan.target_versions,
+            "no_op": self.plan.no_op,
             "record": record,
             "record_path": self.record_path.display().to_string(),
         })
@@ -210,12 +228,16 @@ impl UpgradeOutcome {
 /// `localize`/`pull`/`up`/`status` 走 [`RuntimeDispatch`]（docker compose / gx，在 app 层）。
 #[async_trait]
 pub trait UpgradeRuntime: Send + Sync {
+    /// 是否强制重跑：`--force` 时即使目标版本与现场相同，也不做 no-op。
+    fn force(&self) -> bool {
+        false
+    }
     /// 前置体检（失败即拒，**不动现场**）。
     async fn diagnose(&self) -> MainResult<()>;
     /// 备份现场态，返回交给 [`UpgradeRuntime::restore`] 的备份标识（归档路径）。
     async fn backup(&self) -> MainResult<String>;
     /// 取包并覆盖到指定系统目录（只动磁盘内容，**不停服务**）。
-    async fn apply(&self, sys: &str) -> MainResult<()>;
+    async fn apply(&self, sys: &str, target: &ResolvedTarget) -> MainResult<()>;
     /// 重渲染值 / `.env`（`sys resolve` + `localize`），为切换做准备。
     async fn regenerate(&self, sys: &str) -> MainResult<()>;
     /// 拉制品（`docker compose pull` / `gx run download`）。
@@ -228,11 +250,11 @@ pub trait UpgradeRuntime: Send + Sync {
     async fn health(&self) -> MainResult<()>;
     /// 回滚：把备份还原回现场（**状态级**，含库）。
     async fn restore(&self, backup: &str) -> MainResult<()>;
-    /// 读某系统当前版本（`deliver.lock`，缺失时退回 `version.txt`）。
+    /// 读某系统当前版本（优先 `version.txt`，缺失时退回 `deliver.lock`）。
     async fn version_of(&self, sys: &str) -> MainResult<String>;
-    /// 解析某系统的目标地址（`--to` 是地址则原样；是版本则用该系统 ref 的 `{version}` 模板渲染）。
-    /// **只读**：dry-run 用它校验目标可解析，避免「计划一片绿、真跑才在 apply 炸」。
-    async fn resolve_target(&self, sys: &str) -> MainResult<String>;
+    /// 解析某系统的目标（`--to` 是地址则原样；版本 spec 用该系统 ref 的 `{version}` 模板渲染）。
+    /// **只读**：在 diagnose/backup 之前调用，避免「计划一片绿、真跑才在 apply 炸」。
+    async fn resolve_target(&self, sys: &str) -> MainResult<ResolvedTarget>;
 }
 
 /// 运行时动作（按 `kind` 分派到 docker compose / gx）—— app 层实现。
@@ -287,6 +309,7 @@ async fn join_versions(runtime: &dyn UpgradeRuntime, systems: &[String]) -> Stri
 async fn run_phases(
     runtime: &dyn UpgradeRuntime,
     systems: &[String],
+    targets: &[ResolvedTarget],
     expect_health: bool,
 ) -> Result<(), PhaseFailure> {
     async fn step(
@@ -301,8 +324,8 @@ async fn run_phases(
         })
     }
 
-    for sys in systems {
-        step(UpgradeStep::Apply, sys, runtime.apply(sys)).await?;
+    for (sys, target) in systems.iter().zip(targets) {
+        step(UpgradeStep::Apply, sys, runtime.apply(sys, target)).await?;
     }
     for sys in systems {
         step(UpgradeStep::Regenerate, sys, runtime.regenerate(sys)).await?;
@@ -322,8 +345,9 @@ async fn run_phases(
     Ok(())
 }
 
-/// 跑一次升级事务。**任何失败都落状态文件并返回 `Ok`**（结局在 `record.status` 里）；
-/// 只有「系统性错误」（无可升级系统、状态文件写失败）才返回 `Err`。
+/// 跑一次升级事务。**事务阶段失败**都落状态文件并返回 `Ok`（结局在 `record.status` 里）；
+/// 目标解析 / 包存在性预检失败属于 setup error，直接返回 `Err`（不写状态）；
+/// 无可升级系统、状态文件写失败也返回 `Err`。
 pub async fn run_upgrade(
     runtime: &dyn UpgradeRuntime,
     systems: &[String],
@@ -339,6 +363,8 @@ pub async fn run_upgrade(
         policy: policy.as_str().to_string(),
         health: expect_health,
         resolved: Vec::new(),
+        target_versions: Vec::new(),
+        no_op: false,
     };
 
     if systems.is_empty() {
@@ -347,13 +373,39 @@ pub async fn run_upgrade(
         ));
     }
 
+    // 目标解析放在**所有副作用之前**：`latest` 可能要访问版本目录，失败时不能已经备份/覆盖。
+    let mut targets = Vec::with_capacity(systems.len());
+    for sys in systems {
+        targets.push(runtime.resolve_target(sys).await?);
+    }
+    plan.resolved = targets.iter().map(|t| t.addr.clone()).collect();
+    plan.target_versions = targets.iter().map(|t| t.version.clone()).collect();
+
+    // 先读一次现场版本：既用于状态文件的 from，也用于同版本 no-op 判定。
+    let mut current_versions = Vec::with_capacity(systems.len());
+    for sys in systems {
+        current_versions.push(runtime.version_of(sys).await.unwrap_or_default());
+    }
+    let from_version = systems
+        .iter()
+        .zip(&current_versions)
+        .map(|(sys, version)| format!("{sys}={version}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let all_up_to_date = !runtime.force()
+        && targets
+            .iter()
+            .zip(&current_versions)
+            .all(|(target, current)| {
+                target
+                    .version
+                    .as_deref()
+                    .is_some_and(|version| version::same_version(current, version))
+            });
+    plan.no_op = all_up_to_date;
+
     if dry_run {
-        // dry-run **也要校验目标可解析**（只读、不写状态）：否则计划一片绿，真跑却在 apply 才炸。
-        let mut resolved = Vec::with_capacity(systems.len());
-        for sys in systems {
-            resolved.push(runtime.resolve_target(sys).await?);
-        }
-        plan.resolved = resolved;
         return Ok(UpgradeOutcome {
             plan,
             dry_run: true,
@@ -362,7 +414,24 @@ pub async fn run_upgrade(
         });
     }
 
-    let from_version = join_versions(runtime, systems).await;
+    // 同版本 no-op：不备份、不覆盖、不拉取、不切换。
+    if all_up_to_date {
+        let record = make_record(
+            UpgradeStep::Done,
+            UpgradeStatus::Succeeded,
+            None,
+            from_version.clone(),
+            from_version,
+            format!("已是目标版本（no-op）：{}", plan.target),
+        );
+        write_record(record_path, &record)?;
+        return Ok(UpgradeOutcome {
+            plan,
+            dry_run: false,
+            record: Some(record),
+            record_path: record_path.to_path_buf(),
+        });
+    }
 
     // 1) 前置体检：失败则**未动现场**，不回滚。
     if let Err(err) = runtime.diagnose().await {
@@ -406,7 +475,7 @@ pub async fn run_upgrade(
     };
 
     // 3~7) 阶段序。
-    match run_phases(runtime, systems, expect_health).await {
+    match run_phases(runtime, systems, &targets, expect_health).await {
         Ok(()) => {
             let to_version = join_versions(runtime, systems).await;
             let record = make_record(
@@ -595,13 +664,154 @@ pub fn read_sys_version(sys_dir: &Path) -> String {
     String::new()
 }
 
+/// 事务开始前确认目标包存在。
+///
+/// 对本地路径是 `is_file`；对 HTTP 先 `HEAD`（部分服务器不支持时退回带 `Range` 的 `GET`）；
+/// 对 git 地址用 `git ls-remote`。这一检查发生在 diagnose/backup 之前，避免「备份做完了、
+/// apply 才发现包不存在」，多系统时也避免一部分系统已被覆盖。
+async fn verify_target_exists(project_root: &Path, addr: &str) -> MainResult<()> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        return Err(MainReason::logic_detail("目标包地址为空"));
+    }
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        return verify_http_target(addr).await;
+    }
+    if addr.starts_with("git@") || addr.ends_with(".git") {
+        return verify_git_target(addr).await;
+    }
+
+    let path = Path::new(addr);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
+    if full.is_file() {
+        return Ok(());
+    }
+    if full.exists() {
+        return Err(MainReason::resource_detail(format!(
+            "目标包不是文件：{}\n  addr={addr}",
+            full.display()
+        )));
+    }
+    Err(MainReason::resource_detail(format!(
+        "目标包不存在：{addr}\n  本地路径按项目根解析：{}",
+        full.display()
+    )))
+}
+
+async fn verify_http_target(url: &str) -> MainResult<()> {
+    let client = reqwest::Client::builder()
+        .user_agent("gops")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
+
+    let mut head = client.head(url);
+    if let Some(token) = github_token_for(url) {
+        head = head.bearer_auth(token);
+    }
+    let resp = head
+        .send()
+        .await
+        .map_err(|e| MainReason::resource_detail(format!("检查目标包失败（HEAD）{url}: {e}")))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+
+    // 一些静态服务器/对象存储不接受 HEAD（405/501），或有边缘策略返回 403；
+    // 用最小 Range GET 再确认一次，避免把“不支持 HEAD”误判成“包不存在”。
+    if matches!(status.as_u16(), 403 | 405 | 501) {
+        let mut get = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
+        if let Some(token) = github_token_for(url) {
+            get = get.bearer_auth(token);
+        }
+        let resp = get.send().await.map_err(|e| {
+            MainReason::resource_detail(format!("检查目标包失败（GET Range）{url}: {e}"))
+        })?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        return Err(http_status_error(url, status, "GET Range"));
+    }
+
+    Err(http_status_error(url, status, "HEAD"))
+}
+
+fn http_status_error(url: &str, status: reqwest::StatusCode, method: &str) -> MainError {
+    let hint = match status.as_u16() {
+        401 | 403 => "（可能需要鉴权；GitHub 可设置 GITHUB_TOKEN）",
+        404 => "（包不存在或无权访问）",
+        _ => "",
+    };
+    MainReason::resource_detail(format!(
+        "目标包不存在或不可访问：{url}\n  {method} → HTTP {status}{hint}"
+    ))
+}
+
+fn github_token_for(url: &str) -> Option<String> {
+    let is_github = url.starts_with("https://github.com/")
+        || url.starts_with("http://github.com/")
+        || url.starts_with("https://api.github.com/");
+    if !is_github {
+        return None;
+    }
+    version::github_token()
+}
+
+async fn verify_git_target(addr: &str) -> MainResult<()> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(["ls-remote", "--heads", "--tags", addr])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(30), command.output())
+        .await
+        .map_err(|_| MainReason::resource_detail(format!("检查 git 目标超时（30s）：{addr}")))?
+        .map_err(|e| MainReason::resource_detail(format!("检查 git 目标失败：{e}")))?;
+    if !out.status.success() {
+        return Err(MainReason::resource_detail(format!(
+            "git 目标不可访问：{addr}\n  {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    if out.stdout.is_empty() {
+        return Err(MainReason::resource_detail(format!(
+            "git 目标没有任何 heads/tags：{addr}"
+        )));
+    }
+    Ok(())
+}
+
+/// 本次升级目标：完整地址，或版本 spec（`latest` / `patch` / ... / 精确版本）。
+#[derive(Clone, Debug)]
+pub enum UpgradeTarget {
+    Address(String),
+    Spec(VersionSpec),
+}
+
+impl UpgradeTarget {
+    /// 供计划 / 状态文件展示的原文。
+    pub fn label(&self) -> String {
+        match self {
+            Self::Address(addr) => addr.clone(),
+            Self::Spec(spec) => spec.as_str().to_string(),
+        }
+    }
+}
+
 /// 真实运行时：接本 crate 既有实现 + 注入的 [`RuntimeDispatch`]。
 ///
-/// `target` 是 `--to` 的原文：地址（直接用于所有系统）或版本（每个系统各自用
-/// addr 模板 `{version}` 渲染，见 [`resolve_target_addr`]）。
+/// `target` 是 `--to` 的地址或版本 spec；关键字 spec 会先解析成**具体版本**，
+/// 再按该系统 addr 模板 `{version}` 渲染。
 pub struct ProjectRuntime {
     project_root: PathBuf,
-    target: String,
+    target: UpgradeTarget,
+    channel: Option<ReleaseChannel>,
     force: bool,
     health_cmd: Option<String>,
     health_timeout: Duration,
@@ -609,9 +819,11 @@ pub struct ProjectRuntime {
 }
 
 impl ProjectRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_root: PathBuf,
-        target: String,
+        target: UpgradeTarget,
+        channel: Option<ReleaseChannel>,
         force: bool,
         health_cmd: Option<String>,
         health_timeout: Duration,
@@ -620,6 +832,7 @@ impl ProjectRuntime {
         Self {
             project_root,
             target,
+            channel,
             force,
             health_cmd,
             health_timeout,
@@ -634,6 +847,10 @@ impl ProjectRuntime {
 
 #[async_trait]
 impl UpgradeRuntime for ProjectRuntime {
+    fn force(&self) -> bool {
+        self.force
+    }
+
     async fn diagnose(&self) -> MainResult<()> {
         let report = project_diagnose(&self.project_root, &DiagnoseRequest::new(false))?;
         if report.exit_code() != 0 {
@@ -650,24 +867,69 @@ impl UpgradeRuntime for ProjectRuntime {
         Ok(report.archive.display().to_string())
     }
 
-    async fn resolve_target(&self, sys: &str) -> MainResult<String> {
+    async fn resolve_target(&self, sys: &str) -> MainResult<ResolvedTarget> {
         let project = OpsProject::load(&self.project_root)?;
-        resolve_target_addr(&project, sys, &self.target)
+        let sys_ref = project
+            .conf()
+            .sys_models()
+            .iter()
+            .find(|s| s.sys().name().as_str() == sys)
+            .ok_or_else(|| MainReason::logic_detail(format!("ops-prj.yml 里没有系统 `{sys}`")))?;
+
+        let resolved = match &self.target {
+            UpgradeTarget::Address(addr) => ResolvedTarget {
+                version: None,
+                addr: addr.trim().to_string(),
+            },
+            UpgradeTarget::Spec(spec) => {
+                let current = read_sys_version(&self.sys_dir(sys));
+                match spec {
+                    VersionSpec::Declared => {
+                        let version = sys_ref.declared_version().map(str::to_string);
+                        let addr = sys_ref.resolved_addr()?;
+                        ResolvedTarget { version, addr }
+                    }
+                    VersionSpec::Exact(version) => {
+                        let addr = sys_ref.resolved_addr_with(version)?;
+                        ResolvedTarget {
+                            version: Some(version.clone()),
+                            addr,
+                        }
+                    }
+                    _ => {
+                        let channel = self.channel.unwrap_or_else(|| infer_channel(&current));
+                        let entries = version::list_versions(&self.project_root, sys_ref).await?;
+                        let entry =
+                            version::select_version(&entries, spec, Some(&current), channel)?;
+                        let version = entry.version.to_string();
+                        let addr = sys_ref.resolved_addr_with(&version)?;
+                        ResolvedTarget {
+                            version: Some(version),
+                            addr,
+                        }
+                    }
+                }
+            }
+        };
+
+        // 目标包必须在**事务开始前**存在：否则要等到 backup 之后的 apply 才报错，
+        // 多系统时还可能已经覆盖了一部分。
+        verify_target_exists(&self.project_root, &resolved.addr).await?;
+        Ok(resolved)
     }
 
-    async fn apply(&self, sys: &str) -> MainResult<()> {
-        let addr = self.resolve_target(sys).await?;
+    async fn apply(&self, sys: &str, target: &ResolvedTarget) -> MainResult<()> {
         let project = OpsProject::load(&self.project_root)?;
         let options = DownloadOptions::from((self.force, ValueDict::default()));
         let sys_src = fetch_and_prepare(
             project.paths().clone(),
-            &addr,
+            &target.addr,
             accessor_for_default(),
             &options,
         )
         .await?;
-        let target = self.sys_dir(sys);
-        let _ = apply_overlay(sys, &sys_src, &target)?;
+        let target_dir = self.sys_dir(sys);
+        let _ = apply_overlay(sys, &sys_src, &target_dir)?;
         Ok(())
     }
 
@@ -743,6 +1005,7 @@ pub const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 60;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -779,6 +1042,11 @@ mod tests {
         assert_eq!(FailurePolicy::parse(" HALT "), Some(FailurePolicy::Halt));
         assert_eq!(FailurePolicy::parse("continue"), None);
         assert_eq!(FailurePolicy::parse(""), None);
+    }
+
+    #[test]
+    fn failure_policy_defaults_to_rollback_all() {
+        assert_eq!(FailurePolicy::default(), FailurePolicy::RollbackAll);
     }
 
     #[test]
@@ -859,6 +1127,376 @@ mod tests {
         );
     }
 
+    struct NoopDispatch;
+
+    #[async_trait]
+    impl RuntimeDispatch for NoopDispatch {
+        async fn localize(&self, _sys_dir: &Path) -> MainResult<()> {
+            Ok(())
+        }
+        async fn pull(&self, _sys_dir: &Path) -> MainResult<()> {
+            Ok(())
+        }
+        async fn up(&self, _sys_dir: &Path) -> MainResult<()> {
+            Ok(())
+        }
+        async fn status(&self, _sys_dir: &Path) -> MainResult<()> {
+            Ok(())
+        }
+    }
+
+    fn runtime(
+        root: &Path,
+        target: UpgradeTarget,
+        channel: Option<ReleaseChannel>,
+    ) -> ProjectRuntime {
+        ProjectRuntime::new(
+            root.to_path_buf(),
+            target,
+            channel,
+            false,
+            None,
+            Duration::from_secs(1),
+            Arc::new(NoopDispatch),
+        )
+    }
+
+    #[tokio::test]
+    async fn project_runtime_resolves_exact_declared_latest_and_bump() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        for name in [
+            "s-v0.9.0.tar.gz",
+            "s-v0.9.1.tar.gz",
+            "s-v0.10.0-alpha.tar.gz",
+            "s-v0.10.0.tar.gz",
+            "pkg.tar.gz",
+        ] {
+            std::fs::write(root.join(name), "x").unwrap();
+        }
+        project_with_sys(
+            root,
+            "  version: 0.9.0\n  addr:\n    path: ./s-v{version}.tar.gz\n",
+        );
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.9.0\n").unwrap();
+
+        // 精确版本：直接渲染 addr。
+        let target = runtime(
+            root,
+            UpgradeTarget::Spec(VersionSpec::Exact("0.10.0".to_string())),
+            None,
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap();
+        assert_eq!(target.version.as_deref(), Some("0.10.0"));
+        assert_eq!(target.addr, "./s-v0.10.0.tar.gz");
+
+        // 声明版本：使用 ops-prj.yml 的 version。
+        let target = runtime(root, UpgradeTarget::Spec(VersionSpec::Declared), None)
+            .resolve_target("web-stack")
+            .await
+            .unwrap();
+        assert_eq!(target.version.as_deref(), Some("0.9.0"));
+        assert_eq!(target.addr, "./s-v0.9.0.tar.gz");
+
+        // latest：按当前版本后缀推断 stable。
+        let target = runtime(root, UpgradeTarget::Spec(VersionSpec::Latest), None)
+            .resolve_target("web-stack")
+            .await
+            .unwrap();
+        assert_eq!(target.version.as_deref(), Some("0.10.0"));
+
+        // patch：同 minor 的下一个可用版本（0.9.0 → 0.9.1）。
+        let target = runtime(root, UpgradeTarget::Spec(VersionSpec::Patch), None)
+            .resolve_target("web-stack")
+            .await
+            .unwrap();
+        assert_eq!(target.version.as_deref(), Some("0.9.1"));
+
+        // 地址：原样透传，不带版本。
+        let target = runtime(
+            root,
+            UpgradeTarget::Address("./pkg.tar.gz".to_string()),
+            None,
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap();
+        assert!(target.version.is_none());
+        assert_eq!(target.addr, "./pkg.tar.gz");
+    }
+
+    #[tokio::test]
+    async fn verify_target_exists_checks_local_files() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("pkg.tar.gz"), "x").unwrap();
+        verify_target_exists(tmp.path(), "./pkg.tar.gz")
+            .await
+            .unwrap();
+
+        let err = verify_target_exists(tmp.path(), "./missing.tar.gz")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("目标包不存在"), "{err}");
+
+        std::fs::create_dir_all(tmp.path().join("dir.tar.gz")).unwrap();
+        let err = verify_target_exists(tmp.path(), "./dir.tar.gz")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("不是文件"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn verify_target_exists_rejects_empty_and_missing_git() {
+        let err = verify_target_exists(Path::new("."), "  ")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("为空"), "{err}");
+
+        let err = verify_target_exists(Path::new("."), "/definitely/missing/repo.git")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("git 目标不可访问")
+                || err.to_string().contains("git 目标没有任何"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_target_exists_checks_http_status_and_head_fallback() {
+        let mut server = mockito::Server::new_async().await;
+        let ok = server
+            .mock("HEAD", "/pkg.tar.gz")
+            .with_status(200)
+            .create_async()
+            .await;
+        let missing = server
+            .mock("HEAD", "/missing.tar.gz")
+            .with_status(404)
+            .create_async()
+            .await;
+        let no_head = server
+            .mock("HEAD", "/no-head.tar.gz")
+            .with_status(405)
+            .create_async()
+            .await;
+        let range = server
+            .mock("GET", "/no-head.tar.gz")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
+            .create_async()
+            .await;
+
+        verify_target_exists(Path::new("."), &format!("{}/pkg.tar.gz", server.url()))
+            .await
+            .unwrap();
+        let err = verify_target_exists(Path::new("."), &format!("{}/missing.tar.gz", server.url()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 404"), "{err}");
+        verify_target_exists(Path::new("."), &format!("{}/no-head.tar.gz", server.url()))
+            .await
+            .unwrap();
+
+        ok.assert_async().await;
+        missing.assert_async().await;
+        no_head.assert_async().await;
+        range.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn project_runtime_rejects_missing_package_and_unresolvable_specs() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("s-v0.9.0.tar.gz"), "x").unwrap();
+        project_with_sys(
+            root,
+            "  version: 0.9.0\n  addr:\n    path: ./s-v{version}.tar.gz\n",
+        );
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.9.0\n").unwrap();
+
+        // 精确版本存在时通过。
+        runtime(
+            root,
+            UpgradeTarget::Spec(VersionSpec::Exact("0.9.0".to_string())),
+            None,
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap();
+
+        // 精确版本不存在 → 预检失败。
+        let err = runtime(
+            root,
+            UpgradeTarget::Spec(VersionSpec::Exact("0.10.0".to_string())),
+            None,
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("目标包不存在"), "{err}");
+
+        // 地址不存在 → 预检失败。
+        let err = runtime(
+            root,
+            UpgradeTarget::Address("./missing.tar.gz".to_string()),
+            None,
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("目标包不存在"), "{err}");
+
+        // 关键字 spec + 没有 {version} 占位 → 明确拒绝。
+        let tmp2 = TempDir::new().unwrap();
+        project_with_sys(tmp2.path(), "  addr:\n    path: ./s.tar.gz\n");
+        std::fs::create_dir_all(tmp2.path().join("web-stack")).unwrap();
+        std::fs::write(tmp2.path().join("web-stack/version.txt"), "0.9.0\n").unwrap();
+        std::fs::write(tmp2.path().join("s.tar.gz"), "x").unwrap();
+        let err = runtime(tmp2.path(), UpgradeTarget::Spec(VersionSpec::Latest), None)
+            .resolve_target("web-stack")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("没有 {version} 占位"), "{err}");
+
+        // 声明版本缺失、但 addr 有占位 → 明确拒绝。
+        let tmp3 = TempDir::new().unwrap();
+        project_with_sys(tmp3.path(), "  addr:\n    path: ./s-v{version}.tar.gz\n");
+        std::fs::create_dir_all(tmp3.path().join("web-stack")).unwrap();
+        let err = runtime(
+            tmp3.path(),
+            UpgradeTarget::Spec(VersionSpec::Declared),
+            None,
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("没写 `version`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn project_runtime_refuses_implicit_downgrade() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("s-v0.10.0.tar.gz"), "x").unwrap();
+        project_with_sys(root, "  addr:\n    path: ./s-v{version}.tar.gz\n");
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.11.0\n").unwrap();
+
+        let err = runtime(root, UpgradeTarget::Spec(VersionSpec::Latest), None)
+            .resolve_target("web-stack")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("拒绝隐式降级"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_upgrade_dry_run_reports_resolved_versions_and_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("s-v0.9.0.tar.gz"), "x").unwrap();
+        std::fs::write(root.join("s-v0.10.0.tar.gz"), "x").unwrap();
+        project_with_sys(root, "  addr:\n    path: ./s-v{version}.tar.gz\n");
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.9.0\n").unwrap();
+        let record = root.join("upgrade.json");
+
+        let outcome = run_upgrade(
+            &runtime(root, UpgradeTarget::Spec(VersionSpec::Latest), None),
+            &["web-stack".to_string()],
+            "latest",
+            FailurePolicy::Halt,
+            false,
+            true,
+            &record,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.dry_run);
+        assert_eq!(
+            outcome.plan.target_versions,
+            vec![Some("0.10.0".to_string())]
+        );
+        assert!(outcome.plan.resolved[0].contains("s-v0.10.0.tar.gz"));
+        assert!(!record.exists(), "dry-run must not write the state file");
+
+        // `--json` 也带解析出的具体版本，编排器可直接消费。
+        let json: serde_json::Value = serde_json::from_str(&outcome.to_json()).unwrap();
+        assert_eq!(json["target_versions"][0], "0.10.0");
+    }
+
+    #[tokio::test]
+    async fn run_upgrade_dry_run_reports_no_op_with_project_runtime() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("s-v0.9.0.tar.gz"), "x").unwrap();
+        project_with_sys(
+            root,
+            "  version: 0.9.0\n  addr:\n    path: ./s-v{version}.tar.gz\n",
+        );
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.9.0\n").unwrap();
+        let record = root.join("upgrade.json");
+
+        let outcome = run_upgrade(
+            &runtime(root, UpgradeTarget::Spec(VersionSpec::Declared), None),
+            &["web-stack".to_string()],
+            "declared",
+            FailurePolicy::Halt,
+            false,
+            true,
+            &record,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.plan.no_op);
+        assert_eq!(
+            outcome.plan.target_versions,
+            vec![Some("0.9.0".to_string())]
+        );
+        assert!(!record.exists());
+    }
+
+    #[tokio::test]
+    async fn project_runtime_infers_alpha_channel_and_honors_override() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        for name in [
+            "s-v0.10.0-alpha.tar.gz",
+            "s-v0.10.0-beta.tar.gz",
+            "s-v0.10.0.tar.gz",
+        ] {
+            std::fs::write(root.join(name), "x").unwrap();
+        }
+        project_with_sys(root, "  addr:\n    path: ./s-v{version}.tar.gz\n");
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.10.0-alpha\n").unwrap();
+
+        // 缺省 channel 从当前版本后缀推断为 alpha。
+        let target = runtime(root, UpgradeTarget::Spec(VersionSpec::Latest), None)
+            .resolve_target("web-stack")
+            .await
+            .unwrap();
+        assert_eq!(target.version.as_deref(), Some("0.10.0-alpha"));
+
+        // 显式 --channel beta 覆盖推断。
+        let target = runtime(
+            root,
+            UpgradeTarget::Spec(VersionSpec::Latest),
+            Some(ReleaseChannel::Beta),
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap();
+        assert_eq!(target.version.as_deref(), Some("0.10.0-beta"));
+    }
+
     #[test]
     fn record_roundtrips_through_disk() {
         let tmp = TempDir::new().unwrap();
@@ -885,6 +1523,9 @@ mod tests {
         fail_once: Mutex<Option<(UpgradeStep, Option<String>)>>,
         calls: Mutex<Vec<String>>,
         version: String,
+        version_by_sys: Mutex<HashMap<String, String>>,
+        resolved_version: Option<String>,
+        force: bool,
         resolve_err: bool,
     }
 
@@ -894,12 +1535,35 @@ mod tests {
                 fail_once: Mutex::new(fail_once),
                 calls: Mutex::new(Vec::new()),
                 version: "0.1.0".to_string(),
+                version_by_sys: Mutex::new(HashMap::new()),
+                resolved_version: None,
+                force: false,
                 resolve_err: false,
             }
+        }
+        fn with_current_version(mut self, version: &str) -> Self {
+            self.version = version.to_string();
+            self
+        }
+        fn with_sys_version(self, sys: &str, version: &str) -> Self {
+            self.version_by_sys
+                .lock()
+                .unwrap()
+                .insert(sys.to_string(), version.to_string());
+            self
         }
         /// 让 `resolve_target` 报错（验证 dry-run 会因目标不可解析而拒）。
         fn resolving_err(mut self) -> Self {
             self.resolve_err = true;
+            self
+        }
+        /// 目标解析出的具体版本（用于 no-op 测试）。
+        fn with_resolved_version(mut self, version: &str) -> Self {
+            self.resolved_version = Some(version.to_string());
+            self
+        }
+        fn with_force(mut self, force: bool) -> Self {
+            self.force = force;
             self
         }
         fn record(&self, name: &str) -> MainResult<()> {
@@ -930,6 +1594,9 @@ mod tests {
 
     #[async_trait]
     impl UpgradeRuntime for FakeRuntime {
+        fn force(&self) -> bool {
+            self.force
+        }
         async fn diagnose(&self) -> MainResult<()> {
             self.maybe_fail(UpgradeStep::Diagnose, "")?;
             self.record("diagnose")
@@ -939,7 +1606,7 @@ mod tests {
             self.record("backup")?;
             Ok("/tmp/fake-backup.tar.gz".to_string())
         }
-        async fn apply(&self, sys: &str) -> MainResult<()> {
+        async fn apply(&self, sys: &str, _target: &ResolvedTarget) -> MainResult<()> {
             self.maybe_fail(UpgradeStep::Apply, sys)?;
             self.record(&format!("apply:{sys}"))
         }
@@ -965,15 +1632,24 @@ mod tests {
         async fn restore(&self, backup: &str) -> MainResult<()> {
             self.record(&format!("restore:{backup}"))
         }
-        async fn version_of(&self, _sys: &str) -> MainResult<String> {
-            Ok(self.version.clone())
+        async fn version_of(&self, sys: &str) -> MainResult<String> {
+            Ok(self
+                .version_by_sys
+                .lock()
+                .unwrap()
+                .get(sys)
+                .cloned()
+                .unwrap_or_else(|| self.version.clone()))
         }
-        async fn resolve_target(&self, _sys: &str) -> MainResult<String> {
+        async fn resolve_target(&self, _sys: &str) -> MainResult<ResolvedTarget> {
             // 只读查询，**不记入 calls**（dry-run 会调它，但不能因此算「动了现场」）。
             if self.resolve_err {
                 return Err(MainReason::logic_detail("cannot resolve target (test)"));
             }
-            Ok("https://example.com/resolved.tar.gz".to_string())
+            Ok(ResolvedTarget {
+                version: self.resolved_version.clone(),
+                addr: "https://example.com/resolved.tar.gz".to_string(),
+            })
         }
     }
 
@@ -999,6 +1675,191 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("cannot resolve target"), "{err}");
         assert!(!path.exists(), "dry-run must not write the record");
+    }
+
+    #[tokio::test]
+    async fn target_resolution_failure_is_preflight_for_real_run() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None).resolving_err();
+        let err = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.24",
+            FailurePolicy::RollbackAll,
+            false,
+            false,
+            &path,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot resolve target"), "{err}");
+        assert!(
+            runtime.calls().is_empty(),
+            "resolution happens before diagnose/backup"
+        );
+        assert!(!path.exists(), "no state file for a preflight failure");
+    }
+
+    #[tokio::test]
+    async fn no_op_when_all_targets_already_deployed() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None).with_resolved_version("0.1.0");
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.0",
+            FailurePolicy::RollbackAll,
+            true,
+            false,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.plan.no_op);
+        assert_eq!(outcome.exit_code(), 0);
+        let json: serde_json::Value = serde_json::from_str(&outcome.to_json()).unwrap();
+        assert_eq!(json["no_op"], true);
+        let record = outcome.record.unwrap();
+        assert_eq!(record.status, "succeeded");
+        assert_eq!(record.step, "done");
+        assert_eq!(record.from_version, "s1=0.1.0,s2=0.1.0");
+        assert_eq!(record.to_version, "s1=0.1.0,s2=0.1.0");
+        assert!(record.backup_id.is_none());
+        assert!(record.detail.contains("no-op"), "{}", record.detail);
+        assert!(
+            runtime.calls().is_empty(),
+            "no-op must not run diagnose/backup/apply: {:?}",
+            runtime.calls()
+        );
+        assert!(path.exists(), "no-op should still record the outcome");
+    }
+
+    #[tokio::test]
+    async fn dry_run_reports_no_op_without_side_effects() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None).with_resolved_version("0.1.0");
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.0",
+            FailurePolicy::RollbackAll,
+            false,
+            true,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.dry_run);
+        assert!(outcome.plan.no_op);
+        assert!(outcome.record.is_none());
+        assert!(runtime.calls().is_empty());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn force_bypasses_no_op() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None)
+            .with_resolved_version("0.1.0")
+            .with_force(true);
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.0",
+            FailurePolicy::RollbackAll,
+            false,
+            false,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        assert!(!outcome.plan.no_op);
+        assert!(
+            runtime.calls().contains(&"diagnose".to_string()),
+            "force must run the transaction: {:?}",
+            runtime.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn no_op_requires_versioned_targets_and_all_systems() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+
+        // 地址型目标没有具体版本 → 不能判定 no-op。
+        let outcome = run_upgrade(
+            &FakeRuntime::new(None),
+            &systems(),
+            "http://example.com/pkg.tar.gz",
+            FailurePolicy::Halt,
+            false,
+            true,
+            &path,
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.plan.no_op);
+
+        // 只要有一个系统版本不同 → 不做整工程 no-op。
+        let runtime = FakeRuntime::new(None)
+            .with_resolved_version("0.1.0")
+            .with_sys_version("s2", "0.2.0");
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.0",
+            FailurePolicy::Halt,
+            false,
+            true,
+            &path,
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.plan.no_op);
+
+        // 现场版本带 `v` 前缀时仍应识别为同版本。
+        let runtime = FakeRuntime::new(None)
+            .with_current_version("v0.1.0")
+            .with_resolved_version("0.1.0");
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.0",
+            FailurePolicy::Halt,
+            false,
+            true,
+            &path,
+        )
+        .await
+        .unwrap();
+        assert!(outcome.plan.no_op);
+
+        // `--force` + dry-run 也应显示将执行事务。
+        let runtime = FakeRuntime::new(None)
+            .with_resolved_version("0.1.0")
+            .with_force(true);
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "0.1.0",
+            FailurePolicy::Halt,
+            false,
+            true,
+            &path,
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.plan.no_op);
     }
 
     #[tokio::test]
@@ -1227,5 +2088,6 @@ mod tests {
         assert_eq!(json["on_failure"], "halt");
         assert_eq!(json["record"]["status"], "failed");
         assert_eq!(json["dry_run"], false);
+        assert_eq!(json["no_op"], false);
     }
 }

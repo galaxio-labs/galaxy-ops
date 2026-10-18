@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.2-alpha] - 2026-10-18
+
+### 修复
+
+- 修正 `sys perms` 在 macOS 临时目录（`/var` → `/private/var`）下的路径断言，CI 恢复全绿。
+
 ## [2.7.1-alpha] - 2026-10-18
 
 ### 修复

@@ -1345,7 +1345,14 @@ mod tests {
         .unwrap();
         let derived = derive_from_json(root.path(), &json, Some(&conf)).unwrap();
         assert_eq!(derived.mounts.len(), 1, "{:?}", derived.warnings);
-        assert!(derived.mounts[0].source.starts_with(outside.path()));
+        // 派生会把路径规范化（macOS 上 `/var` 是 `/private/var` 的符号链接），
+        // 所以与规范化后的父路径比较。
+        let outside_canonical = std::fs::canonicalize(outside.path()).unwrap();
+        assert!(
+            derived.mounts[0].source.starts_with(&outside_canonical),
+            "source={:?}",
+            derived.mounts[0].source
+        );
     }
 
     #[test]

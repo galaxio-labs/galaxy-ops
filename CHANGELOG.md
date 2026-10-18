@@ -5,6 +5,20 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.0-alpha] - 2026-10-18
+
+### 新增
+
+- **`gops sys perms`**：从 compose 派生 bind 挂载的宿主属主/权限。默认只检查，`--apply`
+  幂等修复，`--json` 机器可读；写挂载 `660/2770`、只读挂载 `640/2750`，容器自建文件不动，
+  运行态新文件自动纳入。
+- 生命周期自动接线：`sys localize` 后自检告警、`run start` 启动前拦截、
+  `prj restore` / `prj upgrade` 后自动对齐、`prj diagnose` 增加 perms 一节。
+- `sys-prj.yml` 支持 `perms.container_uid/gid`（rootless / userns-remap）与
+  `perms.allow_external`（系统根外的 bind source）。
+- 安全保护：`.:/app` 这类“挂载源等于/包含系统根”的写法会跳过并告警；
+  同一路径被不同容器身份挂载会判失败，不静默通过。
+
 ## [2.6.5] - 2026-10-18
 
 ### 修复

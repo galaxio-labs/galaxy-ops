@@ -337,6 +337,11 @@ pub fn project_diagnose(root: &Path, req: &DiagnoseRequest) -> MainResult<Diagno
         check_contract(sys_name, root, &conf, &mut report);
     }
 
+    // 4b) 逐系统：bind 挂载的宿主权限漂移（`gops sys perms` 视角）。
+    // 只对 docker-compose 系统做；Linux 之外跳过。升级前置体检也走这里，所以**默认 warn**
+    // （真正修复是 `--apply` 的显式动作），`--strict` 才折算成 FAIL。
+    check_perms(root, &names, req.strict(), &mut report);
+
     // 5) git 提交检查（仅在 git work tree 内）
     if !is_git_work_tree(root) {
         report.ok("git.none", "非 git 仓库，跳过 values/ 提交检查", "");
@@ -366,6 +371,72 @@ pub fn project_diagnose(root: &Path, req: &DiagnoseRequest) -> MainResult<Diagno
         }
     }
     Ok(report)
+}
+
+/// bind 挂载权限漂移：从 compose 派生需要的属主/权限，只 stat，不修改。
+///
+/// 无法派生（无 docker / 无 compose / 身份解析不出）时只告警：这是“检查不可用”，
+/// 不是“现场有问题”，不应阻断 `prj upgrade` 的前置体检。
+fn check_perms(root: &Path, names: &[&String], strict: bool, report: &mut DiagnoseReport) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    for sys_name in names {
+        let sys_dir = root.join(sys_name);
+        if !matches!(
+            crate::system::operator::SysOperator::load_kind(&sys_dir),
+            crate::system::SysKind::DockerCompose
+        ) {
+            continue;
+        }
+        match crate::system::perms::run_with_conf(&sys_dir, false) {
+            Ok(perms) if perms.is_ok() => report.ok(
+                "perms.aligned",
+                format!("系统 `{sys_name}`：bind 挂载宿主权限已对齐"),
+                "",
+            ),
+            Ok(perms) => {
+                let title = format!(
+                    "系统 `{sys_name}`：bind 挂载宿主权限未对齐（{} 项待修 / {} 项失败{}）",
+                    perms.pending(),
+                    perms.failed(),
+                    if perms.errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!("，{} 项配置冲突", perms.errors.len())
+                    }
+                );
+                let mut detail = perms.errors.clone();
+                detail.extend(
+                    perms
+                        .mounts
+                        .iter()
+                        .filter(|m| {
+                            m.items
+                                .iter()
+                                .any(|i| i.status != crate::system::perms::ItemStatus::Aligned)
+                        })
+                        .map(|m| m.source.display().to_string()),
+                );
+                let detail = detail.join("；");
+                if strict {
+                    report.fail("perms.drift", title, detail);
+                } else {
+                    report.warn("perms.drift", title, detail);
+                }
+                report
+                    .hint_last("运行 `gops sys perms --apply` 修复（只动系统根内的 bind source）");
+            }
+            Err(err) => {
+                report.warn(
+                    "perms.unavailable",
+                    format!("系统 `{sys_name}`：无法派生宿主权限要求"),
+                    err.to_string(),
+                );
+                report.hint_last("确认 docker CLI 可用、compose 文件与 .env 已就绪");
+            }
+        }
+    }
 }
 
 /// 对外契约（`contract:`）的**自身**检查：声明了但路径不在场（齐备）。

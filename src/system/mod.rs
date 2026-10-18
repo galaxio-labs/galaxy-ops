@@ -1,3 +1,4 @@
+pub mod compose;
 mod conf;
 pub mod init;
 pub mod lock;
@@ -5,9 +6,10 @@ pub mod mod_list;
 pub mod operator;
 pub mod pack;
 mod path;
+pub mod perms;
 mod prelude;
 pub mod refs;
 pub mod setting;
 pub mod spec;
-pub use crate::system::conf::{SysConf, SysKind};
+pub use crate::system::conf::{PermsConf, SysConf, SysKind};
 pub use crate::system::path::{SysOperatorPath, SysValuePaths};

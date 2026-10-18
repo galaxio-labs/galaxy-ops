@@ -372,6 +372,7 @@ impl RuntimeDispatch for ComposeDispatch {
             module: None,
             only: false,
             no_flow: false,
+            no_perms_check: false,
         };
         SysCommandHandler::localize_in(sys_dir, &args).await
     }
@@ -421,6 +422,41 @@ fn system_names(project: &OpsProject) -> Vec<String> {
         .iter()
         .map(|s| s.sys().name().clone())
         .collect()
+}
+
+/// 对单个系统做宿主 bind 挂载权限修复（`restore` / `upgrade` 完成后调用）。
+///
+/// 尽力而为：失败只告警，不让一个已成功的恢复/升级变成失败。
+/// 输出走 **stderr**：`prj upgrade --json` 的 stdout 必须保持单行 JSON。
+fn apply_sys_perms(sys_dir: &Path) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    // 只处理 compose 系统：`prj restore` 的条目里可能混有 gxl 系统。
+    if !matches!(
+        galaxy_ops::system::operator::SysOperator::load_kind(sys_dir),
+        galaxy_ops::system::SysKind::DockerCompose
+    ) {
+        return;
+    }
+    match galaxy_ops::system::perms::run_with_conf(sys_dir, true) {
+        Ok(report) if report.is_ok() => {
+            if report.applied() > 0 {
+                eprintln!(
+                    "  宿主权限已对齐：{}（修复 {} 项）",
+                    sys_dir.display(),
+                    report.applied()
+                );
+            }
+        }
+        Ok(report) => eprintln!(
+            "[WARN] {} 宿主权限仍有 {} 项待修 / {} 项失败；运行 `gops sys perms --apply` 查看明细",
+            sys_dir.display(),
+            report.pending(),
+            report.failed()
+        ),
+        Err(err) => eprintln!("[WARN] {} 宿主权限对齐跳过：{err}", sys_dir.display()),
+    }
 }
 
 /// 把位置参数拆成“系统名 + 目标”：
@@ -641,6 +677,11 @@ impl PrjCommandHandler {
                 report.entries.len(),
                 report.entries.join("、")
             );
+            // 还原会把备份里的文件按**解包账号**落地；bind 挂载的非 root 容器可能读/写不了。
+            // 恢复完成即对齐（幂等；非 Linux 自动跳过）。
+            for name in &report.entries {
+                apply_sys_perms(&current_dir.join(name));
+            }
             // 备份到底收了什么，由各系统 `sys-prj.yml: backup` **声明**决定——设计上是现场态，
             // 但**不保证**一定不含交付包内容。所以这里说“备份里没有的”，而不断言“一定没有 sys/”。
             println!(
@@ -708,6 +749,13 @@ impl PrjCommandHandler {
 
         if outcome.exit_code() != 0 {
             std::process::exit(1);
+        }
+
+        // 升级成功后再对齐一次宿主权限（`up` 前已 apply；这里覆盖 no-op 等未走 `up` 的分支）。
+        if !*args.dry_run() {
+            for sys in &outcome.plan.systems {
+                apply_sys_perms(&current_dir.join(sys));
+            }
         }
 
         // 成功后才回写期望版本；失败 / 回滚 / dry-run 一律不写。

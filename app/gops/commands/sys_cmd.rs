@@ -109,6 +109,12 @@ pub struct SysLocalizeArgs {
         help = "跳过可选的阶段 gx 流程（如 localize）；默认在 docker-compose 系统里按需执行"
     )]
     pub no_flow: bool,
+
+    #[arg(
+        long = "no-perms-check",
+        help = "docker-compose 系统 localize 后跳过宿主 bind 挂载权限自检（只告警，不影响退出码）"
+    )]
+    pub no_perms_check: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -117,6 +123,28 @@ pub struct SysDiffArgs {
     pub debug_log: DebugLogArgs,
 
     #[arg(long, help = "以 JSON 输出（便于脚本消费）")]
+    pub json: bool,
+}
+
+#[derive(Debug, Args, Getters)]
+pub struct SysPermsArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+
+    #[arg(
+        long,
+        conflicts_with = "apply",
+        help = "只检查（默认）：只 stat，未对齐时列出待修项并 exit≠0"
+    )]
+    pub check: bool,
+
+    #[arg(
+        long,
+        help = "幂等修复：属主=部署账号、属组=容器 gid、模式按读写/只读对齐"
+    )]
+    pub apply: bool,
+
+    #[arg(long, help = "以 JSON 输出（便于 CI / 上层编排）")]
     pub json: bool,
 }
 
@@ -166,6 +194,16 @@ pub enum SysCmd {
                      Usage: gops sys diff [--json]"
     )]
     Diff(SysDiffArgs),
+
+    /// 宿主 bind 挂载权限自检 / 修复 (Check / Align Host Permissions)
+    #[command(
+        about = "宿主 bind 挂载权限自检 / 修复 (Check / Align Host Permissions)",
+        long_about = "从 `docker compose config` 派生 bind 挂载的宿主属主/权限，只处理系统根内的 source，\n\
+                     不碰 named volume、不跟随符号链接、容器自建的文件不动。\n\
+                     `--check`（默认）只 stat；`--apply` 幂等修复。仅 Linux 生效。\n\
+                     Usage: gops sys perms [--check|--apply] [--json]"
+    )]
+    Perms(SysPermsArgs),
 }
 
 // === DfxArgsGetter 实现 ===
@@ -206,6 +244,15 @@ impl DfxArgsGetter for SysLocalizeArgs {
     }
 }
 impl DfxArgsGetter for SysDiffArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
+impl DfxArgsGetter for SysPermsArgs {
     fn debug_level(&self) -> usize {
         self.debug_log.debug_level()
     }
@@ -423,7 +470,37 @@ impl SysCommandHandler {
                  去掉 `--only`，或运行 `gops sys resolve` 使其生效。"
             );
         }
+
+        // 生命周期钩子：docker-compose 系统 localize 后做一次宿主 bind 挂载权限**自检**。
+        // 只告警、不静默 chown（修复是显式动作 `gops sys perms --apply`），也不改变退出码。
+        if !args.no_perms_check && matches!(spec.kind(), SysKind::DockerCompose) {
+            Self::warn_perms_drift(dir);
+        }
         Ok(())
+    }
+
+    /// 仅告警的权限自检（供 `sys localize` 生命周期使用）。
+    fn warn_perms_drift(dir: &Path) {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        match galaxy_ops::system::perms::run_with_conf(dir, false) {
+            Ok(report) => {
+                if !report.is_ok() {
+                    println!(
+                        "[WARN] 宿主 bind 挂载权限未对齐：{} 项待修，{} 项失败；\
+                         运行 `gops sys perms --apply` 修复（`gops sys perms` 查看明细，\
+                         `--no-perms-check` 关闭本检查）",
+                        report.pending(),
+                        report.failed()
+                    );
+                }
+                for warning in &report.warnings {
+                    println!("[WARN] {warning}");
+                }
+            }
+            Err(err) => println!("[WARN] 宿主权限自检跳过：{err}"),
+        }
     }
 
     /// 复现 `sys localize` 的层合并：
@@ -630,6 +707,36 @@ impl SysCommandHandler {
         Ok(())
     }
 
+    pub async fn handle_perms(args: SysPermsArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let current_dir = std::env::current_dir().expect("无法获取当前目录");
+
+        // 只在 Linux 生效：macOS / OrbStack 的 bind 挂载不会遇到“不改变属主”的 Linux 行为，
+        // 而且本地测试机不应该因为跑 `sys perms` 去改宿主属主。
+        let report = if cfg!(target_os = "linux") {
+            galaxy_ops::system::perms::run_with_conf(&current_dir, args.apply)?
+        } else {
+            galaxy_ops::system::perms::PermsReport::skipped(
+                &current_dir,
+                "只在 Linux 上生效（macOS / OrbStack 跳过）",
+            )
+        };
+
+        if args.json {
+            println!("{}", report.to_json());
+        } else {
+            print!("{}", report.render_text());
+        }
+        // 管道下 stdout 是块缓冲：exit 前先落盘，避免报告丢掉。
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+
+        if report.exit_code() != 0 {
+            std::process::exit(1);
+        }
+        Ok(())
+    }
+
     /// 阶段扩展点：内置动作完成后，若项目定义了**同名 gx 流程**则执行。
     ///
     /// 机制与阶段名无关（`flow_name` 由调用方给出，如 `localize`）；当前**只对
@@ -708,6 +815,7 @@ impl SysCommandHandler {
             SysCmd::Package(args) => Self::handle_package(args).await,
             SysCmd::Localize(args) => Self::handle_localize(args).await,
             SysCmd::Diff(args) => Self::handle_diff(args).await,
+            SysCmd::Perms(args) => Self::handle_perms(args).await,
         }
     }
 }
@@ -913,6 +1021,7 @@ mod tests {
             module: None,
             only: false,
             no_flow: false,
+            no_perms_check: false,
         };
 
         assert_eq!(args.debug_level(), 1);
@@ -1143,6 +1252,7 @@ exit 0
                 module: None,
                 only: false,
                 no_flow: false,
+                no_perms_check: false,
             };
             SysCommandHandler::handle_localize(localize_args)
                 .await
@@ -1224,6 +1334,7 @@ exit 0
                 module: None,
                 only: false,
                 no_flow: false,
+                no_perms_check: false,
             })
             .await
             .unwrap();
@@ -1272,6 +1383,7 @@ exit 0
                 module: None,
                 only: false,
                 no_flow: false,
+                no_perms_check: false,
             })
             .await
             .unwrap();
@@ -1322,6 +1434,7 @@ exit 0
                 module: None,
                 only: true,
                 no_flow: false,
+                no_perms_check: false,
             })
             .await;
             assert!(result.is_err(), "--only should fail without resolved vars");
@@ -1399,6 +1512,42 @@ exit 0
             })
             .await
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_sys_perms_flags_parse() {
+        let check = SysCmd::try_parse_from(["gops", "perms"]).unwrap();
+        match check {
+            SysCmd::Perms(a) => {
+                assert!(!a.apply, "缺省是 --check");
+                assert!(!a.json);
+            }
+            _ => panic!("expected perms"),
+        }
+
+        let apply = SysCmd::try_parse_from(["gops", "perms", "--apply", "--json"]).unwrap();
+        match apply {
+            SysCmd::Perms(a) => {
+                assert!(a.apply);
+                assert!(a.json);
+            }
+            _ => panic!("expected perms"),
+        }
+
+        assert!(
+            SysCmd::try_parse_from(["gops", "perms", "--check", "--apply"]).is_err(),
+            "--check 与 --apply 互斥"
+        );
+        assert!(SysCmd::try_parse_from(["gops", "perms", "--check"]).is_ok());
+    }
+
+    #[test]
+    fn test_sys_localize_no_perms_check_flag_parses() {
+        let cmd = SysCmd::try_parse_from(["gops", "localize", "--no-perms-check"]).unwrap();
+        match cmd {
+            SysCmd::Localize(a) => assert!(a.no_perms_check),
+            _ => panic!("expected localize"),
         }
     }
 }

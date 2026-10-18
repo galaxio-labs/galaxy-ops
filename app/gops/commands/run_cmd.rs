@@ -6,8 +6,7 @@
 //! 与 `gops sys`（系统**定义/交付/工件**：new/update/localize/package/setting/check）区分：
 //! 此处只管「在环境里落地/运行」（取得制品、安装/卸载、启停、状态、诊断）。
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::{Args, Parser};
 use derive_getters::Getters;
@@ -17,7 +16,7 @@ use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::prelude::ErrorOwe;
 use galaxy_ops::system::SysKind;
-use galaxy_ops::system::SysOperatorPath;
+use galaxy_ops::system::compose::compose_invocation;
 use galaxy_ops::system::operator::SysOperator;
 
 use crate::commands::common::DebugLogArgs;
@@ -33,6 +32,12 @@ pub struct SysOpsArgs {
 
     #[arg(short, long = "env", help = "env name", default_value = "default")]
     pub env: String,
+
+    #[arg(
+        long = "no-perms-check",
+        help = "start 时跳过宿主 bind 挂载权限 preflight（docker-compose 系统）"
+    )]
+    pub no_perms_check: bool,
 }
 
 impl DfxArgsGetter for SysOpsArgs {
@@ -139,6 +144,10 @@ impl RunCommandHandler {
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
         match SysOperator::load_kind(&current_dir) {
             SysKind::DockerCompose => {
+                // preflight：权限未对齐时停在 `docker compose up` 之前（否则容器只会无限重启）。
+                if cmd_name == "start" && !args.no_perms_check {
+                    perms_preflight(&current_dir, false)?;
+                }
                 Self::run_compose_cmd(&current_dir, cmd_name, args.module().as_deref()).await
             }
             SysKind::Gxl => Self::run_gx_cmd(cmd_name, &args).await,
@@ -154,6 +163,10 @@ impl RunCommandHandler {
             return Err(galaxy_ops::error::MainReason::logic_detail(
                 "gops prj upgrade 第一版只支持 kind: docker-compose 的系统",
             ));
+        }
+        // 升级的 `up` 直接修复权限：apply/regenerate/restore 之后，root 属主主要从这里来。
+        if cmd_name == "start" {
+            perms_preflight(dir, true)?;
         }
         Self::run_compose_cmd(dir, cmd_name, None).await
     }
@@ -198,24 +211,9 @@ impl RunCommandHandler {
         let mut cmd = TokioCommand::new("docker");
         // compose 文件位置可变（默认 `sys/docker-compose.yaml`），但项目目录始终锚定到系统根，
         // 使相对挂载与 .env 的基准保持不变。
-        let sys_paths = SysOperatorPath::new(dir);
-        let candidates = sys_paths.compose_candidates();
-        let compose_file = candidates.first().cloned();
-        if let Some(file) = &compose_file {
-            if candidates.len() > 1 {
-                eprintln!(
-                    "warn: 检测到 {} 个 compose 文件，使用 {}（其余忽略）",
-                    candidates.len(),
-                    file.display()
-                );
-            }
-        } else {
-            eprintln!(
-                "warn: 未找到 compose 文件（已按 sys/ 与系统根的 {{compose,docker-compose}}.{{yaml,yml}} 查找），交由 docker compose 自行发现"
-            );
-        }
+        let (_compose_file, global_args) = compose_invocation(dir);
         cmd.arg("compose")
-            .args(compose_global_args(compose_file.as_deref(), dir))
+            .args(global_args)
             .arg(subcommand)
             .args(extra);
         cmd.current_dir(dir);
@@ -232,6 +230,32 @@ impl RunCommandHandler {
     }
 }
 
+/// bind 挂载权限的运行时 preflight。
+///
+/// - `apply = false`：发现问题就拒绝启动，并给出显式修复命令；
+/// - `apply = true`：先修复再启动（`prj upgrade` 的 `up` 用）。
+///
+/// 非 Linux / 无法派生（无 docker、无 compose）时**只告警**：这些环境本来也不需要这套对齐，
+/// 而 `docker compose up` 自己会给出更直接的错误。
+fn perms_preflight(dir: &Path, apply_fix: bool) -> MainResult<()> {
+    if !cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    match galaxy_ops::system::perms::run_with_conf(dir, apply_fix) {
+        Ok(report) if report.is_ok() => Ok(()),
+        Ok(report) => Err(galaxy_ops::error::MainReason::logic_detail(format!(
+            "宿主 bind 挂载权限未对齐（{} 项待修 / {} 项失败）；先运行 `gops sys perms --apply`\n{}",
+            report.pending(),
+            report.failed(),
+            report.render_text()
+        ))),
+        Err(err) => {
+            eprintln!("[WARN] 宿主权限 preflight 跳过：{err}");
+            Ok(())
+        }
+    }
+}
+
 /// 把 gops run 命令名映射为 docker compose 子命令（及附加参数）。
 fn compose_subcommand(cmd_name: &str) -> (&str, &'static [&'static str]) {
     match cmd_name {
@@ -244,49 +268,6 @@ fn compose_subcommand(cmd_name: &str) -> (&str, &'static [&'static str]) {
         "diagnose" => ("config", &[]),
         other => (other, &[]),
     }
-}
-
-/// 构造 `docker compose` 的全局参数（必须位于子命令之前）。
-///
-/// 分两种布局：
-/// - **内收布局**（compose 在 `sys/` 下）：显式 `-f <file> --project-directory <系统根>`，
-///   把项目目录锚回系统根，避免项目名与相对挂载基准漂到 `sys/`。显式 `-f` 会关闭 docker
-///   对 override 的自动合并，因此这里同时显式合并同目录的 `*.override.{yaml,yml}`。
-/// - **旧布局**（compose 就在系统根）：**不传任何全局参数**，退回 docker 自动发现。
-///   这样能完整保留 docker 的 override 自动合并与 `COMPOSE_FILE` 环境变量语义，
-///   保证旧仓不加改动照样跑。此时项目目录本就等于系统根，语义与内收布局一致。
-///
-/// 未找到 compose 文件时同样返回空参数，交由 docker 自行发现。
-fn compose_global_args(compose_file: Option<&Path>, project_dir: &Path) -> Vec<OsString> {
-    let Some(file) = compose_file else {
-        return Vec::new();
-    };
-    // 旧布局：文件就在系统根，交给 docker 自动发现（保留 override 合并 / COMPOSE_FILE）。
-    if file.parent() == Some(project_dir) {
-        return Vec::new();
-    }
-
-    let mut args = vec![OsString::from("-f"), file.as_os_str().to_os_string()];
-    for override_file in compose_override_files(file) {
-        args.push(OsString::from("-f"));
-        args.push(override_file.into_os_string());
-    }
-    args.push(OsString::from("--project-directory"));
-    args.push(project_dir.as_os_str().to_os_string());
-    args
-}
-
-/// 与 compose 主文件同目录、按 docker 约定命名的 override 文件（存在者）：
-/// `<stem>.override.yaml` → `<stem>.override.yml`。
-fn compose_override_files(base: &Path) -> Vec<PathBuf> {
-    let (Some(stem), Some(dir)) = (base.file_stem().and_then(|s| s.to_str()), base.parent()) else {
-        return Vec::new();
-    };
-    ["yaml", "yml"]
-        .into_iter()
-        .map(|ext| dir.join(format!("{stem}.override.{ext}")))
-        .filter(|path| path.is_file())
-        .collect()
 }
 
 /// 密钥掩码值，与 `orion-sec` 的 `SECRET_MASK` 保持一致。
@@ -313,8 +294,9 @@ fn sec_env_pairs_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_global_args, compose_subcommand, sec_env_pairs_for};
+    use super::{compose_subcommand, sec_env_pairs_for};
     use galaxy_ops::prelude::ValueDict;
+    use galaxy_ops::system::compose::compose_global_args;
     use orion_vars::vars::ValueType;
     use std::ffi::OsString;
     use std::path::Path;

@@ -146,8 +146,15 @@ gops mod diff                    # 查看值变更（哪些值被覆盖、被哪
 gops sys new --name web-stack    # 创建系统
 gops sys resolve                 # 解析系统定义（取模块 / 解析变量 → merged_vars.yml）
 gops sys diff                    # 查看值变更（初始值 / 生效值 / 来源 / 可变性；--json 机器可读）
+gops sys perms                   # 宿主 bind 挂载权限自检（--apply 幂等修复，--json 机器可读）
 gops sys package                 # 打包为 .tar.gz（在系统目录内执行）
 ```
+
+`gops sys perms` 只对 `kind: docker-compose` 系统生效：它读 `docker compose config --format json`
+（不需要拉镜像），按每个服务的 `user:`、bind `source`、`read_only` 派生宿主属主/权限，
+默认只 `stat` 并列出待修项；`--apply` 才改磁盘。写挂载对齐为文件 `660` / 目录 `2770`，
+只读挂载只补属组读位（`640` / `2750`），容器自建的文件（属主 = 容器 uid）不动。
+只在 Linux 上生效；详见 [docs/design/sys-perms.md](docs/design/sys-perms.md)。
 
 ### `gops run` — 运行时运维
 

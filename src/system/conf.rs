@@ -50,6 +50,37 @@ pub struct SysConf {
     /// 只表达“收什么”，不触发任何删除；不在这里的 = 不收、不碰。与其它声明**互相独立**。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     backup: Vec<String>,
+    /// **宿主权限对齐**（`gops sys perms`）：从 compose 派生 bind 挂载的属主/权限时使用的覆盖项。
+    /// 缺省 = 全部按 compose 的 `user:` / `source` / `read_only` 派生。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    perms: Option<PermsConf>,
+}
+
+/// `sys-prj.yml: perms` —— 派生不出容器身份，或容器内 uid 与宿主 uid 不等价
+/// （rootless / userns-remap）时的显式覆盖。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PermsConf {
+    /// 宿主上应属容器的 uid（userns-remap 后是映射后的宿主 uid）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_uid: Option<u32>,
+    /// 宿主上应属容器的 gid。必须与 `container_uid` 同时配置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_gid: Option<u32>,
+    /// 允许处理系统根之外的 bind `source`（绝对路径或相对系统根的路径）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow_external: Vec<String>,
+}
+
+impl PermsConf {
+    pub fn container_uid(&self) -> Option<u32> {
+        self.container_uid
+    }
+    pub fn container_gid(&self) -> Option<u32> {
+        self.container_gid
+    }
+    pub fn allow_external(&self) -> &[String] {
+        &self.allow_external
+    }
 }
 
 impl SysConf {
@@ -61,6 +92,7 @@ impl SysConf {
             protect: Vec::new(),
             contract: Vec::new(),
             backup: Vec::new(),
+            perms: None,
         }
     }
 
@@ -108,6 +140,11 @@ impl SysConf {
     /// 只由本列表决定收什么；不在其中的不收、不碰。
     pub fn backup(&self) -> &[String] {
         &self.backup
+    }
+
+    /// 宿主权限对齐的覆盖项（`sys-prj.yml` 的 `perms:` 节）；缺省 = 纯 compose 派生。
+    pub fn perms(&self) -> Option<&PermsConf> {
+        self.perms.as_ref()
     }
 }
 #[async_trait]
@@ -170,6 +207,7 @@ mod tests {
             protect: Vec::new(),
             contract: Vec::new(),
             backup: Vec::new(),
+            perms: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("pkg_exclude"), "yaml={yaml}");
@@ -194,6 +232,7 @@ mod tests {
             protect: vec!["configs".to_string(), ".env".to_string()],
             contract: Vec::new(),
             backup: Vec::new(),
+            perms: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("protect"), "yaml={yaml}");
@@ -214,6 +253,7 @@ mod tests {
             protect: Vec::new(),
             contract: vec!["configs/gateway/public".to_string()],
             backup: Vec::new(),
+            perms: None,
         };
         assert!(conf.backup().is_empty(), "contract 不应被并入 backup");
 
@@ -225,6 +265,7 @@ mod tests {
             protect: Vec::new(),
             contract: vec!["configs/gateway/public".to_string()],
             backup: vec![".wist".to_string()],
+            perms: None,
         };
         assert_eq!(conf2.backup(), &[".wist".to_string()][..]);
     }
@@ -264,6 +305,7 @@ mod tests {
             protect: Vec::new(),
             contract: Vec::new(),
             backup: Vec::new(),
+            perms: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("pkg_include"), "yaml={yaml}");
@@ -298,6 +340,7 @@ mod tests {
             protect: Vec::new(),
             contract: vec!["configs/gateway/public".to_string()],
             backup: Vec::new(),
+            perms: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("contract"), "yaml={yaml}");

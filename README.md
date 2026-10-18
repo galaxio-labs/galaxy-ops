@@ -179,8 +179,9 @@ gops prj upgrade --to /path/to/pkg.tar.gz --on-failure halt # 完整地址逃生
 
 普通 HTTP 源（COS / S3 / OSS / nginx 等）：
 
-- `patch` / `minor` / `major` 会按版本规则生成候选 URL 并做 HEAD 探测（有界：patch 最多向前 50 个，
-  minor/major 也有窗口限制）；候选按版本升序**每 8 个一批并发探测**，命中即取该批最小版本，
+- `patch` / `minor` / `major` 会按版本规则生成候选 URL 并做 HEAD 探测（有界：patch 向前
+  20 个，minor 最多 5 个、每个最多 5 个 patch，major 最多 3 个、每个 major 最多 2 个 minor）；
+  候选按版本升序**每 8 个一批并发探测**，命中即取该批最小版本，
   正常情况下只发 1 批请求（约 0.5s）；
 - `latest` 没有天然停止条件，仍需要版本清单：在 `addr` 版本段的父目录放一份
   `versions.json` / `versions.txt`：

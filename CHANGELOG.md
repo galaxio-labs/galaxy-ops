@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.6.4] - 2026-10-18
+
+### 变更
+
+- **探测窗口收敛**：`patch` 候选从 50 降到 20，`minor` 从 10 降到 5 个 minor，
+  `major` 从 5 降到 3，每个 major 扫 minor 0..=2；仍保持 8 路并发与命中即停。
+  对远端 COS 实测，全窗口未命中约 2.4s（改前 patch ≈6.5s / major ≈16s）。
+
 ## [2.6.3] - 2026-10-18
 
 ### 优化

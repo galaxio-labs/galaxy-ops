@@ -215,10 +215,10 @@ pub async fn try_list_versions(
     Ok(Some(list_local_versions(project_root, &template)?))
 }
 
-const MAX_PATCH_PROBES: u64 = 50;
-const MAX_MINOR_PROBES: u64 = 10;
-const MAX_MAJOR_PROBES: u64 = 5;
-const MAX_MINOR_PER_MAJOR: u64 = 3;
+const MAX_PATCH_PROBES: u64 = 20;
+const MAX_MINOR_PROBES: u64 = 5;
+const MAX_MAJOR_PROBES: u64 = 3;
+const MAX_MINOR_PER_MAJOR: u64 = 2;
 const MAX_PATCH_PER_MINOR: u64 = 5;
 /// 并发探测数。对象存储上 404 的响应通常 100~500ms，串行扫窗口会明显拖慢升级；
 /// 8 路并发既能把最坏情况压到 1~2s，也不至于触发对端限流。
@@ -1499,7 +1499,7 @@ mod tests {
         let patch = candidate_versions(&current, &VersionSpec::Patch, "-alpha").unwrap();
         assert_eq!(patch.len(), MAX_PATCH_PROBES as usize);
         assert_eq!(patch[0].to_string(), "0.1.10-alpha");
-        assert_eq!(patch[patch.len() - 1].to_string(), "0.1.59-alpha");
+        assert_eq!(patch[patch.len() - 1].to_string(), "0.1.29-alpha");
         assert!(patch.windows(2).all(|w| w[0] < w[1]));
 
         let minor = candidate_versions(&current, &VersionSpec::Minor, "-alpha").unwrap();

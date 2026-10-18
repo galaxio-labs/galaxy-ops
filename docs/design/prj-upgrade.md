@@ -83,7 +83,8 @@ sys_models:
 `latest` / `patch` / `minor` / `major` 需要**可枚举的版本目录**：当前从 GitHub Releases、
 git tag、本地包目录读取。普通 HTTP 包地址：
 
-- `patch` / `minor` / `major`：按版本规则生成候选 URL 并 HEAD 探测（有界窗口）；
+- `patch` / `minor` / `major`：按版本规则生成候选 URL 并 HEAD 探测（有界窗口：
+  patch 20 个，minor 5 个 × 每个 6 个 patch，major 3 个 × 每个 3 个 minor）；
   候选按版本升序每 8 个一批并发探测，一批里有命中就取该批最小版本并结束，
   所以“下一个版本”通常只需 1 批请求，全窗口未命中也只需数秒；
 - `latest`：没有天然停止条件，仍需在 `addr` 版本段的父目录放 `versions.json` 或

@@ -11,9 +11,11 @@
 //! 版本去下载。本模块负责从常见来源取列表：
 //! - 本地包目录（`addr` 是本地路径模板）；
 //! - GitHub Releases（`https://github.com/<owner>/<repo>/releases/...`）；
-//! - git 仓库 tag（`git@...` / `*.git`）。
+//! - git 仓库 tag（`git@...` / `*.git`）；
+//! - 通用 HTTP 版本清单（版本段父目录的 `versions.json` / `versions.txt`）。
 //!
-//! 普通 HTTP 包地址没有可枚举的版本列表，此时只支持精确版本或 `--to <完整地址>`。
+//! 普通 HTTP 包地址（COS/S3/OSS/nginx）没有清单时，`patch`/`minor`/`major` 会按语义化
+//! 版本规则生成候选地址并探测是否存在（有界窗口）；`latest` 没有天然停止条件，仍需要清单。
 
 use std::path::Path;
 use std::time::Duration;

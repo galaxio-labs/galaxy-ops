@@ -250,8 +250,10 @@ pub enum PrjCmd {
                      版本 spec 支持 `latest` / `patch` / `minor`（`feat` 别名）/ `major` / `X.Y.Z`；\
                      可写成 `upgrade [<sys>] <spec>` 或 `-v/--version <spec>`；缺省使用 `ops-prj.yml` 的 `version:`。\n\
                      `-c/--channel stable|alpha|beta` 只对 keyword spec 生效，缺省按当前部署版本后缀推断。\n\
-                     `latest/patch/...` 从版本目录选择（GitHub Releases / git tag / 本地包目录）；\
-                     普通 HTTP 地址无法枚举版本时，请用精确版本或 `--to <完整地址>`。\n\
+                     `latest/patch/...` 从版本目录选择（GitHub Releases / git tag / 本地包目录）；
+                     普通 HTTP 源（COS/S3/OSS/nginx）没有清单时，`patch`/`minor`/`major` 会按版本规则
+                     生成候选地址并探测是否存在；`latest` 需要 `versions.json`/`versions.txt`，
+                     或用精确版本 / `--to <完整地址>`。\n\
                      成功后把解析出的具体版本回写 `ops-prj.yml`（`--no-save` 关闭）。\n\
                      只覆盖包内内容并保留现场态（`sys-prj.yml: protect`）；备份/回滚走 `prj backup`/`restore`。\
                      与 `prj sync` 的区别：本命令是**事务**（含备份 / 重渲 / 拉镜像 / 切换 / 探活，可回滚）；\

@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.6.1] - 2026-10-18
+
+### 修复
+
+- **`gops prj upgrade --help` 文案同步**：明确普通 HTTP 源（COS/S3/OSS/nginx）上
+  `patch`/`minor`/`major` 会按版本规则探测包地址，不再提示“普通 HTTP 无法枚举版本”；
+  `latest` 仍需要 `versions.json` / `versions.txt`。
+
 ## [2.6.0] - 2026-10-18
 
 ### 新增功能

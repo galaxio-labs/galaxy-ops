@@ -84,6 +84,8 @@ sys_models:
 git tag、本地包目录读取。普通 HTTP 包地址：
 
 - `patch` / `minor` / `major`：按版本规则生成候选 URL 并 HEAD 探测（有界窗口）；
+  候选按版本升序每 8 个一批并发探测，一批里有命中就取该批最小版本并结束，
+  所以“下一个版本”通常只需 1 批请求，全窗口未命中也只需数秒；
 - `latest`：没有天然停止条件，仍需在 `addr` 版本段的父目录放 `versions.json` 或
   `versions.txt`（每行/每项一个版本），例如 `https://.../wist-center-stack/versions.json`；
 - 没有清单且探测不到时，退化为精确版本或 `--to`。

@@ -876,6 +876,8 @@ impl UpgradeRuntime for ProjectRuntime {
             .find(|s| s.sys().name().as_str() == sys)
             .ok_or_else(|| MainReason::logic_detail(format!("ops-prj.yml 里没有系统 `{sys}`")))?;
 
+        // 探测命中时已经 HEAD 过目标包，后面的存在性校验可跳过。
+        let mut probed_exists = false;
         let resolved = match &self.target {
             UpgradeTarget::Address(addr) => ResolvedTarget {
                 version: None,
@@ -900,14 +902,17 @@ impl UpgradeRuntime for ProjectRuntime {
                         let channel = self.channel.unwrap_or_else(|| infer_channel(&current));
                         // 有清单/API 直接枚举；普通 HTTP 无清单时，按 patch/minor/major
                         // 规则生成候选 URL 并 HEAD 探测。
-                        let entries = match version::try_list_versions(&self.project_root, sys_ref)
-                            .await?
-                        {
-                            Some(entries) => entries,
-                            None => {
-                                version::probe_versions(sys_ref, spec, &current, channel).await?
-                            }
-                        };
+                        let entries =
+                            match version::try_list_versions(&self.project_root, sys_ref).await? {
+                                Some(entries) => entries,
+                                None => {
+                                    let entries =
+                                        version::probe_versions(sys_ref, spec, &current, channel)
+                                            .await?;
+                                    probed_exists = true;
+                                    entries
+                                }
+                            };
                         let entry =
                             version::select_version(&entries, spec, Some(&current), channel)?;
                         let version = entry.version.to_string();
@@ -923,7 +928,9 @@ impl UpgradeRuntime for ProjectRuntime {
 
         // 目标包必须在**事务开始前**存在：否则要等到 backup 之后的 apply 才报错，
         // 多系统时还可能已经覆盖了一部分。
-        verify_target_exists(&self.project_root, &resolved.addr).await?;
+        if !probed_exists {
+            verify_target_exists(&self.project_root, &resolved.addr).await?;
+        }
         Ok(resolved)
     }
 
@@ -1406,7 +1413,7 @@ mod tests {
                 "/wist-center-stack/v0.1.10-alpha/wist-center-stack-v0.1.10-alpha.tar.gz",
             )
             .with_status(200)
-            .expect(2)
+            .expect(1)
             .create_async()
             .await;
 

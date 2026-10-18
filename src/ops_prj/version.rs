@@ -220,12 +220,20 @@ const MAX_MINOR_PROBES: u64 = 10;
 const MAX_MAJOR_PROBES: u64 = 5;
 const MAX_MINOR_PER_MAJOR: u64 = 3;
 const MAX_PATCH_PER_MINOR: u64 = 5;
+/// 并发探测数。对象存储上 404 的响应通常 100~500ms，串行扫窗口会明显拖慢升级；
+/// 8 路并发既能把最坏情况压到 1~2s，也不至于触发对端限流。
+const PROBE_CONCURRENCY: usize = 8;
+/// 探测用的单请求超时。比正常下载的 20s 短，避免个别挂起的候选拖住整批。
+const PROBE_TIMEOUT_SECS: u64 = 10;
 
 /// 没有版本清单时，按版本规则生成候选 URL 并 HEAD 探测。
 ///
-/// - `patch`：同 major.minor，patch+1..+N，找到第一个存在的最小 patch；
+/// - `patch`：同 major.minor，patch+1..+N，取存在的最小 patch；
 /// - `minor`：major 不变，minor+1..+N，每个 minor 从 patch 0 开始探测；
 /// - `major`：major+1..+N，minor/patch 从 0 开始探测。
+///
+/// 候选按版本升序分批（每批 [`PROBE_CONCURRENCY`] 个）并发探测；一批里只要有命中，
+/// 就取该批最小版本并立即结束，因此正常“下一个版本”场景只发 1 批请求。
 ///
 /// `latest` 没有天然停止条件，仍要求版本清单 / GitHub / git / 本地目录。
 pub async fn probe_versions(
@@ -253,68 +261,112 @@ pub async fn probe_versions(
 
     let current = parse_current(current)?;
     let suffix = channel_suffix(channel);
+    let candidates = candidate_versions(&current, spec, suffix)?;
     let client = reqwest::Client::builder()
         .user_agent("gops")
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
         .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
 
-    let mut found = None;
-    match spec {
-        VersionSpec::Patch => {
-            for offset in 1..=MAX_PATCH_PROBES {
-                let patch = current.patch.saturating_add(offset);
-                if let Some(version) =
-                    probe_one(&client, sys, current.major, current.minor, patch, suffix).await?
-                {
-                    found = Some(version);
-                    break;
+    for chunk in candidates.chunks(PROBE_CONCURRENCY) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for version in chunk {
+            let client = client.clone();
+            let url = sys.resolved_addr_with(&version.to_string())?;
+            let version = version.clone();
+            tasks.spawn(async move {
+                let exists = http_object_exists(&client, &url).await?;
+                Ok::<_, MainError>((version, exists))
+            });
+        }
+
+        let mut hits = Vec::new();
+        let mut first_error = None;
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(Ok((version, true))) => hits.push(version),
+                Ok(Ok((_, false))) => {}
+                Ok(Err(err)) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some(MainReason::logic_detail(format!("探测任务异常：{err}")));
+                    }
                 }
             }
         }
+
+        // 同一批里已有命中时，个别候选的网络/权限错误不影响结果。
+        if let Some(version) = hits.into_iter().min() {
+            return Ok(vec![VersionEntry::new(version)]);
+        }
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+    }
+
+    Err(MainReason::logic_detail(format!(
+        "按 URL 探测没有找到 {} 版本（当前 {}，通道 {}）；\n  \
+         可发布 versions.json / versions.txt，或用精确版本。",
+        spec.as_str(),
+        current,
+        channel.as_str()
+    )))
+}
+
+/// 按 spec 生成**升序**候选版本列表（不重复、不含当前版本）。
+fn candidate_versions(
+    current: &semver::Version,
+    spec: &VersionSpec,
+    suffix: &str,
+) -> MainResult<Vec<semver::Version>> {
+    let build = |major: u64, minor: u64, patch: u64| -> MainResult<semver::Version> {
+        let raw = format!("{major}.{minor}.{patch}{suffix}");
+        semver::Version::parse(&raw)
+            .map_err(|e| MainReason::logic_detail(format!("生成探测版本失败 `{raw}`：{e}")))
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        VersionSpec::Patch => {
+            for offset in 1..=MAX_PATCH_PROBES {
+                out.push(build(
+                    current.major,
+                    current.minor,
+                    current.patch.saturating_add(offset),
+                )?);
+            }
+        }
         VersionSpec::Minor => {
-            'minor: for minor_offset in 1..=MAX_MINOR_PROBES {
+            for minor_offset in 1..=MAX_MINOR_PROBES {
                 let minor = current.minor.saturating_add(minor_offset);
                 for patch in 0..=MAX_PATCH_PER_MINOR {
-                    if let Some(version) =
-                        probe_one(&client, sys, current.major, minor, patch, suffix).await?
-                    {
-                        found = Some(version);
-                        break 'minor;
-                    }
+                    out.push(build(current.major, minor, patch)?);
                 }
             }
         }
         VersionSpec::Major => {
-            'major: for major_offset in 1..=MAX_MAJOR_PROBES {
+            for major_offset in 1..=MAX_MAJOR_PROBES {
                 let major = current.major.saturating_add(major_offset);
                 // 兼容“major 版本从 1.1.0 开始”的情况：minor/patch 都做有界扫描。
                 for minor in 0..=MAX_MINOR_PER_MAJOR {
                     for patch in 0..=MAX_PATCH_PER_MINOR {
-                        if let Some(version) =
-                            probe_one(&client, sys, major, minor, patch, suffix).await?
-                        {
-                            found = Some(version);
-                            break 'major;
-                        }
+                        out.push(build(major, minor, patch)?);
                     }
                 }
             }
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(MainReason::logic_detail(
+                "内部错误：只有 patch/minor/major 支持 URL 探测",
+            ));
+        }
     }
-
-    found
-        .map(|version| vec![VersionEntry::new(version)])
-        .ok_or_else(|| {
-            MainReason::logic_detail(format!(
-                "按 URL 探测没有找到 {} 版本（当前 {}，通道 {}）；\n  \
-                 可发布 versions.json / versions.txt，或用精确版本。",
-                spec.as_str(),
-                current,
-                channel.as_str()
-            ))
-        })
+    Ok(out)
 }
 
 fn channel_suffix(channel: ReleaseChannel) -> &'static str {
@@ -322,25 +374,6 @@ fn channel_suffix(channel: ReleaseChannel) -> &'static str {
         ReleaseChannel::Stable => "",
         ReleaseChannel::Alpha => "-alpha",
         ReleaseChannel::Beta => "-beta",
-    }
-}
-
-async fn probe_one(
-    client: &reqwest::Client,
-    sys: &OpsSystem,
-    major: u64,
-    minor: u64,
-    patch: u64,
-    suffix: &str,
-) -> MainResult<Option<semver::Version>> {
-    let raw = format!("{major}.{minor}.{patch}{suffix}");
-    let version = semver::Version::parse(&raw)
-        .map_err(|e| MainReason::logic_detail(format!("生成探测版本失败 `{raw}`：{e}")))?;
-    let url = sys.resolved_addr_with(&version.to_string())?;
-    if http_object_exists(client, &url).await? {
-        Ok(Some(version))
-    } else {
-        Ok(None)
     }
 }
 
@@ -1347,6 +1380,148 @@ mod tests {
         .unwrap();
         assert_eq!(entries[0].version.to_string(), "1.1.0-alpha");
         found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_prefers_smallest_version_in_batch() {
+        let mut server = mockito::Server::new_async().await;
+        let first = server
+            .mock("HEAD", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let second = server
+            .mock("HEAD", "/pkg/v0.1.11-alpha/pkg-v0.1.11-alpha.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Patch,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "0.1.10-alpha");
+        first.assert_async().await;
+        second.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_stops_after_first_batch_with_hit() {
+        let mut server = mockito::Server::new_async().await;
+        let found = server
+            .mock("HEAD", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        // 第二批的第一个候选：第一批已命中时不应再被请求。
+        let second_batch = server
+            .mock("HEAD", "/pkg/v0.1.18-alpha/pkg-v0.1.18-alpha.tar.gz")
+            .with_status(200)
+            .expect(0)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Patch,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "0.1.10-alpha");
+        found.assert_async().await;
+        second_batch.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_ignores_failed_candidate_when_hit_exists() {
+        let mut server = mockito::Server::new_async().await;
+        // 0.1.10 对 HEAD / GET Range 都返回 403，0.1.11 正常存在；
+        // 同一批里有命中时，个别候选的权限错误不应拖垮升级。
+        let denied_head = server
+            .mock("HEAD", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
+            .with_status(403)
+            .expect(1)
+            .create_async()
+            .await;
+        let denied_get = server
+            .mock("GET", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
+            .match_header("range", "bytes=0-0")
+            .with_status(403)
+            .expect(1)
+            .create_async()
+            .await;
+        let found = server
+            .mock("HEAD", "/pkg/v0.1.11-alpha/pkg-v0.1.11-alpha.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Patch,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "0.1.11-alpha");
+        denied_head.assert_async().await;
+        denied_get.assert_async().await;
+        found.assert_async().await;
+    }
+
+    #[test]
+    fn candidate_versions_windows_are_ascending_and_bounded() {
+        let current = semver::Version::parse("0.1.9-alpha").unwrap();
+
+        let patch = candidate_versions(&current, &VersionSpec::Patch, "-alpha").unwrap();
+        assert_eq!(patch.len(), MAX_PATCH_PROBES as usize);
+        assert_eq!(patch[0].to_string(), "0.1.10-alpha");
+        assert_eq!(patch[patch.len() - 1].to_string(), "0.1.59-alpha");
+        assert!(patch.windows(2).all(|w| w[0] < w[1]));
+
+        let minor = candidate_versions(&current, &VersionSpec::Minor, "-alpha").unwrap();
+        assert_eq!(
+            minor.len(),
+            (MAX_MINOR_PROBES * (MAX_PATCH_PER_MINOR + 1)) as usize
+        );
+        assert_eq!(minor[0].to_string(), "0.2.0-alpha");
+        assert_eq!(minor[1].to_string(), "0.2.1-alpha");
+        assert_eq!(minor[6].to_string(), "0.3.0-alpha");
+        assert!(minor.windows(2).all(|w| w[0] < w[1]));
+
+        let major = candidate_versions(&current, &VersionSpec::Major, "-alpha").unwrap();
+        assert_eq!(
+            major.len(),
+            (MAX_MAJOR_PROBES * (MAX_MINOR_PER_MAJOR + 1) * (MAX_PATCH_PER_MINOR + 1)) as usize
+        );
+        assert_eq!(major[0].to_string(), "1.0.0-alpha");
+        assert!(major.windows(2).all(|w| w[0] < w[1]));
+
+        let stable = candidate_versions(&current, &VersionSpec::Major, "").unwrap();
+        assert_eq!(stable[0].to_string(), "1.0.0");
     }
 
     #[tokio::test]

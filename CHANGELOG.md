@@ -5,6 +5,19 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.6.0] - 2026-10-18
+
+### 新增功能
+
+- **普通 HTTP 版本源**：`prj upgrade` 不再要求包地址是 GitHub Releases 或 git 仓库，
+  COS / S3 / OSS / nginx 等任意带 `{version}` 的地址即可按关键字升级。
+  - `patch` / `minor` / `major` 会按语义化版本规则生成候选 URL 并 HEAD 探测，
+    找到第一个真实存在的包（patch 最多向前 50 个，minor/major 也有有界窗口）；
+  - 按 addr 里的 `{version}` 模板直接替换出候选地址，不要求额外的清单文件；
+  - `latest` 没有天然停止条件，仍需可枚举清单：在 `addr` 版本段的父目录发布
+    `versions.json` 或 `versions.txt`（每项一个版本），如
+    `https://.../wist-center-stack/versions.json`；没有清单时用 `patch`/`minor`/`major` 或精确版本。
+
 ## [2.5.0] - 2026-10-17
 
 ### 新增功能

@@ -177,6 +177,23 @@ gops prj upgrade --to /path/to/pkg.tar.gz --on-failure halt # 完整地址逃生
 （不备份、不覆盖、不切换），`--force` 可强制重跑。`--on-failure` 默认 `rollback-all`，
 需要停在现场排查时显式传 `--on-failure halt`。
 
+普通 HTTP 源（COS / S3 / OSS / nginx 等）：
+
+- `patch` / `minor` / `major` 会按版本规则生成候选 URL 并做 HEAD 探测（有界：patch 最多向前 50 个，
+  minor/major 也有窗口限制）；
+- `latest` 没有天然停止条件，仍需要版本清单：在 `addr` 版本段的父目录放一份
+  `versions.json` / `versions.txt`：
+
+```text
+https://.../wist-center-stack/versions.json   # 或 versions.txt
+```
+
+```json
+{ "versions": ["0.1.9-alpha", "0.1.10-alpha"] }
+```
+
+`versions.txt` 为每行一个版本，支持 `#` 注释。没有清单且无法探测时，仍可用精确版本或 `--to`。
+
 「内容 / 版本」类命令的分工（避免 `sync` 与 `upgrade` 混淆）：
 
 | 诉求 | 命令 |

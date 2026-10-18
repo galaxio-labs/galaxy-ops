@@ -81,7 +81,12 @@ sys_models:
 自动把具体地址改写成 `{version}` 模板并写入 `version:`；git 地址或识别不到版本的地址保持原样。
 
 `latest` / `patch` / `minor` / `major` 需要**可枚举的版本目录**：当前从 GitHub Releases、
-git tag、本地包目录读取；普通 HTTP 包地址无法枚举版本，此时只支持精确版本或 `--to`。
+git tag、本地包目录读取。普通 HTTP 包地址：
+
+- `patch` / `minor` / `major`：按版本规则生成候选 URL 并 HEAD 探测（有界窗口）；
+- `latest`：没有天然停止条件，仍需在 `addr` 版本段的父目录放 `versions.json` 或
+  `versions.txt`（每行/每项一个版本），例如 `https://.../wist-center-stack/versions.json`；
+- 没有清单且探测不到时，退化为精确版本或 `--to`。
 通道 `stable|alpha|beta` 对齐 `gops self`，`-c/--channel` 缺省按当前部署版本后缀推断。
 解析出的具体版本在**任何副作用之前**确定，并在成功后回写 `ops-prj.yml` 的 `version:`
 （`--no-save` 可关闭）。

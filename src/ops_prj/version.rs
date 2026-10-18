@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::error::MainReason;
+use crate::error::{MainError, MainReason};
 use crate::ops_prj::prelude::*;
 use crate::ops_prj::system::{OpsSystem, VERSION_PLACEHOLDER};
 use crate::self_update::ReleaseChannel;
@@ -173,6 +173,17 @@ pub fn infer_channel(version: &str) -> ReleaseChannel {
 
 /// 列出某系统可用的版本。
 pub async fn list_versions(project_root: &Path, sys: &OpsSystem) -> MainResult<Vec<VersionEntry>> {
+    try_list_versions(project_root, sys)
+        .await?
+        .ok_or_else(|| no_catalog_error(sys))
+}
+
+/// 尝试从可枚举来源取版本；普通 HTTP 且没有版本清单时返回 `None`，
+/// 由调用方决定是否按 `patch`/`minor`/`major` 规则做 URL 探测。
+pub async fn try_list_versions(
+    project_root: &Path,
+    sys: &OpsSystem,
+) -> MainResult<Option<Vec<VersionEntry>>> {
     let template = sys.addr_template();
     if !template.contains(VERSION_PLACEHOLDER) {
         return Err(MainReason::logic_detail(format!(
@@ -183,20 +194,218 @@ pub async fn list_versions(project_root: &Path, sys: &OpsSystem) -> MainResult<V
     }
 
     if template.starts_with("git@") || template.ends_with(".git") {
-        return list_git_tags(&template).await;
+        return Ok(Some(list_git_tags(&template).await?));
     }
     if template.starts_with("http://") || template.starts_with("https://") {
-        if let Some((owner, repo)) = github_repo(&template) {
-            return list_github_releases(&owner, &repo).await;
+        // 通用 HTTP 版本目录：在版本段父目录放 versions.json / versions.txt。
+        // 这样不绑定 GitHub，普通对象存储（COS/S3/OSS/nginx）也能枚举版本。
+        if let Some(base) = http_version_base(&template)
+            && let Some(entries) = fetch_version_manifest(&base).await?
+        {
+            return Ok(Some(entries));
         }
-        return Err(MainReason::logic_detail(format!(
-            "系统 {} 的 addr 不是 GitHub Releases / git 地址，gops 无法枚举可用版本。\n  \
-             用 `-v <精确版本>` 或 `--to <完整地址>`；或把 addr 指向 GitHub Releases。",
-            sys.sys().name()
+        if let Some((owner, repo)) = github_repo(&template) {
+            return Ok(Some(list_github_releases(&owner, &repo).await?));
+        }
+        return Ok(None);
+    }
+
+    Ok(Some(list_local_versions(project_root, &template)?))
+}
+
+const MAX_PATCH_PROBES: u64 = 50;
+const MAX_MINOR_PROBES: u64 = 10;
+const MAX_MAJOR_PROBES: u64 = 5;
+const MAX_MINOR_PER_MAJOR: u64 = 3;
+const MAX_PATCH_PER_MINOR: u64 = 5;
+
+/// 没有版本清单时，按版本规则生成候选 URL 并 HEAD 探测。
+///
+/// - `patch`：同 major.minor，patch+1..+N，找到第一个存在的最小 patch；
+/// - `minor`：major 不变，minor+1..+N，每个 minor 从 patch 0 开始探测；
+/// - `major`：major+1..+N，minor/patch 从 0 开始探测。
+///
+/// `latest` 没有天然停止条件，仍要求版本清单 / GitHub / git / 本地目录。
+pub async fn probe_versions(
+    sys: &OpsSystem,
+    spec: &VersionSpec,
+    current: &str,
+    channel: ReleaseChannel,
+) -> MainResult<Vec<VersionEntry>> {
+    match spec {
+        VersionSpec::Latest => {
+            return Err(MainReason::logic_detail(format!(
+                "系统 {} 的 latest 需要可枚举的版本清单（versions.json / versions.txt、\
+                 GitHub Releases、git tag 或本地目录）；\n  \
+                 `patch` / `minor` / `major` 可以按规则做 URL 探测。",
+                sys.sys().name()
+            )));
+        }
+        VersionSpec::Patch | VersionSpec::Minor | VersionSpec::Major => {}
+        _ => {
+            return Err(MainReason::logic_detail(
+                "内部错误：只有 patch/minor/major 支持 URL 探测",
+            ));
+        }
+    }
+
+    let current = parse_current(current)?;
+    let suffix = channel_suffix(channel);
+    let client = reqwest::Client::builder()
+        .user_agent("gops")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
+
+    let mut found = None;
+    match spec {
+        VersionSpec::Patch => {
+            for offset in 1..=MAX_PATCH_PROBES {
+                let patch = current.patch.saturating_add(offset);
+                if let Some(version) =
+                    probe_one(&client, sys, current.major, current.minor, patch, suffix).await?
+                {
+                    found = Some(version);
+                    break;
+                }
+            }
+        }
+        VersionSpec::Minor => {
+            'minor: for minor_offset in 1..=MAX_MINOR_PROBES {
+                let minor = current.minor.saturating_add(minor_offset);
+                for patch in 0..=MAX_PATCH_PER_MINOR {
+                    if let Some(version) =
+                        probe_one(&client, sys, current.major, minor, patch, suffix).await?
+                    {
+                        found = Some(version);
+                        break 'minor;
+                    }
+                }
+            }
+        }
+        VersionSpec::Major => {
+            'major: for major_offset in 1..=MAX_MAJOR_PROBES {
+                let major = current.major.saturating_add(major_offset);
+                // 兼容“major 版本从 1.1.0 开始”的情况：minor/patch 都做有界扫描。
+                for minor in 0..=MAX_MINOR_PER_MAJOR {
+                    for patch in 0..=MAX_PATCH_PER_MINOR {
+                        if let Some(version) =
+                            probe_one(&client, sys, major, minor, patch, suffix).await?
+                        {
+                            found = Some(version);
+                            break 'major;
+                        }
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    found
+        .map(|version| vec![VersionEntry::new(version)])
+        .ok_or_else(|| {
+            MainReason::logic_detail(format!(
+                "按 URL 探测没有找到 {} 版本（当前 {}，通道 {}）；\n  \
+                 可发布 versions.json / versions.txt，或用精确版本。",
+                spec.as_str(),
+                current,
+                channel.as_str()
+            ))
+        })
+}
+
+fn channel_suffix(channel: ReleaseChannel) -> &'static str {
+    match channel {
+        ReleaseChannel::Stable => "",
+        ReleaseChannel::Alpha => "-alpha",
+        ReleaseChannel::Beta => "-beta",
+    }
+}
+
+async fn probe_one(
+    client: &reqwest::Client,
+    sys: &OpsSystem,
+    major: u64,
+    minor: u64,
+    patch: u64,
+    suffix: &str,
+) -> MainResult<Option<semver::Version>> {
+    let raw = format!("{major}.{minor}.{patch}{suffix}");
+    let version = semver::Version::parse(&raw)
+        .map_err(|e| MainReason::logic_detail(format!("生成探测版本失败 `{raw}`：{e}")))?;
+    let url = sys.resolved_addr_with(&version.to_string())?;
+    if http_object_exists(client, &url).await? {
+        Ok(Some(version))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn http_object_exists(client: &reqwest::Client, url: &str) -> MainResult<bool> {
+    let mut head = client.head(url);
+    if let Some(token) = github_token_for(url) {
+        head = head.bearer_auth(token);
+    }
+    let resp = head
+        .send()
+        .await
+        .map_err(|e| MainReason::resource_detail(format!("探测目标失败（HEAD）{url}: {e}")))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(true);
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+
+    // 部分对象存储/静态服务器不接受 HEAD；用最小 Range GET 再确认。
+    if matches!(status.as_u16(), 403 | 405 | 501) {
+        let mut get = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
+        if let Some(token) = github_token_for(url) {
+            get = get.bearer_auth(token);
+        }
+        let resp = get.send().await.map_err(|e| {
+            MainReason::resource_detail(format!("探测目标失败（GET Range）{url}: {e}"))
+        })?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        return Err(MainReason::resource_detail(format!(
+            "探测目标失败：{url}\n  GET Range → HTTP {status}"
         )));
     }
 
-    list_local_versions(project_root, &template)
+    Err(MainReason::resource_detail(format!(
+        "探测目标失败：{url}\n  HEAD → HTTP {status}"
+    )))
+}
+
+fn github_token_for(url: &str) -> Option<String> {
+    let is_github = url.starts_with("https://github.com/")
+        || url.starts_with("http://github.com/")
+        || url.starts_with("https://api.github.com/");
+    if is_github { github_token() } else { None }
+}
+
+fn no_catalog_error(sys: &OpsSystem) -> MainError {
+    let template = sys.addr_template();
+    let hint = http_version_base(&template)
+        .map(|base| format!("{base}versions.json（或 versions.txt）"))
+        .unwrap_or_else(|| "<addr 版本段父目录>/versions.json（或 versions.txt）".to_string());
+    MainReason::logic_detail(format!(
+        "系统 {} 的 addr 是普通 HTTP 地址，gops 无法自动枚举可用版本。\n  \
+         可选：\n  \
+         1) 在 {hint} 发布版本清单；\n  \
+         2) 用 `patch`/`minor`/`major` 按规则探测（需要当前版本已知）；\n  \
+         3) 用 `-v <精确版本>` 或 `--to <完整地址>`；\n  \
+         4) 把 addr 指向 GitHub Releases / git tag。",
+        sys.sys().name()
+    ))
 }
 
 /// 从版本目录里按 spec 选择目标版本。
@@ -369,6 +578,135 @@ pub fn github_token() -> Option<String> {
         .ok()
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
+}
+
+/// 从 HTTP 模板里取“版本段父目录”，作为版本清单的落点。
+///
+/// 例：`https://host/wist-center-stack/v{version}/x.tar.gz`
+///     → `https://host/wist-center-stack/`
+///     `https://host/pkgs/s-v{version}.tar.gz`
+///     → `https://host/pkgs/`
+fn http_version_base(template: &str) -> Option<String> {
+    let scheme_end = template.find("://")?;
+    let scheme = &template[..scheme_end];
+    let rest = &template[scheme_end + 3..];
+    let slash = rest.find('/')?;
+    let authority = &rest[..slash];
+    let path = &rest[slash..];
+    let segments: Vec<&str> = path.split('/').collect();
+    let version_idx = segments
+        .iter()
+        .position(|segment| segment.contains(VERSION_PLACEHOLDER))?;
+
+    let mut base = format!("{scheme}://{authority}");
+    for segment in &segments[..version_idx] {
+        if !segment.is_empty() {
+            base.push('/');
+            base.push_str(segment);
+        }
+    }
+    base.push('/');
+    Some(base)
+}
+
+/// 读取通用 HTTP 版本清单：优先 `versions.json`，其次 `versions.txt`。
+async fn fetch_version_manifest(base: &str) -> MainResult<Option<Vec<VersionEntry>>> {
+    let client = reqwest::Client::builder()
+        .user_agent("gops")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
+
+    for (file, is_json) in [("versions.json", true), ("versions.txt", false)] {
+        let url = format!("{base}{file}");
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| MainReason::resource_detail(format!("读取版本清单失败 {url}: {e}")))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+        if !status.is_success() {
+            return Err(MainReason::resource_detail(format!(
+                "读取版本清单失败：{url}\n  GET → HTTP {status}（清单需要公开可读）"
+            )));
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| MainReason::resource_detail(format!("读取版本清单内容失败 {url}: {e}")))?;
+        let entries = if is_json {
+            parse_manifest_json(&body)?
+        } else {
+            parse_manifest_text(&body)?
+        };
+        return Ok(Some(entries));
+    }
+    Ok(None)
+}
+
+fn parse_manifest_json(body: &str) -> MainResult<Vec<VersionEntry>> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| MainReason::resource_detail(format!("解析 versions.json 失败：{e}")))?;
+    let items = match &value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(obj) => obj
+            .get("versions")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| {
+                MainReason::resource_detail(
+                    "versions.json 需要是数组，或包含 `versions` 数组的对象",
+                )
+            })?,
+        _ => {
+            return Err(MainReason::resource_detail(
+                "versions.json 需要是数组，或包含 `versions` 数组的对象",
+            ));
+        }
+    };
+
+    let mut entries = Vec::new();
+    for item in items {
+        let raw = match item {
+            serde_json::Value::String(value) => value.as_str(),
+            serde_json::Value::Object(obj) => obj
+                .get("version")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+            _ => continue,
+        };
+        if let Ok(version) = semver::Version::parse(&normalize_exact(raw)) {
+            entries.push(VersionEntry::new(version));
+        }
+    }
+    normalize_entries(entries)
+}
+
+fn parse_manifest_text(body: &str) -> MainResult<Vec<VersionEntry>> {
+    let mut entries = Vec::new();
+    for line in body.lines() {
+        let raw = line.split('#').next().unwrap_or("").trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if let Ok(version) = semver::Version::parse(&normalize_exact(raw)) {
+            entries.push(VersionEntry::new(version));
+        }
+    }
+    normalize_entries(entries)
+}
+
+fn normalize_entries(mut entries: Vec<VersionEntry>) -> MainResult<Vec<VersionEntry>> {
+    entries.sort_by(|a, b| a.version.cmp(&b.version));
+    entries.dedup();
+    if entries.is_empty() {
+        return Err(MainReason::resource_detail(
+            "版本清单没有合法的 semver 版本（每行/每项一个版本）",
+        ));
+    }
+    Ok(entries)
 }
 
 /// 从 GitHub 地址里取 `owner/repo`。
@@ -793,6 +1131,266 @@ mod tests {
         let sys = test_sys("nope/s-v{version}.tar.gz");
         let err = list_versions(tmp.path(), &sys).await.unwrap_err();
         assert!(err.to_string().contains("读取版本目录失败"), "{err}");
+    }
+
+    #[test]
+    fn http_version_base_extracts_parent_of_version_segment() {
+        assert_eq!(
+            http_version_base("https://host/wist-center-stack/v{version}/x.tar.gz"),
+            Some("https://host/wist-center-stack/".to_string())
+        );
+        assert_eq!(
+            http_version_base("https://host/pkgs/s-v{version}.tar.gz"),
+            Some("https://host/pkgs/".to_string())
+        );
+        assert_eq!(
+            http_version_base("https://host/v{version}/x.tar.gz"),
+            Some("https://host/".to_string())
+        );
+        assert_eq!(http_version_base("https://host/pkgs/s.tar.gz"), None);
+    }
+
+    #[test]
+    fn parse_manifest_json_supports_array_and_object() {
+        let body = r#"{"versions":["v0.1.9-alpha",{"version":"0.1.10-alpha"},"bad"]}"#;
+        let versions: Vec<String> = parse_manifest_json(body)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["0.1.9-alpha", "0.1.10-alpha"]);
+
+        let body = r#"["0.1.9-alpha","0.1.10-alpha","0.1.9-alpha"]"#;
+        let versions: Vec<String> = parse_manifest_json(body)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["0.1.9-alpha", "0.1.10-alpha"]);
+        assert!(parse_manifest_json("[]").is_err());
+        assert!(parse_manifest_json("not-json").is_err());
+    }
+
+    #[test]
+    fn parse_manifest_text_skips_comments_and_invalid() {
+        let body = "# versions\n0.1.9-alpha\n\n bad \n0.1.10-alpha # latest\nv0.1.9-alpha\n";
+        let versions: Vec<String> = parse_manifest_text(body)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["0.1.9-alpha", "0.1.10-alpha"]);
+        assert!(parse_manifest_text("# only comments\n").is_err());
+    }
+
+    #[tokio::test]
+    async fn list_versions_reads_generic_http_manifest() {
+        let mut server = mockito::Server::new_async().await;
+        let manifest = server
+            .mock("GET", "/wist-center-stack/versions.json")
+            .with_status(200)
+            .with_body(r#"{"versions":["0.1.9-alpha","0.1.10-alpha"]}"#)
+            .create_async()
+            .await;
+        let template = format!(
+            "{}/wist-center-stack/v{{version}}/wist-center-stack-v{{version}}.tar.gz",
+            server.url()
+        );
+        let sys = test_sys(&template);
+
+        let versions: Vec<String> = list_versions(Path::new("."), &sys)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["0.1.9-alpha", "0.1.10-alpha"]);
+        manifest.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn list_versions_falls_back_to_versions_txt() {
+        let mut server = mockito::Server::new_async().await;
+        let json = server
+            .mock("GET", "/pkgs/versions.json")
+            .with_status(404)
+            .create_async()
+            .await;
+        let txt = server
+            .mock("GET", "/pkgs/versions.txt")
+            .with_status(200)
+            .with_body("0.1.9-alpha\n0.1.10-alpha\n")
+            .create_async()
+            .await;
+        let template = format!("{}/pkgs/s-v{{version}}.tar.gz", server.url());
+        let sys = test_sys(&template);
+
+        let versions: Vec<String> = list_versions(Path::new("."), &sys)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["0.1.9-alpha", "0.1.10-alpha"]);
+        json.assert_async().await;
+        txt.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_patch_finds_next_existing() {
+        let mut server = mockito::Server::new_async().await;
+        let missing = server
+            .mock(
+                "HEAD",
+                "/wist-center-stack/v0.1.10-alpha/wist-center-stack-v0.1.10-alpha.tar.gz",
+            )
+            .with_status(404)
+            .create_async()
+            .await;
+        let found = server
+            .mock(
+                "HEAD",
+                "/wist-center-stack/v0.1.11-alpha/wist-center-stack-v0.1.11-alpha.tar.gz",
+            )
+            .with_status(200)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/wist-center-stack/v{{version}}/wist-center-stack-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Patch,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "0.1.11-alpha");
+        missing.assert_async().await;
+        found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_minor_and_major() {
+        let mut server = mockito::Server::new_async().await;
+        let minor = server
+            .mock("HEAD", "/pkg/v0.2.0-alpha/pkg-v0.2.0-alpha.tar.gz")
+            .with_status(200)
+            .create_async()
+            .await;
+        let major = server
+            .mock("HEAD", "/pkg/v1.0.0-alpha/pkg-v1.0.0-alpha.tar.gz")
+            .with_status(200)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Minor,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "0.2.0-alpha");
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Major,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "1.0.0-alpha");
+        minor.assert_async().await;
+        major.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_major_can_find_first_minor_of_next_major() {
+        let mut server = mockito::Server::new_async().await;
+        for patch in 0..=5 {
+            let path = format!("/pkg/v1.0.{patch}-alpha/pkg-v1.0.{patch}-alpha.tar.gz");
+            server
+                .mock("HEAD", path.as_str())
+                .with_status(404)
+                .create_async()
+                .await;
+        }
+        let found = server
+            .mock("HEAD", "/pkg/v1.1.0-alpha/pkg-v1.1.0-alpha.tar.gz")
+            .with_status(200)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Major,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "1.1.0-alpha");
+        found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_latest_and_bad_current_are_clear_errors() {
+        let sys = test_sys("https://host/pkg/v{version}/pkg-v{version}.tar.gz");
+
+        let err = probe_versions(
+            &sys,
+            &VersionSpec::Latest,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("latest"), "{err}");
+
+        let err = probe_versions(&sys, &VersionSpec::Patch, "build-1", ReleaseChannel::Alpha)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("不是 semver"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_versions_reports_missing_generic_manifest() {
+        let mut server = mockito::Server::new_async().await;
+        let json = server
+            .mock("GET", "/pkgs/versions.json")
+            .with_status(404)
+            .create_async()
+            .await;
+        let txt = server
+            .mock("GET", "/pkgs/versions.txt")
+            .with_status(404)
+            .create_async()
+            .await;
+        let template = format!("{}/pkgs/s-v{{version}}.tar.gz", server.url());
+        let sys = test_sys(&template);
+
+        let err = list_versions(Path::new("."), &sys).await.unwrap_err();
+        assert!(err.to_string().contains("versions.json"), "{err}");
+        assert!(
+            err.to_string().contains(&format!("{}/pkgs/", server.url())),
+            "{err}"
+        );
+        json.assert_async().await;
+        txt.assert_async().await;
     }
 
     #[test]

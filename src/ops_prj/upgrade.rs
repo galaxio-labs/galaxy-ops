@@ -898,7 +898,16 @@ impl UpgradeRuntime for ProjectRuntime {
                     }
                     _ => {
                         let channel = self.channel.unwrap_or_else(|| infer_channel(&current));
-                        let entries = version::list_versions(&self.project_root, sys_ref).await?;
+                        // 有清单/API 直接枚举；普通 HTTP 无清单时，按 patch/minor/major
+                        // 规则生成候选 URL 并 HEAD 探测。
+                        let entries = match version::try_list_versions(&self.project_root, sys_ref)
+                            .await?
+                        {
+                            Some(entries) => entries,
+                            None => {
+                                version::probe_versions(sys_ref, spec, &current, channel).await?
+                            }
+                        };
                         let entry =
                             version::select_version(&entries, spec, Some(&current), channel)?;
                         let version = entry.version.to_string();
@@ -1376,6 +1385,99 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("没写 `version`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn project_runtime_probes_patch_for_generic_http() {
+        let mut server = mockito::Server::new_async().await;
+        let manifest_json = server
+            .mock("GET", "/wist-center-stack/versions.json")
+            .with_status(404)
+            .create_async()
+            .await;
+        let manifest_txt = server
+            .mock("GET", "/wist-center-stack/versions.txt")
+            .with_status(404)
+            .create_async()
+            .await;
+        let package = server
+            .mock(
+                "HEAD",
+                "/wist-center-stack/v0.1.10-alpha/wist-center-stack-v0.1.10-alpha.tar.gz",
+            )
+            .with_status(200)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let addr = format!(
+            "url: {}/wist-center-stack/v{{version}}/wist-center-stack-v{{version}}.tar.gz",
+            server.url()
+        );
+        project_with_sys(
+            root,
+            &format!("  version: 0.1.9-alpha\n  addr:\n    {addr}\n"),
+        );
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.1.9-alpha\n").unwrap();
+
+        let target = runtime(
+            root,
+            UpgradeTarget::Spec(VersionSpec::Patch),
+            Some(ReleaseChannel::Alpha),
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap();
+        assert_eq!(target.version.as_deref(), Some("0.1.10-alpha"));
+        assert!(target.addr.contains("v0.1.10-alpha"));
+
+        manifest_json.assert_async().await;
+        manifest_txt.assert_async().await;
+        package.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn project_runtime_latest_still_requires_catalog_for_generic_http() {
+        let mut server = mockito::Server::new_async().await;
+        let manifest_json = server
+            .mock("GET", "/wist-center-stack/versions.json")
+            .with_status(404)
+            .create_async()
+            .await;
+        let manifest_txt = server
+            .mock("GET", "/wist-center-stack/versions.txt")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let addr = format!(
+            "url: {}/wist-center-stack/v{{version}}/wist-center-stack-v{{version}}.tar.gz",
+            server.url()
+        );
+        project_with_sys(
+            root,
+            &format!("  version: 0.1.9-alpha\n  addr:\n    {addr}\n"),
+        );
+        std::fs::create_dir_all(root.join("web-stack")).unwrap();
+        std::fs::write(root.join("web-stack/version.txt"), "0.1.9-alpha\n").unwrap();
+
+        let err = runtime(
+            root,
+            UpgradeTarget::Spec(VersionSpec::Latest),
+            Some(ReleaseChannel::Alpha),
+        )
+        .resolve_target("web-stack")
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("latest"), "{err}");
+
+        manifest_json.assert_async().await;
+        manifest_txt.assert_async().await;
     }
 
     #[tokio::test]

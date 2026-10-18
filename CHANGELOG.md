@@ -5,6 +5,22 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.6.5] - 2026-10-18
+
+### 修复
+
+- **现场版本缺失时给出明确提示**：`prj upgrade patch/minor/major` 在 `version.txt` 与
+  `deliver.lock` 都没有版本时，不再报“不是 semver”，而是提示 `现场版本未知`，
+  并给出 `-v` / `--to` 两条出路。
+- **版本清单返回 401/403 时不再阻断探测**：部分对象存储对不存在的 `versions.json`
+  返回 403，现在视为“没有清单”，继续按 URL 探测。
+- **探测失败提示补全**：说明已扫描的窗口候选数，并给出 `-v <精确版本>` / `--to` 逃生口。
+
+### 测试
+
+- 新增 8 个用例：现场版本缺失、无命中提示、stable/beta 通道后缀、patch/minor 基于
+  当前 major.minor、清单 403 回退，以及 `resolve_target` 的 minor/stable/版本缺失集成路径。
+
 ## [2.6.4] - 2026-10-18
 
 ### 变更

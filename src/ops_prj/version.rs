@@ -259,6 +259,15 @@ pub async fn probe_versions(
         }
     }
 
+    if current.trim().is_empty() {
+        return Err(MainReason::logic_detail(format!(
+            "系统 {} 的现场版本未知（version.txt / deliver.lock 都没有版本），\
+             无法按 {} 探测下一个版本；\n  \
+             用 `-v <精确版本>` 或 `--to <完整地址>`。",
+            sys.sys().name(),
+            spec.as_str()
+        )));
+    }
     let current = parse_current(current)?;
     let suffix = channel_suffix(channel);
     let candidates = candidate_versions(&current, spec, suffix)?;
@@ -310,11 +319,12 @@ pub async fn probe_versions(
     }
 
     Err(MainReason::logic_detail(format!(
-        "按 URL 探测没有找到 {} 版本（当前 {}，通道 {}）；\n  \
-         可发布 versions.json / versions.txt，或用精确版本。",
+        "按 URL 探测没有找到 {} 版本（当前 {}，通道 {}，窗口 {} 个候选）；\n  \
+         可发布 versions.json / versions.txt，或用 `-v <精确版本>` / `--to <完整地址>`。",
         spec.as_str(),
         current,
-        channel.as_str()
+        channel.as_str(),
+        candidates.len()
     )))
 }
 
@@ -660,7 +670,9 @@ async fn fetch_version_manifest(base: &str) -> MainResult<Option<Vec<VersionEntr
             .await
             .map_err(|e| MainReason::resource_detail(format!("读取版本清单失败 {url}: {e}")))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
+        // 清单是可选增强：部分对象存储对不存在的对象返回 401/403，
+        // 不能因此拦住后面的 URL 探测；真不存在与无权限在这里等价。
+        if status == reqwest::StatusCode::NOT_FOUND || matches!(status.as_u16(), 401 | 403) {
             continue;
         }
         if !status.is_success() {
@@ -1490,6 +1502,156 @@ mod tests {
         denied_head.assert_async().await;
         denied_get.assert_async().await;
         found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_unknown_current_is_clear_error() {
+        let sys = test_sys("https://host/pkg/v{version}/pkg-v{version}.tar.gz");
+
+        for current in ["", "   "] {
+            let err = probe_versions(&sys, &VersionSpec::Patch, current, ReleaseChannel::Alpha)
+                .await
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("现场版本未知"), "{msg}");
+            assert!(msg.contains("--to"), "{msg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_versions_no_hit_reports_window_and_escape_hatch() {
+        let mut server = mockito::Server::new_async().await;
+        for patch in 10..=29 {
+            let path = format!("/pkg/v0.1.{patch}-alpha/pkg-v0.1.{patch}-alpha.tar.gz");
+            server
+                .mock("HEAD", path.as_str())
+                .with_status(404)
+                .create_async()
+                .await;
+        }
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let err = probe_versions(
+            &sys,
+            &VersionSpec::Patch,
+            "0.1.9-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("没有找到 patch"), "{msg}");
+        assert!(msg.contains("0.1.9-alpha"), "{msg}");
+        assert!(msg.contains("窗口 20 个候选"), "{msg}");
+        assert!(msg.contains("-v <精确版本>"), "{msg}");
+        assert!(msg.contains("--to"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn probe_versions_renders_channel_suffix() {
+        let mut server = mockito::Server::new_async().await;
+        let stable = server
+            .mock("HEAD", "/pkg/v0.1.10/pkg-v0.1.10.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let beta = server
+            .mock("HEAD", "/pkg/v1.0.0-beta/pkg-v1.0.0-beta.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(&sys, &VersionSpec::Patch, "0.1.9", ReleaseChannel::Stable)
+            .await
+            .unwrap();
+        assert_eq!(entries[0].version.to_string(), "0.1.10");
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Major,
+            "0.1.9-beta",
+            ReleaseChannel::Beta,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "1.0.0-beta");
+
+        stable.assert_async().await;
+        beta.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probe_versions_uses_current_major_minor() {
+        let mut server = mockito::Server::new_async().await;
+        let patch = server
+            .mock("HEAD", "/pkg/v2.7.5-alpha/pkg-v2.7.5-alpha.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let minor = server
+            .mock("HEAD", "/pkg/v2.8.0-alpha/pkg-v2.8.0-alpha.tar.gz")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!(
+            "{}/pkg/v{{version}}/pkg-v{{version}}.tar.gz",
+            server.url()
+        ));
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Patch,
+            "2.7.4-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "2.7.5-alpha");
+
+        let entries = probe_versions(
+            &sys,
+            &VersionSpec::Minor,
+            "2.7.4-alpha",
+            ReleaseChannel::Alpha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].version.to_string(), "2.8.0-alpha");
+
+        patch.assert_async().await;
+        minor.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn try_list_versions_skips_forbidden_manifest() {
+        let mut server = mockito::Server::new_async().await;
+        let json = server
+            .mock("GET", "/pkgs/versions.json")
+            .with_status(403)
+            .create_async()
+            .await;
+        let txt = server
+            .mock("GET", "/pkgs/versions.txt")
+            .with_status(403)
+            .create_async()
+            .await;
+        let sys = test_sys(&format!("{}/pkgs/s-v{{version}}.tar.gz", server.url()));
+
+        let entries = try_list_versions(Path::new("."), &sys).await.unwrap();
+        assert!(entries.is_none(), "403 清单应视为不存在，交给 URL 探测");
+        json.assert_async().await;
+        txt.assert_async().await;
     }
 
     #[test]

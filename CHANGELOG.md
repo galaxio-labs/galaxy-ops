@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.6.2] - 2026-10-18
+
+### 修复
+
+- **`gops prj upgrade --help` 续行缩进**：去掉多行说明里的多余前导空格。
+
 ## [2.6.1] - 2026-10-18
 
 ### 修复

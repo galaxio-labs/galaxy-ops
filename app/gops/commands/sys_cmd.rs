@@ -480,6 +480,9 @@ impl SysCommandHandler {
     }
 
     /// 仅告警的权限自检（供 `sys localize` 生命周期使用）。
+    ///
+    /// 告警一律走 **stderr**：`sys localize` 的 stdout 是既有的值/文件变更表，
+    /// 自检是旁路信息，不应污染它（也不应影响脚本对 stdout 的断言）。
     fn warn_perms_drift(dir: &Path) {
         if !cfg!(target_os = "linux") {
             return;
@@ -487,7 +490,7 @@ impl SysCommandHandler {
         match galaxy_ops::system::perms::run_with_conf(dir, false) {
             Ok(report) => {
                 if !report.is_ok() {
-                    println!(
+                    eprintln!(
                         "[WARN] 宿主 bind 挂载权限未对齐：{} 项待修，{} 项失败；\
                          运行 `gops sys perms --apply` 修复（`gops sys perms` 查看明细，\
                          `--no-perms-check` 关闭本检查）",
@@ -496,10 +499,10 @@ impl SysCommandHandler {
                     );
                 }
                 for warning in &report.warnings {
-                    println!("[WARN] {warning}");
+                    eprintln!("[WARN] {warning}");
                 }
             }
-            Err(err) => println!("[WARN] 宿主权限自检跳过：{err}"),
+            Err(err) => eprintln!("[WARN] 宿主权限自检跳过：{err}"),
         }
     }
 

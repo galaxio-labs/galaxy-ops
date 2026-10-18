@@ -5,6 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.1-alpha] - 2026-10-18
+
+### 修复
+
+- `sys localize` 的宿主权限自检告警改走 **stderr**，不再污染 stdout 的值/文件变更表
+  （脚本与 CI 可继续按 stdout 断言）。
+
 ## [2.7.0-alpha] - 2026-10-18
 
 ### 新增

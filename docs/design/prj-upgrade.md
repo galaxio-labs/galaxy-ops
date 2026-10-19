@@ -100,7 +100,8 @@ git tag、本地包目录读取。普通 HTTP 包地址：
 
 ```
 gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|alpha|beta>] \
-  [--to <url|path>] [--on-failure <rollback-all|halt>] [--dry-run] [--health-cmd ...] [--json] [--no-save]
+  [--to <url|path>] [--on-failure <rollback-all|halt>] [--no-stop] [--dry-run] \
+  [--health-cmd ...] [--json] [--no-save]
 ```
 
 `<spec>` 支持 `latest` / `patch` / `minor`（`feat` 别名）/ `major` / 精确版本；缺省使用
@@ -112,6 +113,7 @@ gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|al
 | `-c, --channel <stable\|alpha\|beta>` | 只对 keyword spec 生效；缺省按当前部署版本后缀推断 |
 | `--to <url\|path>` | 完整包地址；与版本 spec / channel 互斥 |
 | `--no-save` | 成功后不回写 `ops-prj.yml` 的 `version:`（默认回写） |
+| `--no-stop` | 切换时不先停服务（默认 `stop` → `up -d`，见步骤 6）；**回滚也用它** |
 | `--dry-run` | 只出计划：会覆盖哪些文件、跳过哪些（protect）、拉哪些镜像；**不动现场** |
 | `--health-cmd <shell>` / `--health-timeout <sec>` | 栈外探活；**给了才做回滚判定**（没给则只切换、不判定） |
 | `--on-failure <rollback-all\|halt>` | 失败处置（§3.3）。**默认 `rollback-all`**；`halt` 需显式指定 |
@@ -131,7 +133,7 @@ gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|al
 3. apply：prj sync（全系统）        ← 只动磁盘内容，不停服务
 4. regenerate：sys resolve?(按需) + sys localize（全系统）
 5. pull：run download（全系统）       ← 新镜像没全到齐，绝不进入下一步
-6. up：run start（全系统）            ← 第一次真正切换
+6. up：stop → up -d（全系统）         ← 第一次真正切换（`--no-stop` 时只 `up -d`）
 7. health：--health-cmd（重试至 timeout）+ run status（全系统）
 8. 全绿 → 写状态（from→to / 时间 / backup_id）
    任一失败 → 按 `--on-failure` 处置（§3.3）
@@ -139,6 +141,12 @@ gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|al
 
 > **先拉后停**在这里是结构性的：第 5 步 `pull` 对全部系统做完，才允许第 6 步 `up` ——
 > 「镜像拉不到」这个最常见的失败源，在**没停任何服务**时就被挡下。
+>
+> 第 6 步为什么是 `stop` → `up -d` 而不是只 `up -d`：compose 只重建**配置哈希变了**的容器；
+> bind mount 里的文件内容（WPL/OML、`*.toml`、证书）不进哈希，不先停就会继续用进程启动时读到的旧内容。
+> 全栈重启的代价明确、可预期；不想要这次停机时用 `--no-stop`（只换镜像/环境变化的容器）。
+> **注意 `--no-stop` 是事务级开关**：回滚路径复用同一个 `up`，选它以后回滚也只 `up -d`，
+> `restore` 回来的配置不会主动重读——要确保回滚生效，需重跑一次不带 `--no-stop` 的升级或手动 restart。
 
 ### 3.3 失败处置：`--on-failure`（默认 `rollback-all`）
 
@@ -152,7 +160,7 @@ gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|al
 回滚动作（仅 `rollback-all`，逆序）：
 
 ```
-prj restore(全部系统的 backup_id) → run start(全部) → health(全部) → 报「已回滚（整工程）」
+prj restore(全部系统的 backup_id) → stop → run start(全部) → health(全部) → 报「已回滚（整工程）」
 ```
 
 **默认值已定：`rollback-all`**。默认行为偏安全；如果明确要在原地排查中间态，显式传 `--on-failure halt`。
@@ -196,7 +204,7 @@ prj restore(全部系统的 backup_id) → run start(全部) → health(全部) 
 | 步骤 | `kind: docker-compose` | `kind: gxl` |
 | --- | --- | --- |
 | 拉 | `docker compose pull` | `gx run download` |
-| 起 | `docker compose up -d` | `gx run start` |
+| 起 | `docker compose stop` → `up -d`（`--no-stop` 时只 `up -d`） | `gx run start` |
 | 停 | `docker compose stop` | `gx run stop` |
 
 （`gxl` 的 module op-flow 本来就有 `update`/`restart`，见 `README.md` 的 ops-gxl 契约。）

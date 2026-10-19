@@ -173,6 +173,12 @@ pub struct PrjUpgradeArgs {
     pub no_save: bool,
 
     #[arg(
+        long = "no-stop",
+        help = "切换时不先停服务（默认 stop → up -d，确保 bind mount 的配置被重新读取；回滚同样生效）"
+    )]
+    pub no_stop: bool,
+
+    #[arg(
         long = "on-failure",
         value_name = "rollback-all|halt",
         default_value = "rollback-all",
@@ -245,6 +251,8 @@ pub enum PrjCmd {
         about = "升级发布态 (Upgrade Deployed Systems)",
         long_about = "对已导入的系统做一次**升级事务**：diagnose → backup → apply（覆盖包内内容）→ \
                      regenerate（sys resolve + localize）→ pull → up → health。\n\
+                     `up` 默认先 `docker compose stop` 再 `up -d`：bind mount 里的配置内容变化不会改变 \
+                     compose 配置哈希，单跑 `up -d` 不会让未变更的容器重读配置（`--no-stop` 关闭先停）。\n\
                      失败处置由 `--on-failure` 指定（rollback-all = 整工程回滚，**默认**；halt = 停在那里不回滚）。\n\
                      第 1 版只支持 `kind: docker-compose` 的系统。\n\
                      版本 spec 支持 `latest` / `patch` / `minor`（`feat` 别名）/ `major` / `X.Y.Z`；\
@@ -359,7 +367,53 @@ fn ensure_upgradeable(systems: &[String], project_root: &Path) -> MainResult<()>
 /// `prj upgrade` 第一版的运行时：docker-compose 的 localize / pull / up / status。
 ///
 /// 与栈隔离的核心：它只碰指定系统目录，不依赖任何全局状态。
-struct ComposeDispatch;
+struct ComposeDispatch {
+    /// 切换前是否先 `docker compose stop`（默认 true，`--no-stop` 关闭）。
+    stop_before_start: bool,
+}
+
+impl ComposeDispatch {
+    fn new(stop_before_start: bool) -> Self {
+        Self { stop_before_start }
+    }
+}
+
+/// 切换阶段要跑的子命令序列。
+///
+/// 默认 `stop` → `start`：`docker compose up -d` 只重建**配置哈希变了**的容器；
+/// bind mount 里的文件内容（WPL/OML、toml、证书）不在哈希里，
+/// 不先停就会继续用进程启动时读到的旧内容。
+fn switch_commands(stop_before_start: bool) -> &'static [&'static str] {
+    if stop_before_start {
+        &["stop", "start"]
+    } else {
+        &["start"]
+    }
+}
+
+/// 按切换序列依次执行；任一步失败即停（不继续后面的命令）。
+///
+/// 拆成接受 runner 的形式是为了可测：生产路径传 `compose_cmd_in`，测试用记录序列的闭包
+/// 验证「默认先 stop」「stop 失败不再 start」。
+async fn run_switch_commands<F, Fut>(stop_before_start: bool, mut run: F) -> MainResult<()>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = MainResult<()>>,
+{
+    for cmd in switch_commands(stop_before_start) {
+        run(cmd).await?;
+    }
+    Ok(())
+}
+
+/// `--dry-run` 里展示的切换方式文案。
+fn switch_mode_label(stop_before_switch: bool) -> &'static str {
+    if stop_before_switch {
+        "stop → up -d（默认；确保 bind mount 的配置被重读）"
+    } else {
+        "up -d（--no-stop；不先停服务）"
+    }
+}
 
 #[async_trait::async_trait]
 impl RuntimeDispatch for ComposeDispatch {
@@ -380,7 +434,10 @@ impl RuntimeDispatch for ComposeDispatch {
         RunCommandHandler::compose_cmd_in(sys_dir, "download").await
     }
     async fn up(&self, sys_dir: &Path) -> MainResult<()> {
-        RunCommandHandler::compose_cmd_in(sys_dir, "start").await
+        run_switch_commands(self.stop_before_start, |cmd| {
+            RunCommandHandler::compose_cmd_in(sys_dir, cmd)
+        })
+        .await
     }
     async fn status(&self, sys_dir: &Path) -> MainResult<()> {
         RunCommandHandler::compose_cmd_in(sys_dir, "status").await
@@ -727,7 +784,7 @@ impl PrjCommandHandler {
             *args.force().force() > 0,
             args.health_cmd().clone(),
             Duration::from_secs(*args.health_timeout()),
-            Arc::new(ComposeDispatch),
+            Arc::new(ComposeDispatch::new(!*args.no_stop())),
         );
 
         let outcome = run_upgrade(
@@ -744,7 +801,7 @@ impl PrjCommandHandler {
         if *args.json() {
             println!("{}", outcome.to_json());
         } else {
-            Self::print_upgrade(&outcome);
+            Self::print_upgrade(&outcome, !*args.no_stop());
         }
 
         if outcome.exit_code() != 0 {
@@ -768,7 +825,10 @@ impl PrjCommandHandler {
         Ok(())
     }
 
-    fn print_upgrade(outcome: &galaxy_ops::ops_prj::upgrade::UpgradeOutcome) {
+    fn print_upgrade(
+        outcome: &galaxy_ops::ops_prj::upgrade::UpgradeOutcome,
+        stop_before_switch: bool,
+    ) {
         if outcome.dry_run {
             println!("升级计划（--dry-run，未动现场）");
             println!("  目标      {}", outcome.plan.target);
@@ -786,6 +846,7 @@ impl PrjCommandHandler {
                 println!("  结果      no-op（已是目标版本，不执行事务）");
             } else {
                 println!("  阶段序    diagnose → backup → apply → regenerate → pull → up → health");
+                println!("  切换方式  {}", switch_mode_label(stop_before_switch));
             }
             for (idx, (sys, addr)) in outcome
                 .plan
@@ -1016,6 +1077,95 @@ mod tests {
             }
             other => panic!("expected upgrade, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_prj_upgrade_no_stop_defaults_off_and_can_be_enabled() {
+        // 缺省：先停再起（bind mount 的配置才会被重读）。
+        let cmd = GInsCmd::try_parse_from(["gops", "prj", "upgrade", "latest"]).unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => assert!(!*a.no_stop()),
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        let cmd =
+            GInsCmd::try_parse_from(["gops", "prj", "upgrade", "latest", "--no-stop"]).unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => assert!(*a.no_stop()),
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+
+        // 与其它 flag 共存：不破坏 --to / --dry-run / --json。
+        let cmd = GInsCmd::try_parse_from([
+            "gops",
+            "prj",
+            "upgrade",
+            "--to",
+            "http://x/p.tar.gz",
+            "--no-stop",
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+        match cmd {
+            GInsCmd::Prj(PrjCmd::Upgrade(a)) => {
+                assert!(*a.no_stop());
+                assert!(*a.dry_run());
+                assert!(*a.json());
+                assert_eq!(a.to().as_deref(), Some("http://x/p.tar.gz"));
+            }
+            other => panic!("expected upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_switch_commands_stop_then_start_by_default() {
+        assert_eq!(switch_commands(true), &["stop", "start"]);
+        assert_eq!(switch_commands(false), &["start"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_switch_commands_stops_then_starts_by_default() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        run_switch_commands(true, |cmd| {
+            seen.lock().unwrap().push(cmd);
+            async { Ok(()) }
+        })
+        .await
+        .expect("switch sequence");
+        assert_eq!(*seen.lock().unwrap(), vec!["stop", "start"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_switch_commands_skips_stop_with_no_stop() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        run_switch_commands(false, |cmd| {
+            seen.lock().unwrap().push(cmd);
+            async { Ok(()) }
+        })
+        .await
+        .expect("switch sequence");
+        assert_eq!(*seen.lock().unwrap(), vec!["start"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_switch_commands_short_circuits_when_stop_fails() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let err = run_switch_commands(true, |cmd| {
+            seen.lock().unwrap().push(cmd);
+            async { Err(MainReason::logic_detail("stop failed")) }
+        })
+        .await
+        .expect_err("stop failure must propagate");
+        assert!(err.to_string().contains("stop failed"), "{err}");
+        // stop 失败后**不能**继续 start：让上层按 --on-failure 处置。
+        assert_eq!(*seen.lock().unwrap(), vec!["stop"]);
+    }
+
+    #[test]
+    fn test_switch_mode_label_matches_flag() {
+        assert!(switch_mode_label(true).contains("stop → up -d"));
+        assert!(switch_mode_label(false).contains("--no-stop"));
     }
 
     #[test]

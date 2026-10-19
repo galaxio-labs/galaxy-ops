@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.3-alpha] - 2026-10-19
+
+### 修复
+
+- **`gops prj upgrade` 升级后挂载配置真正生效**：切换阶段默认先 `docker compose stop` 再 `up -d`。
+  以前只跑 `up -d`，compose 只重建镜像/环境变了的容器；bind mount 的配置文件
+  （WPL/OML、`*.toml`、证书）内容变了也不会重读，升级后可能仍在跑旧配置。
+  不想要这次停机可用 `--no-stop`（回滚同样生效）。
+
 ## [2.7.2-alpha] - 2026-10-18
 
 ### 修复

@@ -5,6 +5,28 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.4-alpha] - 2026-10-20
+
+### 新增
+
+- **升级事务的执行记录（日志 P0）**：每次 `prj upgrade` 在
+  `~/.galaxy/upgrade/<prj>/runs/<时间戳>/` 下落一份可定位的现场：
+  - `run.json`：目标 / 失败策略 / 起始版本 / 开始时间；
+  - `events.jsonl`：每步 `start` / `end`（含 `duration_ms`、错误摘要），append-only，
+    进程被杀也留得下；
+  - `NN-<step>-<sys>.log`：该步子进程（docker compose / gx）的完整输出，单文件 4 MiB 截断；
+  - `upgrade.json` 新增 `log_dir`，`--json` 同步输出；CLI 文本输出多一行「日志 <dir>」。
+  写日志失败只告警，不影响升级；`runs/` 只保留最近 10 次。
+- **失败错误带“最后一屏”**：命令非零退出时，错误里附最后 40 行输出（已脱敏），不再只有
+  `命令执行失败，退出状态: 1`。
+- **写入时脱敏**：环境里形如 `*TOKEN* / *SECRET* / *PASSWORD*` 的值，以及 `Bearer xxx`、
+  `token=xxx` 模式，在写日志和拼错误前统一替换成 `***`。
+
+### 测试
+
+- run log：步骤事件 / 脱敏 / 保留 10 次 / 尾屏有界；升级事务的 `log_dir` 与 `events.jsonl` 断言。
+  全量 `578 + 99 + 6 + 1 + 4` passed。
+
 ## [2.9.3-alpha] - 2026-10-20
 
 ### 修复

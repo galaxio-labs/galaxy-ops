@@ -890,6 +890,9 @@ impl PrjCommandHandler {
             if let Some(backup) = &record.backup_id {
                 println!("  备份  {backup}");
             }
+            if let Some(log_dir) = &record.log_dir {
+                println!("  日志  {log_dir}");
+            }
             if !record.detail.is_empty() {
                 println!("  详情  {}", record.detail);
             }

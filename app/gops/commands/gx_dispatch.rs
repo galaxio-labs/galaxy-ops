@@ -155,7 +155,17 @@ pub(crate) async fn run_gx_flow(
 }
 
 /// 启动子进程并转发 stdout/stderr，非零退出返回错误。
+///
+/// 若当前任务绑定了 [`galaxy_ops::ops_prj::run_log`]（`prj upgrade` 的事务），
+/// 同时把每行写进当前步骤日志；失败时错误里带**最后 40 行**（已脱敏）——
+/// 不再只报“退出状态 1”。
 pub(crate) async fn run_and_stream(mut cmd: TokioCommand, label: &str) -> MainResult<()> {
+    use galaxy_ops::ops_prj::run_log::{self, Tail};
+    use std::sync::{Arc, Mutex};
+
+    let log = run_log::current();
+    let tail = Arc::new(Mutex::new(Tail::default()));
+
     // 设置管道并启动进程
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -176,19 +186,35 @@ pub(crate) async fn run_and_stream(mut cmd: TokioCommand, label: &str) -> MainRe
         .source_resource()?;
 
     // 创建异步读取器并并发处理stdout和stderr
-    let stdout_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            println!("{}", line);
-        }
-    });
+    let stdout_handle = {
+        let log = log.clone();
+        let tail = Arc::clone(&tail);
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                println!("{}", line);
+                if let Some(log) = &log {
+                    log.line("stdout", &line);
+                }
+                tail.lock().unwrap_or_else(|e| e.into_inner()).push(&line);
+            }
+        })
+    };
 
-    let stderr_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            eprintln!("{}", line);
-        }
-    });
+    let stderr_handle = {
+        let log = log.clone();
+        let tail = Arc::clone(&tail);
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                eprintln!("{}", line);
+                if let Some(log) = &log {
+                    log.line("stderr", &line);
+                }
+                tail.lock().unwrap_or_else(|e| e.into_inner()).push(&line);
+            }
+        })
+    };
 
     // 等待输出处理完成
     let _ = tokio::try_join!(stdout_handle, stderr_handle);
@@ -201,8 +227,15 @@ pub(crate) async fn run_and_stream(mut cmd: TokioCommand, label: &str) -> MainRe
         .source_resource()?;
 
     if !exit_status.success() {
-        return Err(anyhow::anyhow!("命令执行失败，退出状态: {}", exit_status))
-            .source_resource()?;
+        let tail = tail.lock().unwrap_or_else(|e| e.into_inner()).render();
+        let mut detail = format!("{label} 命令失败，退出状态: {exit_status}");
+        if !tail.is_empty() {
+            detail.push_str(&format!("；最后几行：\n{tail}"));
+        }
+        if let Some(log) = &log {
+            detail = log.redact(&detail);
+        }
+        return Err(anyhow::anyhow!(detail)).source_resource()?;
     }
 
     Ok(())

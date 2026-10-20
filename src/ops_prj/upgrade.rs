@@ -22,6 +22,7 @@ use super::diagnose::{DiagnoseRequest, project_diagnose};
 use super::install::fetch_and_prepare;
 use super::prelude::*;
 use super::project::OpsProject;
+use super::run_log;
 use super::update::{apply_overlay, copy_entry};
 use super::version::{self, VersionSpec, infer_channel};
 use crate::accessor::accessor_for_default;
@@ -151,6 +152,9 @@ pub struct UpgradeRecord {
     pub status: String,
     #[serde(default)]
     pub backup_id: Option<String>,
+    /// 本次运行的日志目录（P0：`~/.galaxy/upgrade/<prj>/runs/<ts>/`）。
+    #[serde(default)]
+    pub log_dir: Option<String>,
     pub updated_at: String,
     #[serde(default)]
     pub detail: String,
@@ -208,6 +212,7 @@ impl UpgradeOutcome {
                 "step": r.step,
                 "status": r.status,
                 "backup_id": r.backup_id,
+                "log_dir": r.log_dir,
                 "updated_at": r.updated_at,
                 "detail": r.detail,
             })
@@ -312,6 +317,8 @@ fn make_record(
         step: step.as_str().to_string(),
         status: status.as_str().to_string(),
         backup_id,
+        // 只有 `prj upgrade` 的事务体内才有绑定；no-op / dry-run 为 `None`。
+        log_dir: run_log::current().map(|log| log.dir().display().to_string()),
         updated_at: chrono::Utc::now().to_rfc3339(),
         detail,
     }
@@ -339,7 +346,18 @@ async fn run_phases(
         sys: &str,
         fut: impl std::future::Future<Output = MainResult<()>>,
     ) -> Result<(), PhaseFailure> {
-        fut.await.map_err(|err| PhaseFailure {
+        let log = run_log::current();
+        if let Some(log) = &log {
+            log.begin_step(step.as_str(), sys);
+        }
+        let outcome = fut.await;
+        if let Some(log) = &log {
+            match &outcome {
+                Ok(()) => log.end_step(step.as_str(), sys, None),
+                Err(err) => log.end_step(step.as_str(), sys, Some(&err.to_string())),
+            }
+        }
+        outcome.map_err(|err| PhaseFailure {
             step,
             sys: sys.to_string(),
             detail: err.to_string(),
@@ -455,24 +473,39 @@ pub async fn run_upgrade(
         });
     }
 
-    // 1) 前置体检：失败则**未动现场**，不回滚。
-    if let Err(err) = runtime.diagnose().await {
-        let record = make_record(
-            UpgradeStep::Diagnose,
-            UpgradeStatus::Failed,
-            None,
-            from_version,
-            String::new(),
-            format!("前置体检未通过（未动现场）：{err}"),
-        );
-        write_record(record_path, &record)?;
-        return Ok(UpgradeOutcome {
-            plan,
-            dry_run: false,
-            record: Some(record),
-            record_path: record_path.to_path_buf(),
-        });
-    }
+    // ── 执行记录（P0）：从体检开始的每一步输出与耗时都落盘；
+    //    失败时错误里带尾屏，`upgrade.json: log_dir` 指向完整日志。
+    let log = run_log::RunLog::create(
+        &runs_dir(record_path),
+        &run_log::RunMeta {
+            project: project_name(record_path),
+            systems: systems.to_vec(),
+            target: plan.target.clone(),
+            on_failure: policy.as_str().to_string(),
+            from_version: from_version.clone(),
+        },
+    )?;
+    eprintln!("run log: {}", log.dir().display());
+
+    run_log::scope(log, async move {
+        // 1) 前置体检：失败则**未动现场**，不回滚。
+        if let Err(err) = runtime.diagnose().await {
+            let record = make_record(
+                UpgradeStep::Diagnose,
+                UpgradeStatus::Failed,
+                None,
+                from_version,
+                String::new(),
+                format!("前置体检未通过（未动现场）：{err}"),
+            );
+            write_record(record_path, &record)?;
+            return Ok(UpgradeOutcome {
+                plan,
+                dry_run: false,
+                record: Some(record),
+                record_path: record_path.to_path_buf(),
+            });
+        }
 
     // 2) 备份：回滚点。失败则**未动现场**，不回滚。
     let backup = match runtime.backup().await {
@@ -604,6 +637,8 @@ pub async fn run_upgrade(
             }
         }
     }
+    })
+    .await
 }
 
 /// `--on-failure halt` 时告诉用户快照在哪（可人工恢复）。
@@ -809,6 +844,24 @@ fn copy_tree(from: &Path, to: &Path, rel: &Path, patterns: &[glob::Pattern]) -> 
         copy_entry(from, to)?;
     }
     Ok(())
+}
+
+/// 运行目录根：与 `upgrade.json` 同级（`~/.galaxy/upgrade/<prj>/runs`）。
+fn runs_dir(record_path: &Path) -> PathBuf {
+    record_path
+        .parent()
+        .map(|parent| parent.join("runs"))
+        .unwrap_or_else(|| PathBuf::from("runs"))
+}
+
+/// 项目名（`<prj>/upgrade.json` 的父目录名）。
+fn project_name(record_path: &Path) -> String {
+    record_path
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("project")
+        .to_string()
 }
 
 /// 状态文件落点：`~/.galaxy/upgrade/<prj>/upgrade.json`（与 agentd 的升级状态同形）。
@@ -2474,6 +2527,54 @@ mod tests {
         );
         // 状态文件也落了。
         assert_eq!(read_record(&path).unwrap().unwrap().status, "succeeded");
+    }
+
+    /// P0：一次成功事务要留下 run 目录，并在记录里给出 `log_dir`。
+    #[tokio::test]
+    async fn upgrade_writes_a_run_log_and_exposes_its_dir() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None);
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "http://example.com/pkg.tar.gz",
+            FailurePolicy::RollbackAll,
+            true,
+            false,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        let record = outcome.record.unwrap();
+        let log_dir = record.log_dir.expect("成功事务必须带 log_dir");
+        let dir = Path::new(&log_dir);
+        assert!(
+            dir.join("events.jsonl").exists(),
+            "{} 缺 events.jsonl",
+            dir.display()
+        );
+        assert!(
+            dir.join("run.json").exists(),
+            "{} 缺 run.json",
+            dir.display()
+        );
+
+        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        assert!(events.contains("\"step\":\"apply\""), "{events}");
+        assert!(events.contains("\"step\":\"up\""), "{events}");
+        assert!(events.contains("\"duration_ms\""), "{events}");
+        assert!(
+            dir.join("01-apply-s1.log").exists(),
+            "步骤日志文件应已创建：{:?}",
+            std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

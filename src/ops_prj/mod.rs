@@ -8,6 +8,7 @@ mod install;
 mod path;
 mod prelude;
 pub mod project;
+pub mod run_log;
 pub mod system;
 pub mod update;
 pub mod upgrade;

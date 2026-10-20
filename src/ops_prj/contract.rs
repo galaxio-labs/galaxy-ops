@@ -17,6 +17,7 @@ use crate::error::MainReason;
 use crate::ops_prj::backup::{append_entry, collect_matching, prune_prefixed, restore};
 use crate::ops_prj::prelude::*;
 use crate::ops_prj::project::OpsProject;
+use crate::project::expand_process_env;
 use crate::system::SysConf;
 use crate::system::pack::compile_path_patterns;
 
@@ -49,7 +50,7 @@ impl OpsProject {
         // 落点 / 份数：项目侧 `ops-prj.yml: contract`；缺省 = 项目根、保留 10 份。
         let (target, keep) = match self.conf().contract() {
             Some(c) => (
-                PathBuf::from(c.target().to_string().env_eval(&ValueDict::default())),
+                PathBuf::from(expand_process_env(c.target().to_string().as_str())),
                 *c.keep(),
             ),
             None => (root.clone(), 10),

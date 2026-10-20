@@ -18,10 +18,33 @@ pub(crate) const GX_MIN_VERSION: (u32, u32, u32) = (0, 13, 0);
 
 /// `gx` 可执行文件路径（`$HOME/bin/gx`）。
 pub(crate) fn gx_bin_path() -> String {
-    format!(
-        "{}/bin/gx",
-        std::env::var("HOME").unwrap_or_else(|_| "".to_string())
-    )
+    gx_bin_path_from(std::env::var_os("HOME"), std::env::var_os("PATH"))
+}
+
+/// 解析 `gx` 的可执行路径。
+///
+/// 顺序：`$HOME/bin/gx`（**存在才算**）→ `PATH` 里的 `gx` → 字面量 `gx`（交给系统再查一次）。
+///
+/// **为什么不能只拼 `$HOME/bin/gx`**：systemd 服务（如 `wist-gwlinkd.service`）默认
+/// **不设 `HOME`**，`$HOME` 为空时会拼出 `/bin/gx` —— 一个不存在却看起来合理的路径，
+/// 于是 `gx run --exists` 失败、localize 阶段流程被静默跳过
+/// （2026-10-20 的网关升级事故：代码升级了，但配置没重渲、admin token 没生成）。
+fn gx_bin_path_from(home: Option<std::ffi::OsString>, path: Option<std::ffi::OsString>) -> String {
+    if let Some(home) = home.filter(|h| !h.is_empty()) {
+        let candidate = std::path::Path::new(&home).join("bin").join("gx");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    if let Some(path) = path {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("gx");
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    "gx".to_string()
 }
 
 pub(crate) fn check_gx_version() -> MainResult<()> {
@@ -197,7 +220,7 @@ fn is_reserved_env(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{gx_run_args, is_reserved_env};
+    use super::{gx_bin_path_from, gx_run_args, is_reserved_env};
 
     #[test]
     fn test_gx_run_args_basic() {
@@ -250,5 +273,39 @@ mod tests {
         for k in ["DOMAIN", "HTTP_PORT", "NGINX_TAG"] {
             assert!(!is_reserved_env(k), "{k} should not be reserved");
         }
+    }
+
+    fn touch_gx(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn gx_prefers_home_bin_when_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gx = tmp.path().join("bin/gx");
+        touch_gx(&gx);
+        let got = gx_bin_path_from(Some(tmp.path().as_os_str().to_owned()), None);
+        assert_eq!(got, gx.to_string_lossy());
+    }
+
+    #[test]
+    fn gx_falls_back_to_path_when_home_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("usr/bin");
+        let gx = dir.join("gx");
+        touch_gx(&gx);
+        let got = gx_bin_path_from(None, Some(dir.as_os_str().to_owned()));
+        assert_eq!(got, gx.to_string_lossy());
+    }
+
+    #[test]
+    fn gx_never_invents_slash_bin_gx_for_empty_home() {
+        let got = gx_bin_path_from(Some(std::ffi::OsString::new()), None);
+        assert_eq!(got, "gx", "HOME 空时不能拼出 /bin/gx");
     }
 }

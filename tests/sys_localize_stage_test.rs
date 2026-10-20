@@ -25,6 +25,7 @@ fn write_fake_gx(home: &Path) {
         &gx,
         r#"#!/bin/sh
 for a in "$@"; do
+  if [ "$a" = "-V" ]; then echo "galaxy-flow 0.17.0"; exit 0; fi
   if [ "$a" = "--exists" ]; then exit "${GX_EXISTS_RC:-0}"; fi
 done
 { printf 'DOMAIN=%s\n' "$DOMAIN"; printf 'BASE_URL=%s\n' "$BASE_URL"; printf 'PATH=%s\n' "$PATH"; } > "$MARKER"

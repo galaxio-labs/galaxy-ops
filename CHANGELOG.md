@@ -5,6 +5,26 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.3-alpha] - 2026-10-20
+
+### 修复
+
+- **`gx` 路径不再依赖 `HOME`**：`gx_bin_path()` 原先固定拼 `$HOME/bin/gx`。systemd 服务
+  （如 `wist-gwlinkd.service`）默认**不设 `HOME`** → 拼出 `/bin/gx` → 阶段流程探测失败，
+  导致远程升级“代码换了、配置没重渲”。现改为：`$HOME/bin/gx`（存在才用）→ `PATH` 查找 →
+  字面量 `gx`。
+- **`ops-prj.yml` 里的 `${HOME}` 会真正展开了**：`backup.target` / `contract.target` 用
+  `EnvDict::default()` 求值，而它**不读进程环境** —— `${HOME}/.backups` 被落成字面量目录
+  `<prj>/${HOME}/.backups`。新增 `project::expand_process_env`，按进程环境展开。
+- **`prj upgrade` 的阶段流程不再静默跳过**：`localize` 的 gx 流程因 **gx 不可用**而跑不了时，
+  升级事务会当场失败（`step=regenerate`），不会拖到 `up` 阶段才炸、留下“新代码 + 旧配置”。
+  交互式 `sys localize` 保持宽容，但打印 `WARN`；「项目本来没有这个流程」仍视为正常、静默。
+
+### 测试
+
+- 新增：gx 路径解析 3 例、进程环境展开 1 例、strict / 非 strict 阶段流程 3 例；
+  端到端 fake gx 补上 `-V` 探测。全量 `574 + 99 + 6 + 1 + 4` passed，clippy `-D warnings` 干净。
+
 ## [2.9.2-alpha] - 2026-10-20
 
 ### 修复

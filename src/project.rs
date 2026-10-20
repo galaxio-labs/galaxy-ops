@@ -1,6 +1,6 @@
 use crate::internal_prelude::*;
 
-use orion_vars::vars::{ValueType, VarToValue};
+use orion_vars::vars::{EnvDict, EnvEvalable, ValueType, VarToValue};
 
 use crate::{
     const_vars::{
@@ -213,6 +213,19 @@ pub fn env_pairs(dict: &OriginDict) -> Vec<(String, String)> {
         .collect()
 }
 
+/// 用**进程环境**展开 `${VAR}`。
+///
+/// `EnvEvalable::env_eval(&EnvDict::default())` **不读进程环境** —— 这正是
+/// `ops-prj.yml` 里 `target: ${HOME}/.backups` 被落成**字面量目录**
+/// （`<prj>/${HOME}/.backups`）的原因。备份/契约出口都要跑一遍这个。
+pub fn expand_process_env(raw: &str) -> String {
+    let mut dict = EnvDict::new();
+    for (key, value) in std::env::vars() {
+        dict.insert(key, ValueType::String(value));
+    }
+    raw.to_string().env_eval(&dict)
+}
+
 pub fn env_raw_value(v: &ValueType) -> String {
     match v {
         ValueType::String(s) => s.clone(),
@@ -263,6 +276,16 @@ mod tests {
     use orion_error::dev::testing::TestAssert;
     use orion_vars::vars::{Mutability, OriginValue, ValueType, VarDefinition};
     use tempfile::tempdir;
+
+    /// `ops-prj.yml: target: ${HOME}/.backups` 必须按**进程环境**展开。
+    /// 旧实现用 `EnvDict::default()`（不读环境），结果落成字面量 `${HOME}/...` 目录。
+    #[test]
+    fn expand_process_env_uses_the_real_environment() {
+        let path = std::env::var("PATH").expect("PATH should be set in tests");
+        let expanded = expand_process_env("${PATH}");
+        assert_eq!(expanded, path);
+        assert!(!expanded.contains("${"), "不能留下未展开的占位符");
+    }
 
     fn test_init() {
         let _ = env_logger::builder().is_test(true).try_init();

@@ -21,6 +21,7 @@ use crate::const_vars::SYS_PRJ_CONF_FILE_V2;
 use crate::error::MainReason;
 use crate::ops_prj::prelude::*;
 use crate::ops_prj::project::OpsProject;
+use crate::project::expand_process_env;
 use crate::system::SysConf;
 use crate::system::pack::{compile_path_patterns, path_matches};
 
@@ -81,7 +82,7 @@ impl OpsProject {
     pub fn backup(&self) -> MainResult<BackupReport> {
         let root = self.paths().root();
         let (target, keep, sels) = self.backup_plan();
-        let target = PathBuf::from(target.to_string().env_eval(&ValueDict::default()));
+        let target = PathBuf::from(expand_process_env(&target.to_string()));
 
         let mut resolved = Vec::new();
         for sel in sels {

@@ -428,7 +428,7 @@ impl RuntimeDispatch for ComposeDispatch {
             no_flow: false,
             no_perms_check: false,
         };
-        SysCommandHandler::localize_in(sys_dir, &args).await
+        SysCommandHandler::localize_in(sys_dir, &args, true).await
     }
     async fn pull(&self, sys_dir: &Path) -> MainResult<()> {
         RunCommandHandler::compose_cmd_in(sys_dir, "download").await

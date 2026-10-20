@@ -32,11 +32,18 @@ backup:
   - .env
 
 # 宿主 bind 挂载权限（`gops sys perms`）：缺省完全按 compose 派生。
-# 仅在 rootless / userns-remap（容器 uid ≠ 宿主 uid），或需要处理系统根外的
-# bind source 时才显式声明：
+# 以 root 运行的服务自动跳过（root 不受宿主文件模式限制）。
+# 仅在下面三种情况才需要显式声明：
+#   1) rootless / userns-remap（容器 uid ≠ 宿主 uid）→ container_uid/gid
+#   2) 镜像默认 root、但入口脚本降权（如 postgres → 999 后才读 initdb.d）→ services
+#   3) bind source 在系统根之外 → allow_external
 #
 # perms:
 #   container_uid: 100999
 #   container_gid: 100999
+#   services:                 # 按 compose 服务名声明；只影响对齐，不改运行时
+#     postgres:
+#       uid: 999
+#       gid: 999
 #   allow_external:
 #     - /srv/shared/packages

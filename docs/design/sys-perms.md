@@ -37,10 +37,23 @@ docker compose [-f sys/compose.yaml] --project-directory <系统根> config --fo
 | `services.<name>.volumes[].source` | 宿主真实路径（`.env` 已代入、相对路径已按 project-directory 展开） |
 | `services.<name>.volumes[].read_only` | 读写 / 只读语义 |
 
-身份解析规则：
+身份解析顺序（先命中先用）：
+
+1. `sys-prj.yml: perms.container_uid/gid` —— 全局宿主映射（rootless / userns-remap）；
+2. `sys-prj.yml: perms.services.<name>.uid/gid` —— 单服务“有效身份”，**只影响对齐，不改运行时**；
+3. compose `services.<name>.user`；
+4. 镜像 `Config.User`（`docker image inspect`）。
+
+规则：
 
 - `uid:gid` 必须是数字；`uid` 省略 group 时 gid 取 `0`（与 docker 一致）；
-- 用户名 / 组名、镜像 `Config.User` 非数字、镜像未拉取 → 跳过该服务并告警；
+- **`Config.User` 为空 = root（0:0）**，不是“读取失败”。root 不受宿主文件模式限制，
+  该服务会打印 `[INFO]` 并**跳过对齐**：强行对齐到 `0640` 反而会弄坏由非 root 进程读取的挂载
+  （`htpasswd` 由 nginx worker 读、`/docker-entrypoint-initdb.d` 由降权后的 postgres 读）；
+- `docker image inspect` 失败（通常是镜像未拉取）才告警，并提示用 `perms.services.<name>` 声明；
+- 用户名 / 组名、镜像 `Config.User` 非数字 → 跳过该服务并告警，提示改用逐服务声明；
+- `perms.services` 里的服务名在 compose 中不存在 → 告警（拼写错误不会静默）；
+- 全局 `perms.container_uid/gid` 存在时，`perms.services` 被忽略（宿主映射对所有服务一致）；
 - rootless / userns-remap：容器 uid 不等于宿主 uid，**报错**并提示配置
   `sys-prj.yml: perms.container_uid/gid`（不静默按 999 对齐）。
 
@@ -52,6 +65,15 @@ docker compose [-f sys/compose.yaml] --project-directory <系统根> config --fo
 | 只读（`read_only == true`） | `0640` | `2750` |
 
 - 属主 = 部署账号（`SUDO_UID` / euid），属组 = 容器 gid；
+- **`sys-prj.yml: secrets.file`**：属主**始终是部署账号**（不 chown 给容器 uid —— 那需要提权）。
+  - 不与容器共享（或只给 root 容器用）：`secrets.mode: "0600"`（默认）；
+  - 与非 root 容器共享：`secrets.mode: "0640"` + **属组 = 容器 gid**，部署账号按 owner 读、
+    容器按 group 读；`--apply` 只会 chmod/chgrp，不会改属主；
+  - 一次性前置（管理员，不是 gops）：部署账号加入容器 gid；`.wist` 用 setgid 继承该组；
+  - `perms` **不会创建**缺失的密钥文件；`0600` + 非 root 容器判为**配置错误**
+    （容器读不到），必须改 `secrets.mode`，不能靠改权限修复；
+  - 多个非 root 消费者 uid 不同时，单文件无法同时满足，按配置冲突报错。
+- **以 root 运行的服务不参与对齐**（root 可读写任何宿主文件；对齐只会收紧模式）；
 - **容器自建的**（属主 = 容器 uid 且不等于部署账号）不动 —— 保证零 sudo 幂等；
 - 递归遍历挂载源（不按文件名列举），运行态新长出的文件自动纳入；
 - 只改**挂载根及其子树**，不改挂载根的父目录；
@@ -86,12 +108,24 @@ perms:
   # rootless / userns-remap：容器内身份映射到宿主后的 uid/gid（必须同时给）
   container_uid: 100999
   container_gid: 100999
+  # 按服务声明“有效容器身份”（仅用于对齐，不改运行时）。
+  # 典型：镜像 Config.User 为空（默认 root），但入口脚本会降权：
+  #   官方 postgres 以 root 启动，gosu 到 999 之后才读 /docker-entrypoint-initdb.d
+  services:
+    postgres:
+      uid: 999
+      gid: 999
   # 允许处理系统根之外的 bind source（绝对路径或相对系统根）
   allow_external:
     - /srv/shared/packages
 ```
 
-缺省不写 = 完全按 compose 派生。
+缺省不写 = 完全按 compose 派生（root 服务自动跳过对齐）。
+`perms.services.<name>` 的键是 **compose 服务名**（不是 `container_name`）；它给的是
+**容器内身份**，rootless / userns-remap 仍需 `container_uid/gid` 的全局宿主映射。
+
+> 密钥共享策略在 `secrets:` 节：`secrets.mode: "0640"`（默认 `0600`）；
+> 属主始终是部署账号，容器按属组读。该字段需要 gops ≥ 2.9.0。
 
 ## 安全边界
 

@@ -489,7 +489,13 @@ impl SysCommandHandler {
         }
         match galaxy_ops::system::perms::run_with_conf(dir, false) {
             Ok(report) => {
-                if !report.is_ok() {
+                if !report.errors.is_empty() {
+                    eprintln!(
+                        "[WARN] 宿主 bind 挂载配置错误（{} 项）：`--apply` 不能修复，\
+                         请按 `gops sys perms` 的提示修改配置（`--no-perms-check` 关闭本检查）",
+                        report.errors.len()
+                    );
+                } else if !report.is_ok() {
                     eprintln!(
                         "[WARN] 宿主 bind 挂载权限未对齐：{} 项待修，{} 项失败；\
                          运行 `gops sys perms --apply` 修复（`gops sys perms` 查看明细，\

@@ -9,6 +9,9 @@
 //! - 写需求（`read_only != true`）：文件 `0660`，目录 `2770`（setgid）；
 //! - 读需求（`read_only == true`）：只补属组读位，文件 `0640`，目录 `2750`；
 //! - 属主 = 部署账号（`SUDO_UID` / euid），属组 = 容器 gid；
+//! - `secrets.file`：属主仍是部署账号，模式由 `secrets.mode`（`0600` / `0640`）决定；
+//!   `0640` 时容器按属组读——**不通过 chown 到容器 uid 共享**（那需要提权）；
+//! - 以 root 运行的服务跳过（root 不受宿主模式限制，强行对齐只会收紧模式）；
 //! - **容器自己创建的**（owner == 容器 uid）不动 —— 否则每次 localize 都要 sudo；
 //! - 只处理系统根内的 bind `source`；根外需 `sys-prj.yml: perms.allow_external` 显式声明；
 //! - 不跟随符号链接；不修改挂载根的父目录；不碰 named volume。
@@ -33,6 +36,15 @@ pub const RW_DIR: u32 = 0o2770;
 pub const RO_FILE: u32 = 0o640;
 /// 容器只读的宿主目录模式。
 pub const RO_DIR: u32 = 0o2750;
+
+/// 密钥文件的期望目标：路径 + `secrets.mode`（`0600` / `0640`）。
+///
+/// 属主**始终是部署账号**，不通过 chown 到容器 uid 来共享（那需要提权）。
+#[derive(Clone, Copy, Debug)]
+struct SecretTarget<'a> {
+    path: &'a Path,
+    mode: u32,
+}
 
 /// 容器身份（仅支持数字 uid/gid；解析不出时要求 `perms.container_uid/gid`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +103,8 @@ pub struct ItemReport {
     pub current: Option<FileSnapshot>,
     pub expected_mode: u32,
     pub expected_gid: u32,
+    /// 是否是 `secrets.file`（决定缺失时不能“创建”，以及 `secrets.mode` 的期望值）。
+    pub is_secret: bool,
     pub status: ItemStatus,
     pub reason: String,
 }
@@ -114,8 +128,11 @@ pub struct PermsReport {
     pub deploy_gid: u32,
     pub mounts: Vec<MountReport>,
     pub warnings: Vec<String>,
-    /// 无法用单一属主/属组满足的配置冲突（例如同一路径被不同容器身份挂载）。
-    /// 非空即判定失败：这种冲突不能静默放过。
+    /// 不需要对齐、但值得告知的跳过原因（例如容器以 root 运行）。
+    /// 与 `warnings` 区分：`notes` 不影响退出码，`localize` 也不会打到 stderr。
+    pub notes: Vec<String>,
+    /// 配置错误（例如同一路径被不同容器身份挂载，或 0600 密钥被非 root 容器挂载）。
+    /// 非空即判定失败：这些错误不能靠改权限修复，必须改配置。
     pub errors: Vec<String>,
 }
 
@@ -130,6 +147,7 @@ impl PermsReport {
             deploy_gid,
             mounts: Vec::new(),
             warnings: Vec::new(),
+            notes: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -204,6 +222,7 @@ impl PermsReport {
             "deploy": { "uid": self.deploy_uid, "gid": self.deploy_gid },
             "mounts": mounts,
             "warnings": self.warnings,
+            "notes": self.notes,
             "errors": self.errors,
             "summary": {
                 "pending": self.pending(),
@@ -275,6 +294,9 @@ impl PermsReport {
                 );
             }
         }
+        for note in &self.notes {
+            let _ = writeln!(out, "[INFO] {note}");
+        }
         for warning in &self.warnings {
             let _ = writeln!(out, "[WARN] {warning}");
         }
@@ -313,12 +335,12 @@ impl PermsReport {
 
 /// 只检查（不修改磁盘）。
 pub fn check(system_root: &Path, conf: Option<&PermsConf>) -> MainResult<PermsReport> {
-    run(system_root, conf, false)
+    run(system_root, conf, None, false)
 }
 
 /// 幂等修复（只动 bind 挂载源，容器自建文件不动）。
 pub fn apply(system_root: &Path, conf: Option<&PermsConf>) -> MainResult<PermsReport> {
-    run(system_root, conf, true)
+    run(system_root, conf, None, true)
 }
 
 /// 读取系统根下的 `sys-prj.yml`（缺失时返回 `None`，不因缺文件报错）。
@@ -343,11 +365,26 @@ pub fn load_conf(system_root: &Path) -> MainResult<Option<SysConf>> {
 pub fn run_with_conf(system_root: &Path, do_apply: bool) -> MainResult<PermsReport> {
     let conf = load_conf(system_root)?;
     let perms = conf.as_ref().and_then(|c| c.perms());
-    if do_apply {
-        apply(system_root, perms)
-    } else {
-        check(system_root, perms)
-    }
+    // `secrets.file` 的期望模式由 `secrets.mode` 决定（0600 / 0640）；属主始终是部署账号。
+    // 0640 时属组 = 容器 gid，部署账号按 owner 读、容器按 group 读 —— 不需要提权。
+    let secret = match conf.as_ref().and_then(|c| c.secrets()) {
+        Some(s) if !s.file().trim().is_empty() => {
+            let mode = s.file_mode().map_err(MainReason::logic_detail)?;
+            Some((
+                canonical_or_parent(&system_root.join(s.file().trim())),
+                mode,
+            ))
+        }
+        _ => None,
+    };
+    run(
+        system_root,
+        perms,
+        secret
+            .as_ref()
+            .map(|(path, mode)| SecretTarget { path, mode: *mode }),
+        do_apply,
+    )
 }
 
 // === 派生 ===
@@ -384,10 +421,15 @@ struct ComposeVolume {
 struct Derived {
     mounts: Vec<BindMount>,
     warnings: Vec<String>,
+    notes: Vec<String>,
     errors: Vec<String>,
 }
 
-fn derive(system_root: &Path, conf: Option<&PermsConf>) -> MainResult<Derived> {
+fn derive(
+    system_root: &Path,
+    conf: Option<&PermsConf>,
+    secret: Option<SecretTarget<'_>>,
+) -> MainResult<Derived> {
     let (compose_file, global_args) = crate::system::compose::compose_invocation(system_root);
     let Some(compose_file) = compose_file else {
         return Err(MainReason::logic_detail(
@@ -409,7 +451,7 @@ fn derive(system_root: &Path, conf: Option<&PermsConf>) -> MainResult<Derived> {
     }
 
     let json = compose_config_json(system_root, &compose_file, &global_args)?;
-    derive_from_json(system_root, &json, conf)
+    derive_from_json_with_secret(system_root, &json, conf, secret)
 }
 
 /// `sys-prj.yml: perms.container_uid/gid` 的显式覆盖；两者必须同时给。
@@ -427,16 +469,35 @@ fn container_override(conf: Option<&PermsConf>) -> MainResult<Option<ContainerId
 }
 
 /// 从 `docker compose config --format json` 的文本派生（不碰 docker，便于单测）。
-fn derive_from_json(
+fn derive_from_json_with_secret(
     system_root: &Path,
     json: &str,
     conf: Option<&PermsConf>,
+    secret: Option<SecretTarget<'_>>,
 ) -> MainResult<Derived> {
     let config: ComposeConfig = serde_json::from_str(json).map_err(|e| {
         MainReason::logic_detail(format!("解析 `docker compose config` 输出失败：{e}"))
     })?;
 
     let overrides = container_override(conf)?;
+    // 按服务覆盖：`perms.services.<name>.uid/gid`。全局映射（rootless）优先，因为
+    // 它描述的是“容器内 uid → 宿主 uid”的整体换算，不能与单个服务的容器内身份混用。
+    let service_overrides: BTreeMap<String, ContainerId> = conf
+        .map(|p| {
+            p.services()
+                .iter()
+                .map(|(name, sp)| {
+                    (
+                        name.clone(),
+                        ContainerId {
+                            uid: sp.uid(),
+                            gid: sp.gid(),
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let root = canonical_or_parent(system_root);
     let allow_external: Vec<PathBuf> = conf
         .map(|p| {
@@ -455,7 +516,14 @@ fn derive_from_json(
         .unwrap_or_default();
 
     let mut warnings = Vec::new();
+    let mut notes = Vec::new();
     let mut errors = Vec::new();
+    if overrides.is_some() && !service_overrides.is_empty() {
+        warnings.push(
+            "`perms.container_uid/gid` 已设置（全局宿主映射），`perms.services` 将被忽略"
+                .to_string(),
+        );
+    }
     if !system_root.join(".env").is_file() {
         warnings.push(
             "系统根没有 `.env`（可能尚未 `gops sys localize`）；\
@@ -484,8 +552,13 @@ fn derive_from_json(
             continue;
         }
 
-        let container = match resolve_container_id(service_name, service, overrides, &mut inspected)
-        {
+        let container = match resolve_container_id(
+            service_name,
+            service,
+            overrides,
+            &service_overrides,
+            &mut inspected,
+        ) {
             Ok(id) => id,
             Err(reason) => {
                 warnings.push(format!(
@@ -494,6 +567,16 @@ fn derive_from_json(
                 continue;
             }
         };
+        // root 不受宿主文件模式限制：对齐只会收紧模式（如 0644 → 0640），反而可能
+        // 弄坏非 root 消费方（htpasswd 由 nginx worker 读、initdb.d 由降权后的 postgres 读）。
+        if container.uid == 0 {
+            notes.push(format!(
+                "服务 `{service_name}` 以 root 运行，跳过其 bind 挂载对齐（root 不受宿主文件模式限制）；\
+                 若该镜像的入口会降权到非 root（如 postgres → 999），\
+                 请在 `sys-prj.yml: perms.services.{service_name}` 声明 uid/gid"
+            ));
+            continue;
+        }
 
         for volume in bind_volumes {
             let raw = volume.source.as_deref().unwrap_or_default();
@@ -535,10 +618,37 @@ fn derive_from_json(
         }
     }
 
+    for name in service_overrides.keys() {
+        if !config.services.contains_key(name) {
+            warnings.push(format!(
+                "`sys-prj.yml: perms.services.{name}` 未匹配到 compose 服务（检查服务名拼写）"
+            ));
+        }
+    }
+
     let mounts = merge_mounts(mounts, &mut errors);
+    // 0600 策略下，非 root 容器读不到密钥：这是配置错误（容器启动后必然失败），
+    // 直接判失败并给出“改策略”的修复方向，而不是引导去提权。
+    if let Some(secret) = secret.filter(|s| s.mode == 0o600) {
+        let mut reported = false;
+        for mount in &mounts {
+            if !reported && mount.container.uid != 0 && secret.path.starts_with(&mount.source) {
+                errors.push(format!(
+                    "密钥文件 {} 由非 root 容器（{}:{}）挂载，但 secrets.mode = 0600（只属主可读），\
+                     容器读不到；请在 sys-prj.yml 设 `secrets.mode: \"0640\"`，\
+                     并把文件属组设为容器 gid（部署账号需已是该组成员）",
+                    secret.path.display(),
+                    mount.container.uid,
+                    mount.container.gid
+                ));
+                reported = true;
+            }
+        }
+    }
     Ok(Derived {
         mounts,
         warnings,
+        notes,
         errors,
     })
 }
@@ -577,10 +687,16 @@ fn resolve_container_id(
     service_name: &str,
     service: &ComposeService,
     overrides: Option<ContainerId>,
+    service_overrides: &BTreeMap<String, ContainerId>,
     inspected: &mut BTreeMap<String, Option<String>>,
 ) -> Result<ContainerId, String> {
+    // 顶层全局映射优先（rootless / userns-remap：容器内 uid ≠ 宿主 uid）。
     if let Some(id) = overrides {
         return Ok(id);
+    }
+    // 单服务覆盖：仅影响对齐，不改运行时身份。
+    if let Some(id) = service_overrides.get(service_name) {
+        return Ok(*id);
     }
     if let Some(user) = service
         .user
@@ -590,8 +706,9 @@ fn resolve_container_id(
     {
         return parse_user(user).ok_or_else(|| {
             format!(
-                "`user: {user}` 不是数字 `uid:gid`（如 `999:999`）；\
-                 支持用户名/组的场景请用 `sys-prj.yml: perms.container_uid/gid` 显式给出宿主映射"
+                "`user: {user}` 不是数字 `uid:gid`（如 `999:999`）；\n                 \
+                 请在 `sys-prj.yml: perms.services.{service_name}` 声明该服务的有效身份，\n                 \
+                 或用 `perms.container_uid/gid` 给出全局宿主映射"
             )
         });
     }
@@ -607,12 +724,17 @@ fn resolve_container_id(
         Some(user) if !user.is_empty() => parse_user(user).ok_or_else(|| {
             format!(
                 "镜像 `{image}` 的 `Config.User` 为 `{user}`，不是数字 `uid:gid`；\
-                 请在 `sys-prj.yml: perms.container_uid/gid` 显式给出宿主映射"
+                 请在 `sys-prj.yml: perms.services.{service_name}`（推荐）\
+                 或 `perms.container_uid/gid` 显式给出宿主映射"
             )
         }),
-        _ => Err(format!(
-            "服务 `{service_name}` 没有 `user:`，且无法从镜像 `{image}` 读到 `Config.User`\
-             （镜像未拉取？）；建议在该服务的 compose 定义里显式写 `user: \"uid:gid\"`"
+        // Docker 语义：`Config.User` 为空 = root（0:0），不是“读不到”。
+        // 是否需要对齐由调用方决定（root 会被跳过）。
+        Some(_) => Ok(ContainerId { uid: 0, gid: 0 }),
+        None => Err(format!(
+            "服务 `{service_name}` 没有 `user:`，且无法读取镜像 `{image}` 的 `Config.User`\
+             （镜像未拉取 / docker 不可用？）；请先 `gops run download`，\
+             或在 `sys-prj.yml: perms.services.{service_name}` 声明该服务的 uid/gid"
         )),
     }
 }
@@ -701,24 +823,37 @@ fn compose_config_json(
 
 // === 检查 / 修复 ===
 
-fn run(system_root: &Path, conf: Option<&PermsConf>, do_apply: bool) -> MainResult<PermsReport> {
-    let derived = derive(system_root, conf)?;
-    run_derived(system_root, derived, do_apply)
+fn run(
+    system_root: &Path,
+    conf: Option<&PermsConf>,
+    secret: Option<SecretTarget<'_>>,
+    do_apply: bool,
+) -> MainResult<PermsReport> {
+    let derived = derive(system_root, conf, secret)?;
+    run_derived_with_secret(system_root, derived, secret, do_apply)
 }
 
 /// 在已派生好的挂载计划上执行检查/修复（不碰 docker，便于端到端单测）。
-fn run_derived(system_root: &Path, derived: Derived, do_apply: bool) -> MainResult<PermsReport> {
+fn run_derived_with_secret(
+    system_root: &Path,
+    derived: Derived,
+    secret: Option<SecretTarget<'_>>,
+    do_apply: bool,
+) -> MainResult<PermsReport> {
     let (deploy_uid, deploy_gid) = deploy_identity();
+    // 配置错误不能靠改权限修复（例如 0600 密钥配非 root 容器、同一路径两种身份）：
+    // 此时 `--apply` 不应动盘，避免把错误配置“应用”出去。
+    let apply = do_apply && derived.errors.is_empty();
     let mut mounts = Vec::new();
 
     for mount in &derived.mounts {
-        let mut items = scan_mount(mount, deploy_uid)?;
-        if do_apply {
+        let mut items = scan_mount_with_secret(mount, deploy_uid, secret)?;
+        if apply {
             for item in items.iter_mut() {
                 if item.status != ItemStatus::Pending {
                     continue;
                 }
-                match apply_item(item, mount, deploy_uid) {
+                match apply_item_for(item, mount, deploy_uid) {
                     Ok(()) => item.status = ItemStatus::Applied,
                     Err(err) => {
                         item.status = ItemStatus::Failed;
@@ -736,7 +871,15 @@ fn run_derived(system_root: &Path, derived: Derived, do_apply: bool) -> MainResu
                     item.reason = "修复后路径消失".to_string();
                     continue;
                 };
-                let (ok, reason) = aligned(snapshot, item.kind == "dir", mount, deploy_uid);
+                let secret_mode =
+                    secret.and_then(|s| (s.path == item.path.as_path()).then_some(s.mode));
+                let (ok, reason) = aligned_with_secret(
+                    snapshot,
+                    item.kind == "dir",
+                    mount,
+                    deploy_uid,
+                    secret_mode,
+                );
                 item.current = Some(snapshot);
                 if !ok {
                     item.status = ItemStatus::Failed;
@@ -760,13 +903,22 @@ fn run_derived(system_root: &Path, derived: Derived, do_apply: bool) -> MainResu
         deploy_gid,
         mounts,
         warnings: derived.warnings,
+        notes: derived.notes,
         errors: derived.errors,
     })
 }
 
-fn scan_mount(mount: &BindMount, deploy_uid: u32) -> MainResult<Vec<ItemReport>> {
+fn scan_mount_with_secret(
+    mount: &BindMount,
+    deploy_uid: u32,
+    secret: Option<SecretTarget<'_>>,
+) -> MainResult<Vec<ItemReport>> {
     let mut items = Vec::new();
-    let expected = expected_mode(mount.read_only, true);
+    let is_secret_mount = secret.map(|s| s.path == mount.source).unwrap_or(false);
+    let expected = secret
+        .filter(|_| is_secret_mount)
+        .map(|s| s.mode)
+        .unwrap_or_else(|| expected_mode(mount.read_only, true));
 
     if !mount.source.exists() {
         items.push(ItemReport {
@@ -776,6 +928,7 @@ fn scan_mount(mount: &BindMount, deploy_uid: u32) -> MainResult<Vec<ItemReport>>
             current: None,
             expected_mode: expected,
             expected_gid: mount.container.gid,
+            is_secret: is_secret_mount,
             status: ItemStatus::Pending,
             reason: "挂载源不存在（按目录处理；`docker compose up` 会以 root 创建）".to_string(),
         });
@@ -790,6 +943,7 @@ fn scan_mount(mount: &BindMount, deploy_uid: u32) -> MainResult<Vec<ItemReport>>
                     .path()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| mount.source.clone());
+                let is_secret = secret.map(|s| s.path == path.as_path()).unwrap_or(false);
                 items.push(ItemReport {
                     path,
                     kind: "?",
@@ -797,6 +951,7 @@ fn scan_mount(mount: &BindMount, deploy_uid: u32) -> MainResult<Vec<ItemReport>>
                     current: None,
                     expected_mode: expected,
                     expected_gid: mount.container.gid,
+                    is_secret,
                     status: ItemStatus::Failed,
                     reason: format!("读取目录失败：{err}"),
                 });
@@ -812,14 +967,20 @@ fn scan_mount(mount: &BindMount, deploy_uid: u32) -> MainResult<Vec<ItemReport>>
         let Some(snapshot) = stat_snapshot(entry.path()) else {
             continue;
         };
-        let (ok, reason) = aligned(snapshot, is_dir, mount, deploy_uid);
+        let secret_mode = secret.and_then(|s| (s.path == entry.path()).then_some(s.mode));
+        let entry_expected_mode = match secret_mode {
+            Some(mode) if !is_dir => mode,
+            _ => expected_mode(mount.read_only, is_dir),
+        };
+        let (ok, reason) = aligned_with_secret(snapshot, is_dir, mount, deploy_uid, secret_mode);
         items.push(ItemReport {
             path: entry.path().to_path_buf(),
             kind: if is_dir { "dir" } else { "file" },
             read_only: mount.read_only,
             current: Some(snapshot),
-            expected_mode: expected_mode(mount.read_only, is_dir),
+            expected_mode: entry_expected_mode,
             expected_gid: mount.container.gid,
+            is_secret: secret_mode.is_some(),
             status: if ok {
                 ItemStatus::Aligned
             } else {
@@ -833,12 +994,45 @@ fn scan_mount(mount: &BindMount, deploy_uid: u32) -> MainResult<Vec<ItemReport>>
 
 /// 是否“已对齐”：容器自建的跳过；其余要求属主 = 部署账号、属组 = 容器 gid、
 /// 模式 = 目标模式（由目标模式可推出容器身份实际可读/可写，另外再校验一次）。
-fn aligned(
+fn aligned_with_secret(
     snapshot: FileSnapshot,
     is_dir: bool,
     mount: &BindMount,
     deploy_uid: u32,
+    secret_mode: Option<u32>,
 ) -> (bool, String) {
+    // 密钥文件（`sys-prj.yml: secrets.file`）：属主**始终是部署账号**，
+    // 模式由 `secrets.mode` 决定（0600 / 0640）；0640 时容器按属组读。
+    // 必须放在「容器自建文件直接放过」之前，否则模式错误会被误判为已对齐。
+    if let Some(mode) = secret_mode.filter(|_| !is_dir) {
+        if snapshot.uid != deploy_uid {
+            return (
+                false,
+                format!(
+                    "属主 {} 不是部署账号 {}（密钥不允许 chown 给容器 uid）",
+                    snapshot.uid, deploy_uid
+                ),
+            );
+        }
+        if snapshot.gid != mount.container.gid {
+            return (
+                false,
+                format!("属组 {} 不是容器 gid {}", snapshot.gid, mount.container.gid),
+            );
+        }
+        let current = snapshot.mode & 0o7777;
+        if current != mode {
+            return (
+                false,
+                format!(
+                    "模式 {} 不是 {}（secrets.mode 要求）",
+                    format_mode(current),
+                    format_mode(mode)
+                ),
+            );
+        }
+        return (true, String::new());
+    }
     // 「容器自己创建的」不动：否则每次 localize 都要 sudo。
     // 但部署账号与容器身份相同时（uid 相等），文件本来就是我们自己的，照常对齐模式。
     if snapshot.uid == mount.container.uid && snapshot.uid != deploy_uid {
@@ -916,22 +1110,31 @@ fn can_access(snapshot: FileSnapshot, container: ContainerId, is_dir: bool, need
     }
 }
 
-fn apply_item(item: &ItemReport, mount: &BindMount, deploy_uid: u32) -> Result<(), String> {
+fn apply_item_for(item: &ItemReport, mount: &BindMount, deploy_uid: u32) -> Result<(), String> {
     let path = &item.path;
     if !path.exists() {
+        // 密钥是运维输入，不能由 perms “创建”（否则会造出一个空目录/空文件，
+        // 掩盖真正的问题）；宿主侧加载器会明确报缺失。
+        if item.is_secret {
+            return Err(format!(
+                "密钥文件 {} 不存在：perms 不创建密钥，请先由运维提供",
+                path.display()
+            ));
+        }
         std::fs::create_dir_all(path)
             .map_err(|e| format!("创建挂载源 {} 失败：{e}", path.display()))?;
     }
-    let is_dir = path.is_dir();
-    let mode = expected_mode(mount.read_only, is_dir);
+    let mode = item.expected_mode;
 
-    // 先 chown 再 chmod：chown 可能清掉 setgid 位，顺序反了会丢失 2770 的 setgid。
+    // 属主始终是部署账号，不 chown 给容器 uid（那需要提权）。
+    // chgrp 到容器 gid 需要部署账号已是该组成员：这是宿主预置，gops 不负责提权。
     std::os::unix::fs::chown(path, Some(deploy_uid), Some(mount.container.gid)).map_err(|e| {
         format!(
-            "chown {}:{} {} 失败：{e}（当前 euid 不是 root，且文件属于其他账号？）",
+            "设置 {} 为 {}:{} 失败：{e}（需要部署账号拥有该文件、且已是容器 gid 组成员；\
+             这属于宿主预置权限，gops 不会提权）",
+            path.display(),
             deploy_uid,
-            mount.container.gid,
-            path.display()
+            mount.container.gid
         )
     })?;
     std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).map_err(
@@ -1025,6 +1228,32 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    // 测试便捷入口：不涉及 `secrets.file` 特例时，固定 secret = None / 非密钥。
+    fn run_derived(root: &Path, derived: Derived, do_apply: bool) -> MainResult<PermsReport> {
+        run_derived_with_secret(root, derived, None, do_apply)
+    }
+
+    fn scan_mount(m: &BindMount, deploy_uid: u32) -> MainResult<Vec<ItemReport>> {
+        scan_mount_with_secret(m, deploy_uid, None)
+    }
+
+    fn derive_from_json(root: &Path, json: &str, conf: Option<&PermsConf>) -> MainResult<Derived> {
+        derive_from_json_with_secret(root, json, conf, None)
+    }
+
+    fn aligned(
+        snapshot: FileSnapshot,
+        is_dir: bool,
+        m: &BindMount,
+        deploy_uid: u32,
+    ) -> (bool, String) {
+        aligned_with_secret(snapshot, is_dir, m, deploy_uid, None)
+    }
+
+    fn apply_item(item: &ItemReport, m: &BindMount, deploy_uid: u32) -> Result<(), String> {
+        apply_item_for(item, m, deploy_uid)
+    }
 
     fn current_id() -> ContainerId {
         let (uid, gid) = deploy_identity();
@@ -1138,6 +1367,167 @@ mod tests {
                 uid: 100999,
                 gid: 100999
             }
+        );
+    }
+
+    #[test]
+    fn test_perms_conf_services_requires_uid_and_gid() {
+        assert!(
+            serde_yaml::from_str::<PermsConf>("services:\n  postgres:\n    uid: 999\n").is_err(),
+            "只给 uid 应报错"
+        );
+        let conf: PermsConf =
+            serde_yaml::from_str("services:\n  postgres:\n    uid: 999\n    gid: 999\n").unwrap();
+        let sp = conf.services().get("postgres").unwrap();
+        assert_eq!((sp.uid(), sp.gid()), (999, 999));
+
+        // 服务条目里的拼写错误不能被静默忽略。
+        assert!(
+            serde_yaml::from_str::<PermsConf>(
+                "services:\n  postgres:\n    uid: 999\n    gid: 999\n    uidd: 1\n"
+            )
+            .is_err(),
+            "未知字段应报错"
+        );
+    }
+
+    #[test]
+    fn test_derive_per_service_override_wins_over_compose_user() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let json = format!(
+            r#"{{"services":{{"postgres":{{"user":"0:0","volumes":[{{"type":"bind","source":"{}","target":"/initdb","read_only":true}}]}}}}}}"#,
+            root.join("initdb").display()
+        );
+        let conf: PermsConf =
+            serde_yaml::from_str("services:\n  postgres:\n    uid: 999\n    gid: 999\n").unwrap();
+        let derived = derive_from_json(root, &json, Some(&conf)).unwrap();
+        assert_eq!(derived.mounts.len(), 1);
+        assert_eq!(
+            derived.mounts[0].container,
+            ContainerId { uid: 999, gid: 999 },
+            "按服务的声明应优先于 compose 的 user:"
+        );
+        assert!(derived.notes.is_empty(), "{:?}", derived.notes);
+    }
+
+    #[test]
+    fn test_derive_root_service_is_skipped_with_note() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let json = format!(
+            r#"{{"services":{{"web":{{"user":"0:0","volumes":[{{"type":"bind","source":"{}","target":"/certs","read_only":true}}]}}}}}}"#,
+            root.join("certs").display()
+        );
+        let derived = derive_from_json(root, &json, None).unwrap();
+        assert!(derived.mounts.is_empty(), "root 服务不参与对齐");
+        assert_eq!(derived.notes.len(), 1, "{:?}", derived.notes);
+        assert!(derived.notes[0].contains("以 root 运行"));
+        assert!(derived.notes[0].contains("perms.services.web"));
+        assert!(derived.warnings.is_empty(), "{:?}", derived.warnings);
+        assert!(derived.errors.is_empty());
+    }
+
+    #[test]
+    fn test_derive_root_and_nonroot_share_source_no_conflict() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let shared = root.join("secrets");
+        let json = format!(
+            r#"{{"services":{{
+              "center":{{"user":"999:999","volumes":[{{"type":"bind","source":"{}","target":"/secrets","read_only":true}}]}},
+              "db-init":{{"user":"0:0","volumes":[{{"type":"bind","source":"{}","target":"/secrets","read_only":true}}]}}
+            }}}}"#,
+            shared.display(),
+            shared.display()
+        );
+        let derived = derive_from_json(root, &json, None).unwrap();
+        assert!(derived.errors.is_empty(), "{:?}", derived.errors);
+        assert_eq!(derived.mounts.len(), 1, "root 服务应被跳过");
+        assert_eq!(
+            derived.mounts[0].container,
+            ContainerId { uid: 999, gid: 999 }
+        );
+        assert_eq!(derived.notes.len(), 1, "{:?}", derived.notes);
+        assert!(derived.notes[0].contains("db-init"));
+    }
+
+    #[test]
+    fn test_resolve_empty_image_user_means_root_but_missing_image_is_error() {
+        let service = ComposeService {
+            user: None,
+            image: Some("postgres:16".to_string()),
+            volumes: None,
+        };
+        let overrides = BTreeMap::new();
+
+        // Docker 语义：Config.User 为空 = root（不是“读不到”）。
+        let mut inspected = BTreeMap::from([("postgres:16".to_string(), Some(String::new()))]);
+        let id =
+            resolve_container_id("postgres", &service, None, &overrides, &mut inspected).unwrap();
+        assert_eq!(id, ContainerId { uid: 0, gid: 0 });
+
+        // docker inspect 失败（镜像未拉取）：报错并指向 per-service 声明。
+        let mut inspected = BTreeMap::from([("postgres:16".to_string(), None)]);
+        let err = resolve_container_id("postgres", &service, None, &overrides, &mut inspected)
+            .unwrap_err();
+        assert!(err.contains("perms.services.postgres"), "{err}");
+    }
+
+    #[test]
+    fn test_derive_unknown_service_override_warns() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let json = format!(
+            r#"{{"services":{{"web":{{"user":"999:999","volumes":[{{"type":"bind","source":"{}","target":"/certs"}}]}}}}}}"#,
+            root.join("certs").display()
+        );
+        let conf: PermsConf =
+            serde_yaml::from_str("services:\n  ghost:\n    uid: 1\n    gid: 1\n").unwrap();
+        let derived = derive_from_json(root, &json, Some(&conf)).unwrap();
+        assert!(
+            derived
+                .warnings
+                .iter()
+                .any(|w| w.contains("perms.services.ghost")),
+            "{:?}",
+            derived.warnings
+        );
+    }
+
+    #[test]
+    fn test_derive_global_override_ignores_services_with_warning() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let json = format!(
+            r#"{{"services":{{"web":{{"user":"999:999","volumes":[{{"type":"bind","source":"{}","target":"/certs"}}]}}}}}}"#,
+            root.join("certs").display()
+        );
+        let conf: PermsConf = serde_yaml::from_str(
+            "container_uid: 100999\ncontainer_gid: 100999\nservices:\n  web:\n    uid: 1\n    gid: 1\n",
+        )
+        .unwrap();
+        let derived = derive_from_json(root, &json, Some(&conf)).unwrap();
+        assert_eq!(
+            derived.mounts[0].container,
+            ContainerId {
+                uid: 100999,
+                gid: 100999
+            },
+            "全局映射优先"
+        );
+        assert!(
+            derived
+                .warnings
+                .iter()
+                .any(|w| w.contains("perms.services` 将被忽略")),
+            "{:?}",
+            derived.warnings
         );
     }
 
@@ -1267,11 +1657,13 @@ mod tests {
                     }),
                     expected_mode: RW_FILE,
                     expected_gid: 999,
+                    is_secret: false,
                     status: ItemStatus::Pending,
                     reason: "属主 0 不是部署账号 1000".to_string(),
                 }],
             }],
             warnings: vec![],
+            notes: vec![],
             errors: vec![],
         };
         assert_eq!(report.pending(), 1);
@@ -1514,10 +1906,14 @@ mod tests {
         let derived = Derived {
             mounts: Vec::new(),
             warnings: vec!["提示".to_string()],
+            notes: vec!["说明".to_string()],
             errors: Vec::new(),
         };
         let report = run_derived(root, derived, false).unwrap();
         assert_eq!(report.warnings, vec!["提示".to_string()]);
+        assert_eq!(report.notes, vec!["说明".to_string()]);
+        let text = report.render_text();
+        assert!(text.contains("[INFO] 说明"), "{text}");
         assert!(report.is_ok());
     }
 
@@ -1622,7 +2018,7 @@ mod tests {
         );
 
         // 应用：目录 2770、文件 660
-        let report = run(dir.path(), None, true);
+        let report = run(dir.path(), None, None, true);
         // 没有 compose 文件 → Err；这里直接走底层 apply_item 覆盖逻辑。
         assert!(report.is_err());
 
@@ -1649,6 +2045,7 @@ mod tests {
                 current: None,
                 expected_mode: RW_FILE,
                 expected_gid: id.gid,
+                is_secret: false,
                 status: ItemStatus::Pending,
                 reason: String::new(),
             },
@@ -1683,6 +2080,7 @@ mod tests {
                 current: Some(snapshot),
                 expected_mode: RO_FILE,
                 expected_gid: id.gid,
+                is_secret: false,
                 status: ItemStatus::Pending,
                 reason: String::new(),
             },
@@ -1712,6 +2110,275 @@ mod tests {
         };
         let (ok, _) = aligned(snapshot, false, &m, deploy_identity().0);
         assert!(ok, "owner == 容器 uid 时必须原样放过");
+    }
+
+    #[test]
+    fn test_secret_file_expects_deploy_owner_and_configured_mode() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".wist")).unwrap();
+        let secret = root.join(".wist/sec-value.yml");
+        std::fs::write(&secret, "a: b\n").unwrap();
+        chmod(&secret, 0o644);
+
+        let id = current_id();
+        let src = canonical_or_parent(&root.join(".wist"));
+        let m = mount(&src, true, id);
+        let deploy = deploy_identity().0;
+        let secret_path = canonical_or_parent(&secret);
+        let target = SecretTarget {
+            path: &secret_path,
+            mode: 0o640,
+        };
+        let items = scan_mount_with_secret(&m, deploy, Some(target)).unwrap();
+
+        let item = items
+            .iter()
+            .find(|i| i.path == secret_path)
+            .expect("secret item");
+        assert!(item.is_secret);
+        assert_eq!(item.expected_mode, 0o640, "期望模式来自 secrets.mode");
+        assert_eq!(
+            item.expected_gid, id.gid,
+            "属组 = 容器 gid，供容器按 group 读"
+        );
+        assert_eq!(item.status, ItemStatus::Pending, "0644 必须待修");
+    }
+
+    #[test]
+    fn test_aligned_secret_uses_deploy_owner_and_configured_mode() {
+        let m = mount(
+            Path::new("/site/.wist"),
+            true,
+            ContainerId { uid: 999, gid: 999 },
+        );
+        let deploy = 1000;
+
+        // 组共享：部署账号属主 + 容器 gid + 0640
+        let (ok, _) = aligned_with_secret(
+            FileSnapshot {
+                uid: 1000,
+                gid: 999,
+                mode: 0o640,
+            },
+            false,
+            &m,
+            deploy,
+            Some(0o640),
+        );
+        assert!(ok, "部署账号:容器gid 0640 是组共享的正确状态");
+
+        // 严格模式 0600 也可以对齐（是否能让容器读到由 derive 的 warning 提示）
+        let (ok, _) = aligned_with_secret(
+            FileSnapshot {
+                uid: 1000,
+                gid: 999,
+                mode: 0o600,
+            },
+            false,
+            &m,
+            deploy,
+            Some(0o600),
+        );
+        assert!(ok);
+
+        // 属主不是部署账号（试图把密钥 chown 给容器 uid）→ 不允许
+        let (ok, reason) = aligned_with_secret(
+            FileSnapshot {
+                uid: 999,
+                gid: 999,
+                mode: 0o640,
+            },
+            false,
+            &m,
+            deploy,
+            Some(0o640),
+        );
+        assert!(!ok, "密钥属主必须是部署账号");
+        assert!(reason.contains("属主"), "{reason}");
+
+        // 模式与 secrets.mode 不符
+        let (ok, reason) = aligned_with_secret(
+            FileSnapshot {
+                uid: 1000,
+                gid: 999,
+                mode: 0o644,
+            },
+            false,
+            &m,
+            deploy,
+            Some(0o640),
+        );
+        assert!(!ok);
+        assert!(reason.contains("模式"), "{reason}");
+    }
+
+    #[test]
+    fn test_derive_fails_when_0600_secret_is_mounted_by_nonroot_container() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let json = format!(
+            r#"{{"services":{{"center":{{"user":"999:999","volumes":[{{"type":"bind","source":"{}","target":"/secrets","read_only":true}}]}}}}}}"#,
+            root.join(".wist").display()
+        );
+        let secret_path = canonical_or_parent(&root.join(".wist/sec-value.yml"));
+        let target = SecretTarget {
+            path: &secret_path,
+            mode: 0o600,
+        };
+        let derived = derive_from_json_with_secret(root, &json, None, Some(target)).unwrap();
+        assert!(
+            derived
+                .errors
+                .iter()
+                .any(|w| w.contains("secrets.mode = 0600")),
+            "{:?}",
+            derived.errors
+        );
+    }
+
+    #[test]
+    fn test_apply_never_creates_missing_secret_file() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("sec-value.yml");
+        let id = current_id();
+        let m = mount(dir.path(), true, id);
+        let err = apply_item_for(
+            &ItemReport {
+                path: missing.clone(),
+                kind: "file",
+                read_only: true,
+                current: None,
+                expected_mode: 0o640,
+                expected_gid: id.gid,
+                is_secret: true,
+                status: ItemStatus::Pending,
+                reason: String::new(),
+            },
+            &m,
+            deploy_identity().0,
+        )
+        .unwrap_err();
+        assert!(err.contains("不创建密钥"), "{err}");
+        assert!(!missing.exists(), "不能凭空造出密钥文件/目录");
+    }
+
+    #[test]
+    fn test_apply_is_skipped_when_config_errors_exist() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("configs/app.conf");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "x").unwrap();
+        chmod(&file, 0o644);
+
+        let id = current_id();
+        let derived = Derived {
+            mounts: vec![mount(&root.join("configs"), false, id)],
+            warnings: vec![],
+            notes: vec![],
+            errors: vec!["配置冲突".to_string()],
+        };
+        let report = run_derived_with_secret(root, derived, None, true).unwrap();
+        assert!(!report.is_ok());
+        assert_eq!(report.applied(), 0, "配置错误时不应动盘");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644, "配置错误时 --apply 不能改权限");
+    }
+
+    #[test]
+    fn test_secret_apply_keeps_deploy_owner_and_sets_mode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempdir().unwrap();
+        let secret = dir.path().join("sec-value.yml");
+        std::fs::write(&secret, "a: b\n").unwrap();
+        chmod(&secret, 0o644);
+
+        let (deploy_uid, deploy_gid) = deploy_identity();
+        // 容器 uid 故意与部署账号不同：apply 不能把属主改成容器 uid。
+        let container = ContainerId {
+            uid: deploy_uid.wrapping_add(1),
+            gid: deploy_gid,
+        };
+        let m = mount(&secret, true, container);
+        let item = ItemReport {
+            path: secret.clone(),
+            kind: "file",
+            read_only: true,
+            current: None,
+            expected_mode: 0o640,
+            expected_gid: container.gid,
+            is_secret: true,
+            status: ItemStatus::Pending,
+            reason: String::new(),
+        };
+        apply_item_for(&item, &m, deploy_uid).unwrap();
+
+        let meta = std::fs::metadata(&secret).unwrap();
+        assert_eq!(meta.uid(), deploy_uid, "属主必须是部署账号，不能是容器 uid");
+        assert_eq!(meta.mode() & 0o7777, 0o640);
+    }
+
+    #[test]
+    fn test_aligned_secret_checks_group() {
+        let m = mount(
+            Path::new("/site/.wist"),
+            true,
+            ContainerId { uid: 999, gid: 999 },
+        );
+        let (ok, reason) = aligned_with_secret(
+            FileSnapshot {
+                uid: 1000,
+                gid: 1000,
+                mode: 0o640,
+            },
+            false,
+            &m,
+            1000,
+            Some(0o640),
+        );
+        assert!(!ok, "属组必须是容器 gid，容器才能按 group 读");
+        assert!(reason.contains("属组"), "{reason}");
+    }
+
+    #[test]
+    fn test_0600_secret_with_root_only_mount_has_no_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let json = format!(
+            r#"{{"services":{{"web":{{"user":"0:0","volumes":[{{"type":"bind","source":"{}","target":"/secrets","read_only":true}}]}}}}}}"#,
+            root.join(".wist").display()
+        );
+        let secret_path = canonical_or_parent(&root.join(".wist/sec-value.yml"));
+        let target = SecretTarget {
+            path: &secret_path,
+            mode: 0o600,
+        };
+        let derived = derive_from_json_with_secret(root, &json, None, Some(target)).unwrap();
+        assert!(derived.mounts.is_empty(), "root 服务应被跳过");
+        assert!(derived.errors.is_empty(), "{:?}", derived.errors);
+    }
+
+    #[test]
+    fn test_0640_secret_with_nonroot_mount_has_no_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let json = format!(
+            r#"{{"services":{{"center":{{"user":"999:999","volumes":[{{"type":"bind","source":"{}","target":"/secrets","read_only":true}}]}}}}}}"#,
+            root.join(".wist").display()
+        );
+        let secret_path = canonical_or_parent(&root.join(".wist/sec-value.yml"));
+        let target = SecretTarget {
+            path: &secret_path,
+            mode: 0o640,
+        };
+        let derived = derive_from_json_with_secret(root, &json, None, Some(target)).unwrap();
+        assert!(derived.errors.is_empty(), "{:?}", derived.errors);
+        assert_eq!(derived.mounts.len(), 1);
     }
 
     #[test]

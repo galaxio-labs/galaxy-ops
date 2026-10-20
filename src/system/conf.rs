@@ -1,5 +1,7 @@
 use super::prelude::*;
 
+use std::collections::BTreeMap;
+
 use crate::module::depend::DependencySet;
 
 /// 系统部署类型：决定 `gops sys` 的 download/install/start/stop/status/diagnose
@@ -78,6 +80,42 @@ pub struct SecretsConf {
     /// 这里出现的只是**键名模式**（不是值）；用于落实最小权限：每个消费方只拿到自己需要的键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expose: Option<ExposeConf>,
+    /// 文件模式策略：缺省 `0600`（只属主可读）；与容器共享时设为 `0640`。
+    ///
+    /// 共享靠**属组**（部署账号:容器 gid 0640），不靠把属主改成容器 uid——
+    /// 后者需要提权，gops 不做。
+    #[serde(
+        default,
+        deserialize_with = "de_secret_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    mode: Option<String>,
+}
+
+/// `secrets.mode` 只接受**带引号的字符串**（`"0600"` / `"0640"`）。
+///
+/// YAML 里 `mode: 0640` 会被解析成整数（且容易被当成十进制 640），必须明确拒绝并提示加引号。
+fn de_secret_mode<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Str(String),
+        // 只为把“未加引号的整数”识别出来并给出可操作报错，值本身不用。
+        #[allow(dead_code)]
+        Int(i64),
+    }
+    match Option::<Raw>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Raw::Str(s)) => Ok(Some(s)),
+        Some(Raw::Int(_)) => Err(serde::de::Error::custom(
+            "secrets.mode 必须是带引号的字符串：\"0600\"（默认）或 \"0640\"",
+        )),
+    }
 }
 
 impl SecretsConf {
@@ -86,6 +124,7 @@ impl SecretsConf {
             file: file.into(),
             format: None,
             expose: None,
+            mode: None,
         }
     }
 
@@ -102,6 +141,19 @@ impl SecretsConf {
     /// 注入范围声明；缺省 = 各消费方自己的默认策略。
     pub fn expose(&self) -> Option<&ExposeConf> {
         self.expose.as_ref()
+    }
+
+    /// 解析后的文件模式：`0600`（默认）或 `0640`。
+    ///
+    /// 只允许这两种，避免把密钥误配成 `0644`。
+    pub fn file_mode(&self) -> Result<u32, String> {
+        match self.mode.as_deref().map(str::trim) {
+            None | Some("") | Some("0600") | Some("600") => Ok(0o600),
+            Some("0640") | Some("640") => Ok(0o640),
+            Some(other) => Err(format!(
+                "sys-prj.yml: secrets.mode = `{other}` 不支持；只允许 `0600`（默认）或 `0640`"
+            )),
+        }
     }
 }
 
@@ -245,6 +297,28 @@ impl From<SecFileFormat> for orion_sec::SecFileFmt {
     }
 }
 
+/// `sys-prj.yml: perms.services.<service>` —— 单个服务的“有效容器身份”。
+///
+/// 典型用途：镜像 `Config.User` 为空（默认 root），但入口脚本会降权到非 root
+/// （如官方 `postgres` 降权到 999 之后才读 `/docker-entrypoint-initdb.d`）。
+/// **只影响 `gops sys perms` 的宿主属主/权限对齐，不改变容器运行时身份**；
+/// 要改运行时请改 compose 的 `user:`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServicePerm {
+    uid: u32,
+    gid: u32,
+}
+
+impl ServicePerm {
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+    pub fn gid(&self) -> u32 {
+        self.gid
+    }
+}
+
 /// `sys-prj.yml: perms` —— 派生不出容器身份，或容器内 uid 与宿主 uid 不等价
 /// （rootless / userns-remap）时的显式覆盖。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -258,6 +332,10 @@ pub struct PermsConf {
     /// 允许处理系统根之外的 bind `source`（绝对路径或相对系统根的路径）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allow_external: Vec<String>,
+    /// 按服务声明“有效容器身份”（仅用于对齐，不改运行时）。
+    /// 全局 `container_uid/gid` 存在时本项被忽略（rootless 映射对所有服务一致）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    services: BTreeMap<String, ServicePerm>,
 }
 
 impl PermsConf {
@@ -269,6 +347,9 @@ impl PermsConf {
     }
     pub fn allow_external(&self) -> &[String] {
         &self.allow_external
+    }
+    pub fn services(&self) -> &BTreeMap<String, ServicePerm> {
+        &self.services
     }
 }
 

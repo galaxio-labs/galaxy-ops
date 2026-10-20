@@ -5,6 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.0-alpha] - 2026-10-20
+
+### 新增
+
+- **`sys-prj.yml: secrets.mode`：显式选择密钥文件模式**（`0600` 默认 / `0640`）。
+  `0640` 用于与固定 gid 的容器共享：属主 = 部署账号、属组 = 容器 gid，不需要 root。
+  ⚠ 这是新字段：2.8.0 的 `secrets` 节使用 `deny_unknown_fields`，会直接拒绝 `mode`；
+  **先升级 gops，再部署带该字段的 sys-prj.yml**。
+- **`sys-prj.yml: perms.services.<name>`：按服务声明“有效容器身份”**（`uid` / `gid`）。
+  用于镜像 `Config.User` 为空、但入口脚本会降权到非 root 的场景（典型：官方 `postgres` 以 root
+  启动、`gosu` 到 999 之后才读 `/docker-entrypoint-initdb.d`）。**只影响 `sys perms` 的宿主
+  属主/权限对齐，不改变容器运行时身份**；要改运行时请改 compose 的 `user:`。
+  全局 `perms.container_uid/gid` 存在时本项被忽略；服务名拼错会告警。
+
+### 修复
+
+- **`Config.User` 为空不再被当成“无法确定”**：Docker 语义下空值就是 root（0:0），不是读取失败。
+  `sys perms` 现在让以 root 运行的服务打印 `[INFO]` 并**跳过对齐** —— root 不受宿主文件模式限制，
+  强行对齐到 `0640` 反而会弄坏由非 root 进程读取的挂载（`htpasswd` → nginx worker、
+  `initdb.d` → 降权后的 postgres）。这也消除了 `db-init` / `db-schema` / `git-proxy` / `web` /
+  `postgres` 这类服务上长期存在的误导性 `[WARN] ...（镜像未拉取？）`。
+- 真正读不到 `Config.User`（`docker image inspect` 失败，通常是镜像未拉取）才告警，
+  提示里直接给出 `perms.services.<name>` 的写法。
+- **`secrets.file` 与只读 bind 对齐的冲突**：宿主加载器要求 `0600/0400`，
+  `perms` 却按只读挂载要求 `0640`，`gops run start` 会在两条规则之间来回报错（死锁）。
+  现在用 `secrets.mode` 显式选择共享策略：默认 `0600`（只属主可读）；与容器共享用 `0640`
+  （属组 = 容器 gid），部署账号按 owner 读、容器按 group 读。`perms` 对密钥的期望值是
+  `部署账号:容器gid` + 该模式，**不会 chown 到容器 uid**（不引入提权）；root 消费者仍跳过。
+  `0600` + 非 root 容器判为**配置错误**（容器读不到，必须改 `secrets.mode`）；
+  多个非 root 消费者 uid 不同时同样按配置冲突报错。
+
 ## [2.8.0-alpha] - 2026-10-20
 
 ### 新增

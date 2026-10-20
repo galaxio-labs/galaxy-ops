@@ -200,7 +200,8 @@ pub fn load_declared(sys_root: &Path, conf: &SecretsConf) -> MainResult<SecFile>
             path.display()
         )));
     }
-    load_checked_ex(&path, conf.format(), conf.expose().cloned())
+    let mode = conf.file_mode().map_err(MainReason::logic_detail)?;
+    load_checked_ex(&path, conf.format(), conf.expose().cloned(), mode)
 }
 
 /// 路径校验：相对、无 `.`/`..`、无符号链接、结果仍在系统根内。
@@ -267,18 +268,31 @@ fn resolve_declared_path(sys_root: &Path, declared: &str) -> MainResult<PathBuf>
 }
 
 /// 文件权限、属主与链接数校验（fail-closed）。
+///
+/// `mode` 是声明策略：`0600`（只属主可读）或 `0640`（属组可读，用于与固定 gid 的
+/// 容器共享）；两种策略都要求属主是部署账号（或 euid 为 root）。
 #[cfg(unix)]
-fn check_file_security(path: &Path) -> MainResult<()> {
+fn check_file_security(path: &Path, mode: u32) -> MainResult<()> {
     use std::os::unix::fs::MetadataExt;
 
     let meta = fs::symlink_metadata(path).source_resource()?;
-    let mode = meta.mode() & 0o777;
-    if mode & 0o077 != 0 {
+    let actual = meta.mode() & 0o777;
+    let allowed = match mode {
+        0o600 => actual == 0o600 || actual == 0o400,
+        0o640 => actual == 0o640 || actual == 0o440,
+        _ => false,
+    };
+    if !allowed {
+        let (expected, why) = if mode == 0o640 {
+            ("0640 / 0440", "属组 = 容器 gid，供容器读取")
+        } else {
+            ("0600 / 0400", "只属主可读")
+        };
         return Err(MainReason::logic_detail(format!(
-            "密钥文件 {} 权限是 {:o}，过宽：必须只对属主可读（chmod 600 {}）",
+            "密钥文件 {} 权限是 {:o}，与 secrets.mode 不符：需要 {expected}（{why}）；\n\
+             共享给容器请用 `secrets.mode: \"0640\"` + 属组 = 容器 gid，不要放宽到 other",
             path.display(),
-            mode,
-            path.display()
+            actual
         )));
     }
     let euid = unsafe { libc::geteuid() };
@@ -304,21 +318,22 @@ fn check_file_security(path: &Path) -> MainResult<()> {
 }
 
 #[cfg(not(unix))]
-fn check_file_security(_path: &Path) -> MainResult<()> {
+fn check_file_security(_path: &Path, _mode: u32) -> MainResult<()> {
     Ok(())
 }
 
 /// 读取 + 校验。所有消费方的唯一入口。
 pub fn load_checked(path: &Path, format: SecFileFormat) -> MainResult<SecFile> {
-    load_checked_ex(path, format, None)
+    load_checked_ex(path, format, None, 0o600)
 }
 
 fn load_checked_ex(
     path: &Path,
     format: SecFileFormat,
     expose: Option<ExposeConf>,
+    mode: u32,
 ) -> MainResult<SecFile> {
-    check_file_security(path)?;
+    check_file_security(path, mode)?;
     check_file_size(path)?;
     let space = orion_sec::load_secfile_by(path.to_path_buf(), format.into())
         .map_err(|err| MainReason::logic_detail(redact(&err.to_string())))?;
@@ -600,7 +615,109 @@ mod tests {
             let path = write_secret(root.path(), ".wist/sec-value.yml", "a: \"b\"\n");
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
             let err = load_checked(&path, SecFileFormat::Yaml).unwrap_err();
-            assert!(err.to_string().contains("过宽"));
+            assert!(err.to_string().contains("secrets.mode"), "{err}");
+        }
+    }
+
+    #[test]
+    fn accepts_group_readable_when_mode_is_0640() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root = temp_root();
+            let path = write_secret(root.path(), ".wist/sec-value.yml", "a: \"b\"\n");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+            let conf: SecretsConf =
+                serde_yaml::from_str("file: .wist/sec-value.yml\nmode: \"0640\"").unwrap();
+            let sec = load_declared(root.path(), &conf).expect("0640 与容器组共享应被接受");
+            assert!(sec.keys().any(|k| k.as_str() == "SEC_A"));
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_mode_for_0640_policy() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root = temp_root();
+            let path = write_secret(root.path(), ".wist/sec-value.yml", "a: \"b\"\n");
+            // 0644 仍然过宽（other 可读），即使声明了 0640
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            let conf: SecretsConf =
+                serde_yaml::from_str("file: .wist/sec-value.yml\nmode: \"0640\"").unwrap();
+            let err = load_declared(root.path(), &conf).unwrap_err();
+            assert!(err.to_string().contains("secrets.mode"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_group_readable_when_mode_is_0600() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root = temp_root();
+            let path = write_secret(root.path(), ".wist/sec-value.yml", "a: \"b\"\n");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+            let conf: SecretsConf = serde_yaml::from_str("file: .wist/sec-value.yml").unwrap();
+            let err = load_declared(root.path(), &conf).unwrap_err();
+            assert!(err.to_string().contains("secrets.mode"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_secrets_mode() {
+        let root = temp_root();
+        write_secret(root.path(), ".wist/sec-value.yml", "a: \"b\"\n");
+        let conf: SecretsConf =
+            serde_yaml::from_str("file: .wist/sec-value.yml\nmode: \"0644\"").unwrap();
+        let err = load_declared(root.path(), &conf).unwrap_err();
+        assert!(err.to_string().contains("只允许"), "{err}");
+    }
+
+    #[test]
+    fn secrets_mode_parsing_and_numeric_rejection() {
+        let mode = |y: &str| {
+            serde_yaml::from_str::<SecretsConf>(y)
+                .unwrap()
+                .file_mode()
+                .unwrap()
+        };
+        assert_eq!(mode("file: x.yml\n"), 0o600, "默认 0600");
+        assert_eq!(mode("file: x.yml\nmode: \"0600\"\n"), 0o600);
+        assert_eq!(mode("file: x.yml\nmode: \"600\"\n"), 0o600);
+        assert_eq!(mode("file: x.yml\nmode: \"0640\"\n"), 0o640);
+        assert_eq!(mode("file: x.yml\nmode: \" 640 \"\n"), 0o640);
+
+        let bad = serde_yaml::from_str::<SecretsConf>("file: x.yml\nmode: \"0644\"\n").unwrap();
+        assert!(bad.file_mode().is_err());
+
+        // 未加引号会被 YAML 当整数：必须给出可操作的报错，而不是静默成 640。
+        let err = serde_yaml::from_str::<SecretsConf>("file: x.yml\nmode: 640\n").unwrap_err();
+        assert!(err.to_string().contains("带引号"), "{err}");
+    }
+
+    #[test]
+    fn accepts_read_only_variants_of_each_policy() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root = temp_root();
+            let path = write_secret(root.path(), ".wist/sec-value.yml", "a: \"b\"\n");
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+            let conf: SecretsConf = serde_yaml::from_str("file: .wist/sec-value.yml").unwrap();
+            assert!(
+                load_declared(root.path(), &conf).is_ok(),
+                "0400 应被 0600 策略接受"
+            );
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o440)).unwrap();
+            let conf: SecretsConf =
+                serde_yaml::from_str("file: .wist/sec-value.yml\nmode: \"0640\"").unwrap();
+            assert!(
+                load_declared(root.path(), &conf).is_ok(),
+                "0440 应被 0640 策略接受"
+            );
         }
     }
 

@@ -5,6 +5,22 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.1-alpha] - 2026-10-20
+
+### 修复
+
+- **`prj upgrade --on-failure rollback-all` 回滚不回代码（假报成功）**：
+  `backup()` 走 `prj backup`，只归档现场态（`configs/` / `knowledge/` / `.wist/`），
+  **不含 `sys/` / `scripts/` / `version.txt`**。当失败发生在 `apply` 之后（典型：`pull` 阶段
+  镜像拉取失败），回滚只还原了配置，代码仍是新版本 —— 事务却记成 `rolled_back`。
+  现在在 `apply` **之前**给每个系统拍**代码快照**（`~/.galaxy/upgrade/<prj>/pre-upgrade/`）：
+  只收不在 `protect` / `contract` / `backup` 里的条目（`values` / `.git` 恒跳过），
+  `.env` 作为 `localize` 衍生物随代码一起快照。回滚顺序：现场数据 → 代码 → 拉起 → 探活；
+  任一失败记 `failed`（不再冒充 `rolled_back`）。升级成功后删除快照；`--on-failure halt`
+  保留快照并在 `detail` 里给出路径，供人工恢复。
+  - 快照失败视为**未动现场**：直接停在 `step=snapshot`，不进 `apply`、不触发回滚。
+  - 还原时会删掉新版新增的代码条目（顶层目录 / 文件），不只覆盖旧文件。
+
 ## [2.9.0-alpha] - 2026-10-20
 
 ### 新增

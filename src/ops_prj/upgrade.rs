@@ -22,12 +22,15 @@ use super::diagnose::{DiagnoseRequest, project_diagnose};
 use super::install::fetch_and_prepare;
 use super::prelude::*;
 use super::project::OpsProject;
-use super::update::apply_overlay;
+use super::update::{apply_overlay, copy_entry};
 use super::version::{self, VersionSpec, infer_channel};
 use crate::accessor::accessor_for_default;
+use crate::const_vars::SYS_PRJ_CONF_FILE_V2;
 use crate::error::{MainError, MainReason};
 use crate::self_update::ReleaseChannel;
+use crate::system::SysConf;
 use crate::system::lock::DeliverLock;
+use crate::system::pack::{compile_path_patterns, path_matches};
 
 /// 失败发生时**做什么**（`--on-failure`）。
 ///
@@ -91,6 +94,8 @@ pub fn resolve_target_addr(project: &OpsProject, sys: &str, target: &str) -> Mai
 pub enum UpgradeStep {
     Diagnose,
     Backup,
+    /// 代码快照：`backup()` 只归档**现场态**，恢复不了被 `apply` 覆盖的代码。
+    Snapshot,
     Apply,
     Regenerate,
     Pull,
@@ -105,6 +110,7 @@ impl UpgradeStep {
         match self {
             Self::Diagnose => "diagnose",
             Self::Backup => "backup",
+            Self::Snapshot => "snapshot",
             Self::Apply => "apply",
             Self::Regenerate => "regenerate",
             Self::Pull => "pull",
@@ -236,6 +242,22 @@ pub trait UpgradeRuntime: Send + Sync {
     async fn diagnose(&self) -> MainResult<()>;
     /// 备份现场态，返回交给 [`UpgradeRuntime::restore`] 的备份标识（归档路径）。
     async fn backup(&self) -> MainResult<String>;
+    /// 升级前给**代码**（系统目录里不被 `protect` / `contract` / `backup` 保护的条目）拍快照。
+    ///
+    /// 为什么不能只靠 [`UpgradeRuntime::backup`]：`prj backup` 收的是现场态
+    /// （`configs/`、`knowledge/`、`.wist/`），**不含 `sys/` / `scripts/` / `version.txt`** ——
+    /// 只还原备份的话，`apply` 已经覆盖的代码回不去，`rollback-all` 会假报成功。
+    ///
+    /// 返回快照目录（`None` = 该运行时不需要 / 不支持代码快照）。
+    async fn snapshot(&self, _systems: &[String]) -> MainResult<Option<PathBuf>> {
+        Ok(None)
+    }
+    /// 回滚时用快照还原代码（与 [`UpgradeRuntime::restore`] 的现场数据互补）。
+    async fn restore_snapshot(&self, _snapshot: &Path) -> MainResult<()> {
+        Ok(())
+    }
+    /// 升级成功后丢弃快照（尽力而为；失败不影响事务结局）。
+    async fn discard_snapshot(&self, _snapshot: &Path) {}
     /// 取包并覆盖到指定系统目录（只动磁盘内容，**不停服务**）。
     async fn apply(&self, sys: &str, target: &ResolvedTarget) -> MainResult<()>;
     /// 重渲染值 / `.env`（`sys resolve` + `localize`），为切换做准备。
@@ -474,9 +496,37 @@ pub async fn run_upgrade(
         }
     };
 
+    // 2b) 代码快照：`backup()` 只收现场态（configs / knowledge / .wist），
+    //     `apply` 覆盖的代码（sys / scripts / version.txt / .env）不在其中。
+    //     没有它，`rollback-all` 会让现场停在「新代码 + 旧配置」且假报成功。
+    //     失败仍未动现场（apply 还没跑），不回滚。
+    let snapshot = match runtime.snapshot(systems).await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            let record = make_record(
+                UpgradeStep::Snapshot,
+                UpgradeStatus::Failed,
+                Some(backup),
+                from_version,
+                String::new(),
+                format!("代码快照失败（未动现场）：{err}"),
+            );
+            write_record(record_path, &record)?;
+            return Ok(UpgradeOutcome {
+                plan,
+                dry_run: false,
+                record: Some(record),
+                record_path: record_path.to_path_buf(),
+            });
+        }
+    };
+
     // 3~7) 阶段序。
     match run_phases(runtime, systems, &targets, expect_health).await {
         Ok(()) => {
+            if let Some(snapshot) = &snapshot {
+                runtime.discard_snapshot(snapshot).await;
+            }
             let to_version = join_versions(runtime, systems).await;
             let record = make_record(
                 UpgradeStep::Done,
@@ -514,7 +564,8 @@ pub async fn run_upgrade(
                         from_version,
                         String::new(),
                         format!(
-                            "{failure_detail}；按 --on-failure halt 停在中间态，未回滚（现场可能部分新、部分旧）"
+                            "{failure_detail}；按 --on-failure halt 停在中间态，未回滚（现场可能部分新、部分旧）{}",
+                            snapshot_hint(snapshot.as_deref())
                         ),
                     );
                     write_record(record_path, &record)?;
@@ -526,7 +577,8 @@ pub async fn run_upgrade(
                     })
                 }
                 FailurePolicy::RollbackAll => {
-                    let (rolled_back, rollback_detail) = rollback(runtime, systems, &backup).await;
+                    let (rolled_back, rollback_detail) =
+                        rollback(runtime, systems, &backup, snapshot.as_deref()).await;
                     let status = if rolled_back {
                         UpgradeStatus::RolledBack
                     } else {
@@ -554,18 +606,41 @@ pub async fn run_upgrade(
     }
 }
 
-/// `rollback-all`：还原备份 → 逐系统重新拉起 → 探活。返回 (是否全部成功, 描述)。
+/// `--on-failure halt` 时告诉用户快照在哪（可人工恢复）。
+fn snapshot_hint(snapshot: Option<&Path>) -> String {
+    match snapshot {
+        Some(path) => format!("；代码快照保留在 {}（可人工恢复）", path.display()),
+        None => String::new(),
+    }
+}
+
+/// `rollback-all`：还原现场数据 → 还原代码 → 逐系统重新拉起 → 探活。返回 (是否全部成功, 描述)。
+///
+/// 两边都要做：`restore` 管 `configs/` / `knowledge/` / `.wist/`（`prj backup` 的内容），
+/// `restore_snapshot` 管代码（`apply` 覆盖的 `sys/` / `scripts/` / `version.txt` / `.env`）。
+/// 只做前者会让现场停在「新代码 + 旧配置」，而且事务会错报 `rolled_back`。
 async fn rollback(
     runtime: &dyn UpgradeRuntime,
     systems: &[String],
     backup: &str,
+    snapshot: Option<&Path>,
 ) -> (bool, String) {
     let mut ok = true;
-    let mut detail = format!("已按 --on-failure rollback-all 回滚（备份 {backup}）");
+    let mut detail = format!("已按 --on-failure rollback-all 回滚（现场数据 {backup}");
+    match snapshot {
+        Some(path) => detail.push_str(&format!("，代码快照 {}）", path.display())),
+        None => detail.push_str("；本次无代码快照）"),
+    }
 
     if let Err(err) = runtime.restore(backup).await {
         ok = false;
-        detail.push_str(&format!("；还原失败：{err}"));
+        detail.push_str(&format!("；现场数据还原失败：{err}"));
+    }
+    if let Some(path) = snapshot
+        && let Err(err) = runtime.restore_snapshot(path).await
+    {
+        ok = false;
+        detail.push_str(&format!("；代码还原失败：{err}"));
     }
     for sys in systems {
         if let Err(err) = runtime.up(sys).await {
@@ -581,6 +656,153 @@ async fn rollback(
         detail.push_str("；⚠ 回滚未完全成功，现场可能停在中间态，请人工介入");
     }
     (ok, detail)
+}
+
+/// 代码快照目录：与升级状态文件同级（`~/.galaxy/upgrade/<prj>/pre-upgrade/`）。
+fn snapshot_root(project_root: &Path) -> PathBuf {
+    record_path(project_root).with_file_name("pre-upgrade")
+}
+
+/// 快照要**跳过**的条目：`protect` / `contract` / `backup` 声明的现场态，外加
+/// `values`（项目客户值链接）与 `.git`（不是交付内容）。
+///
+/// `.env` 是唯一的例外：它虽然写在 `protect` 里，却是 `localize` 按**当前模板**重新生成的
+/// 衍生物 —— 代码回退后旧 compose 认的是旧变量名，所以 `.env` 必须跟代码一起回退。
+fn code_exclusions(sys_dir: &Path) -> MainResult<Vec<glob::Pattern>> {
+    let conf_file = sys_dir.join(SYS_PRJ_CONF_FILE_V2);
+    let mut raw = Vec::new();
+    if conf_file.exists() {
+        let conf = SysConf::load_conf(&conf_file).source_resource()?;
+        raw.extend(conf.protect().iter().cloned());
+        raw.extend(conf.contract().iter().cloned());
+        raw.extend(conf.backup().iter().cloned());
+    }
+    raw.push("values".to_string());
+    raw.push(".git".to_string());
+    raw.retain(|item| {
+        let normalized = item.trim().trim_start_matches("./").trim_matches('/');
+        normalized != ".env"
+    });
+    compile_path_patterns(&raw, "protect/contract/backup")
+}
+
+/// 逐系统拍代码快照（只收代码，现场态交给 `prj backup`）。
+pub(crate) fn snapshot_systems(
+    project_root: &Path,
+    systems: &[String],
+    dest_root: &Path,
+) -> MainResult<()> {
+    if let Err(err) = std::fs::remove_dir_all(dest_root)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(MainReason::resource_detail(format!(
+            "清理旧代码快照失败 {}: {err}",
+            dest_root.display()
+        )));
+    }
+    std::fs::create_dir_all(dest_root).map_err(|e| {
+        MainReason::resource_detail(format!("创建代码快照目录失败 {}: {e}", dest_root.display()))
+    })?;
+    for sys in systems {
+        let src = project_root.join(sys);
+        if !src.is_dir() {
+            continue;
+        }
+        let patterns = code_exclusions(&src)?;
+        copy_tree(&src, &dest_root.join(sys), Path::new(""), &patterns)?;
+    }
+    Ok(())
+}
+
+/// 用快照还原代码：先删掉系统目录里**不在排除集**的条目（含新版新增的），再从快照搬回。
+///
+/// 只删排除集之外的东西，所以 `configs/` / `knowledge/` / `identity/` / `.wist/`
+/// 不会被碰到 —— 它们由 `prj backup` 的还原（[`restore`]）负责。
+pub(crate) fn restore_systems(project_root: &Path, snapshot: &Path) -> MainResult<()> {
+    if !snapshot.is_dir() {
+        return Err(MainReason::logic_detail(format!(
+            "代码快照不存在：{}",
+            snapshot.display()
+        )));
+    }
+    for entry in std::fs::read_dir(snapshot).map_err(|e| {
+        MainReason::resource_detail(format!("读代码快照失败 {}: {e}", snapshot.display()))
+    })? {
+        let entry = entry.map_err(|e| {
+            MainReason::resource_detail(format!("读代码快照失败 {}: {e}", snapshot.display()))
+        })?;
+        let name = entry.file_name();
+        let sys_dir = project_root.join(&name);
+        let patterns = code_exclusions(&sys_dir)?;
+        remove_unprotected(&sys_dir, Path::new(""), &patterns)?;
+        copy_tree(&entry.path(), &sys_dir, Path::new(""), &[])?;
+    }
+    Ok(())
+}
+
+/// 递归删除 `dir` 下未被排除的条目；目录空了顺手删掉（新版新增的空目录不残留）。
+fn remove_unprotected(dir: &Path, rel: &Path, patterns: &[glob::Pattern]) -> MainResult<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(MainReason::resource_detail(format!(
+                "扫描目录失败 {}: {err}",
+                dir.display()
+            )));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            MainReason::resource_detail(format!("扫描目录失败 {}: {e}", dir.display()))
+        })?;
+        let name = entry.file_name();
+        let rel_child = rel.join(&name);
+        if path_matches(&rel_child, patterns) {
+            continue;
+        }
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| {
+            MainReason::resource_detail(format!("读文件元数据失败 {}: {e}", path.display()))
+        })?;
+        if meta.file_type().is_dir() {
+            remove_unprotected(&path, &rel_child, patterns)?;
+            // 只有空了才会成功；还有被排除的子项就留着。
+            let _ = std::fs::remove_dir(&path);
+        } else {
+            std::fs::remove_file(&path).map_err(|e| {
+                MainReason::resource_detail(format!("删除失败 {}: {e}", path.display()))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// 把 `from` 递归复制到 `to`，跳过命中 `patterns` 的条目（按相对路径判定）。
+fn copy_tree(from: &Path, to: &Path, rel: &Path, patterns: &[glob::Pattern]) -> MainResult<()> {
+    if !rel.as_os_str().is_empty() && path_matches(rel, patterns) {
+        return Ok(());
+    }
+    let meta = std::fs::symlink_metadata(from).map_err(|e| {
+        MainReason::resource_detail(format!("读文件元数据失败 {}: {e}", from.display()))
+    })?;
+    if meta.file_type().is_dir() {
+        std::fs::create_dir_all(to).map_err(|e| {
+            MainReason::resource_detail(format!("创建目录失败 {}: {e}", to.display()))
+        })?;
+        for entry in std::fs::read_dir(from).map_err(|e| {
+            MainReason::resource_detail(format!("扫描目录失败 {}: {e}", from.display()))
+        })? {
+            let entry = entry.map_err(|e| {
+                MainReason::resource_detail(format!("扫描目录失败 {}: {e}", from.display()))
+            })?;
+            let name = entry.file_name();
+            copy_tree(&entry.path(), &to.join(&name), &rel.join(&name), patterns)?;
+        }
+    } else {
+        copy_entry(from, to)?;
+    }
+    Ok(())
 }
 
 /// 状态文件落点：`~/.galaxy/upgrade/<prj>/upgrade.json`（与 agentd 的升级状态同形）。
@@ -1008,6 +1230,24 @@ impl UpgradeRuntime for ProjectRuntime {
     async fn restore(&self, backup: &str) -> MainResult<()> {
         let _ = restore(&self.project_root, Path::new(backup), false)?;
         Ok(())
+    }
+
+    async fn snapshot(&self, systems: &[String]) -> MainResult<Option<PathBuf>> {
+        let root = snapshot_root(&self.project_root);
+        snapshot_systems(&self.project_root, systems, &root)?;
+        Ok(Some(root))
+    }
+
+    async fn restore_snapshot(&self, snapshot: &Path) -> MainResult<()> {
+        restore_systems(&self.project_root, snapshot)
+    }
+
+    async fn discard_snapshot(&self, snapshot: &Path) {
+        if let Err(err) = std::fs::remove_dir_all(snapshot)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("⚠ 清理代码快照失败 {}: {err}", snapshot.display());
+        }
     }
 
     async fn version_of(&self, sys: &str) -> MainResult<String> {
@@ -1778,6 +2018,8 @@ mod tests {
         resolved_version: Option<String>,
         force: bool,
         resolve_err: bool,
+        snapshot_enabled: bool,
+        snapshot_err: bool,
     }
 
     impl FakeRuntime {
@@ -1790,7 +2032,20 @@ mod tests {
                 resolved_version: None,
                 force: false,
                 resolve_err: false,
+                snapshot_enabled: false,
+                snapshot_err: false,
             }
+        }
+        /// 开启代码快照（默认关闭，以保持旧用例的调用序列不变）。
+        fn with_snapshot(mut self) -> Self {
+            self.snapshot_enabled = true;
+            self
+        }
+        /// 让代码快照本身失败（验证「未动现场就不回滚」）。
+        fn with_failing_snapshot(mut self) -> Self {
+            self.snapshot_enabled = true;
+            self.snapshot_err = true;
+            self
         }
         fn with_current_version(mut self, version: &str) -> Self {
             self.version = version.to_string();
@@ -1882,6 +2137,23 @@ mod tests {
         }
         async fn restore(&self, backup: &str) -> MainResult<()> {
             self.record(&format!("restore:{backup}"))
+        }
+        async fn snapshot(&self, _systems: &[String]) -> MainResult<Option<PathBuf>> {
+            self.maybe_fail(UpgradeStep::Snapshot, "")?;
+            if self.snapshot_err {
+                return Err(MainReason::logic_detail("snapshot failed (test)"));
+            }
+            if !self.snapshot_enabled {
+                return Ok(None);
+            }
+            self.record("snapshot")?;
+            Ok(Some(PathBuf::from("/tmp/fake-pre-upgrade")))
+        }
+        async fn restore_snapshot(&self, snapshot: &Path) -> MainResult<()> {
+            self.record(&format!("restore_snapshot:{}", snapshot.display()))
+        }
+        async fn discard_snapshot(&self, snapshot: &Path) {
+            let _ = self.record(&format!("discard_snapshot:{}", snapshot.display()));
         }
         async fn version_of(&self, sys: &str) -> MainResult<String> {
             Ok(self
@@ -2270,6 +2542,211 @@ mod tests {
             .position(|c| c == "restore:/tmp/fake-backup.tar.gz")
             .unwrap();
         assert!(calls[at..].contains(&"health".to_string()));
+    }
+
+    #[tokio::test]
+    async fn snapshot_is_taken_before_apply_and_discarded_on_success() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None).with_snapshot();
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "http://example.com/pkg.tar.gz",
+            FailurePolicy::RollbackAll,
+            true,
+            false,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.record.unwrap().status, "succeeded");
+        let calls = runtime.calls();
+        let snap_at = calls.iter().position(|c| c == "snapshot").unwrap();
+        let apply_at = calls.iter().position(|c| c == "apply:s1").unwrap();
+        assert!(snap_at < apply_at, "快照必须先于 apply：{calls:?}");
+        assert!(
+            calls.contains(&"discard_snapshot:/tmp/fake-pre-upgrade".to_string()),
+            "成功后要丢掉快照：{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_all_also_restores_the_code_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        // 模拟本次事故：pull 失败时 apply 已经覆盖过代码，光还原现场数据不够。
+        let runtime = FakeRuntime::new(Some((UpgradeStep::Pull, None))).with_snapshot();
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "http://example.com/pkg.tar.gz",
+            FailurePolicy::RollbackAll,
+            true,
+            false,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        let record = outcome.record.unwrap();
+        assert_eq!(record.status, "rolled_back");
+        assert!(record.detail.contains("代码快照"), "{}", record.detail);
+
+        let calls = runtime.calls();
+        let data_at = calls
+            .iter()
+            .position(|c| c == "restore:/tmp/fake-backup.tar.gz")
+            .expect("现场数据要还原");
+        let code_at = calls
+            .iter()
+            .position(|c| c == "restore_snapshot:/tmp/fake-pre-upgrade")
+            .expect("代码也要还原（否则 rollback 假报成功）");
+        assert!(data_at < code_at, "先现场数据、后代码：{calls:?}");
+    }
+
+    #[tokio::test]
+    async fn halt_keeps_the_code_snapshot_for_manual_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(Some((UpgradeStep::Pull, None))).with_snapshot();
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "http://example.com/pkg.tar.gz",
+            FailurePolicy::Halt,
+            true,
+            false,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        let record = outcome.record.unwrap();
+        assert_eq!(record.status, "failed");
+        assert!(
+            record.detail.contains("代码快照保留在"),
+            "halt 要告诉人快照在哪：{}",
+            record.detail
+        );
+        assert!(
+            !runtime
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("restore_snapshot")),
+            "halt 不得自动还原"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_snapshot_stops_the_transaction_before_apply() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("upgrade.json");
+        let runtime = FakeRuntime::new(None).with_failing_snapshot();
+
+        let outcome = run_upgrade(
+            &runtime,
+            &systems(),
+            "http://example.com/pkg.tar.gz",
+            FailurePolicy::RollbackAll,
+            true,
+            false,
+            &path,
+        )
+        .await
+        .unwrap();
+
+        let record = outcome.record.unwrap();
+        assert_eq!(record.step, "snapshot");
+        assert_eq!(record.status, "failed");
+        assert!(record.detail.contains("未动现场"));
+        let calls = runtime.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("apply:")), "{calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("restore")), "{calls:?}");
+    }
+
+    #[test]
+    fn snapshot_round_trip_restores_code_and_leaves_site_state_alone() {
+        use std::fs;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let sys = root.join("s1");
+        fs::create_dir_all(sys.join("sys")).unwrap();
+        fs::create_dir_all(sys.join("configs")).unwrap();
+        fs::create_dir_all(sys.join("knowledge/station")).unwrap();
+        fs::create_dir_all(sys.join("dev/configs")).unwrap();
+        fs::create_dir_all(sys.join("identity")).unwrap();
+        fs::write(
+            sys.join("sys-prj.yml"),
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - configs\n  - knowledge/station\n  - dev/configs\ncontract:\n  - identity\nbackup:\n  - configs\n",
+        )
+        .unwrap();
+        fs::write(sys.join("sys/a.txt"), "old").unwrap();
+        fs::write(sys.join("version.txt"), "1.0").unwrap();
+        fs::write(sys.join(".env"), "OLD=1\n").unwrap();
+        fs::write(sys.join("dev/svc.sh"), "dev-old").unwrap();
+        fs::write(sys.join("dev/configs/runtime.json"), "rt-old").unwrap();
+        fs::write(sys.join("identity/ca.pem"), "ca-old").unwrap();
+        fs::write(sys.join("configs/c.txt"), "cfg-old").unwrap();
+        fs::write(sys.join("knowledge/station/k.txt"), "kb-old").unwrap();
+
+        let snap = root.join("snap");
+        snapshot_systems(root, &["s1".to_string()], &snap).unwrap();
+
+        // 模拟 apply + localize：代码被覆盖、新增文件、.env 被重写；现场态也被动过。
+        fs::write(sys.join("sys/a.txt"), "new").unwrap();
+        fs::write(sys.join("sys/new.txt"), "added").unwrap();
+        fs::write(sys.join("version.txt"), "2.0").unwrap();
+        fs::write(sys.join(".env"), "NEW=2\n").unwrap();
+        fs::create_dir_all(sys.join("tools")).unwrap();
+        fs::write(sys.join("tools/t.txt"), "brand new").unwrap();
+        fs::write(sys.join("dev/svc.sh"), "dev-new").unwrap();
+        fs::write(sys.join("dev/configs/runtime.json"), "rt-new").unwrap();
+        fs::write(sys.join("identity/ca.pem"), "ca-new").unwrap();
+        fs::write(sys.join("configs/c.txt"), "cfg-new").unwrap();
+
+        restore_systems(root, &snap).unwrap();
+
+        assert_eq!(fs::read_to_string(sys.join("sys/a.txt")).unwrap(), "old");
+        assert!(
+            !sys.join("sys/new.txt").exists(),
+            "新版新增的代码文件要删掉"
+        );
+        assert!(!sys.join("tools").exists(), "新版新增的顶层目录也要删掉");
+        assert_eq!(fs::read_to_string(sys.join("version.txt")).unwrap(), "1.0");
+        assert_eq!(
+            fs::read_to_string(sys.join("dev/svc.sh")).unwrap(),
+            "dev-old",
+            "嵌套目录里的代码也要回退"
+        );
+        assert_eq!(
+            fs::read_to_string(sys.join(".env")).unwrap(),
+            "OLD=1\n",
+            ".env 是代码衍生物，必须跟着回退"
+        );
+        // 现场态：既不在快照里，也不该被还原逻辑碰。
+        assert_eq!(
+            fs::read_to_string(sys.join("configs/c.txt")).unwrap(),
+            "cfg-new"
+        );
+        assert_eq!(
+            fs::read_to_string(sys.join("knowledge/station/k.txt")).unwrap(),
+            "kb-old"
+        );
+        // 嵌套的 protect（dev/configs）与 contract（identity）同样不能碰。
+        assert_eq!(
+            fs::read_to_string(sys.join("dev/configs/runtime.json")).unwrap(),
+            "rt-new"
+        );
+        assert_eq!(
+            fs::read_to_string(sys.join("identity/ca.pem")).unwrap(),
+            "ca-new"
+        );
     }
 
     #[tokio::test]

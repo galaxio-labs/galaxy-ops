@@ -265,7 +265,7 @@ pub(crate) fn walk_files(root: &Path) -> MainResult<Vec<PathBuf>> {
 }
 
 /// 覆盖一个条目：父目录按需创建；符号链接按链接复制（不跟随），其余按内容复制（沿用权限）。
-fn copy_entry(from: &Path, to: &Path) -> MainResult<()> {
+pub(crate) fn copy_entry(from: &Path, to: &Path) -> MainResult<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)
             .source_resource()

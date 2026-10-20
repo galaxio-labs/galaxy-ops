@@ -129,7 +129,8 @@ gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|al
    并**先确认包存在**（本地 `is_file` / HTTP `HEAD`（必要时 `GET Range`）/ git `ls-remote`）；
    若目标版本与现场版本全部相同且未 `--force` → **no-op**（写成功状态，不执行后续事务）
 1. prj diagnose（全系统）            ← 有 fail 即停；--dry-run 打印计划后退出
-2. prj backup（全系统）              ← 回滚点，含 state/*.db*
+2. prj backup（全系统）              ← 现场态回滚点，含 state/*.db*
+2b. 代码快照（全系统）               ← `apply` 会覆盖的代码（sys/ scripts/ version.txt .env …）
 3. apply：prj sync（全系统）        ← 只动磁盘内容，不停服务
 4. regenerate：sys resolve?(按需) + sys localize（全系统）
 5. pull：run download（全系统）       ← 新镜像没全到齐，绝不进入下一步
@@ -160,8 +161,17 @@ gops prj upgrade [<sys>] [<spec>] [-v|--version <spec>] [-c|--channel <stable|al
 回滚动作（仅 `rollback-all`，逆序）：
 
 ```
-prj restore(全部系统的 backup_id) → stop → run start(全部) → health(全部) → 报「已回滚（整工程）」
+prj restore(全部系统的 backup_id)     ← 现场态（configs/ knowledge/ .wist/）
+代码快照还原（全部系统）              ← 代码（sys/ scripts/ version.txt .env）；
+                                       只删/还原不在 protect|contract|backup 里的条目
+stop → run start(全部) → health(全部) → 报「已回滚（整工程）」
 ```
+
+> **为什么不能只还原备份**：`prj backup` 收的是现场态，**不含代码**。`apply` 已经覆盖过
+> `sys/` / `scripts/` / `version.txt`，只还原备份会让现场停在「新代码 + 旧配置」，
+> 而事务还错报 `rolled_back`（v2.9.0 及以前的实际行为）。
+> `.env` 虽然写在 `protect` 里，但它是 `localize` 按当前模板重新生成的衍生物，所以
+> **跟代码一起快照**，否则回退后旧 compose 认不到旧变量名。
 
 **默认值已定：`rollback-all`**。默认行为偏安全；如果明确要在原地排查中间态，显式传 `--on-failure halt`。
 
@@ -173,6 +183,9 @@ prj restore(全部系统的 backup_id) → stop → run start(全部) → health
   要从状态文件看出「上次停在哪个系统/哪一步」。
 - 两者共同的前提：**回滚是状态级**（`restore` 把库一起还原，§2 不变量 2）；`restore` 自身失败要
   **大声**报出备份归档路径与当前中间态，别静默。
+- **代码也要能回退**：`rollback-all` 先还原现场数据，再还原代码快照；两者任一失败都记 `failed`
+  （不是 `rolled_back`）。快照落点 `~/.galaxy/upgrade/<prj>/pre-upgrade/`，升级成功后删除；
+  `halt` 时**保留**它，状态文件的 `detail` 里给出路径供人工恢复。
 
 > 单系统工程（如 `wist-gateway-stack` 当前只有一条 `sys_models`）下：`rollback-all` 退化为「失败即回滚自己」，
 > `halt` 退化为「失败就停在坏版本上」——差别只在**要不要自动回退**。

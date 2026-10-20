@@ -663,19 +663,24 @@ fn snapshot_root(project_root: &Path) -> PathBuf {
     record_path(project_root).with_file_name("pre-upgrade")
 }
 
-/// 快照要**跳过**的条目：`protect` / `contract` / `backup` 声明的现场态，外加
+/// 快照 / 还原要**跳过**的条目：`protect` / `contract` / `backup` 声明的现场态，外加
 /// `values`（项目客户值链接）与 `.git`（不是交付内容）。
+///
+/// 传多个目录时取**并集**：升级前后声明可能不同（新版删掉/改了 `protect` 项），
+/// 只看一侧会在回滚时把旧版保护过的目录当成代码删掉。
 ///
 /// `.env` 是唯一的例外：它虽然写在 `protect` 里，却是 `localize` 按**当前模板**重新生成的
 /// 衍生物 —— 代码回退后旧 compose 认的是旧变量名，所以 `.env` 必须跟代码一起回退。
-fn code_exclusions(sys_dir: &Path) -> MainResult<Vec<glob::Pattern>> {
-    let conf_file = sys_dir.join(SYS_PRJ_CONF_FILE_V2);
+fn code_exclusions(dirs: &[&Path]) -> MainResult<Vec<glob::Pattern>> {
     let mut raw = Vec::new();
-    if conf_file.exists() {
-        let conf = SysConf::load_conf(&conf_file).source_resource()?;
-        raw.extend(conf.protect().iter().cloned());
-        raw.extend(conf.contract().iter().cloned());
-        raw.extend(conf.backup().iter().cloned());
+    for dir in dirs {
+        let conf_file = dir.join(SYS_PRJ_CONF_FILE_V2);
+        if conf_file.exists() {
+            let conf = SysConf::load_conf(&conf_file).source_resource()?;
+            raw.extend(conf.protect().iter().cloned());
+            raw.extend(conf.contract().iter().cloned());
+            raw.extend(conf.backup().iter().cloned());
+        }
     }
     raw.push("values".to_string());
     raw.push(".git".to_string());
@@ -708,7 +713,7 @@ pub(crate) fn snapshot_systems(
         if !src.is_dir() {
             continue;
         }
-        let patterns = code_exclusions(&src)?;
+        let patterns = code_exclusions(&[&src])?;
         copy_tree(&src, &dest_root.join(sys), Path::new(""), &patterns)?;
     }
     Ok(())
@@ -733,7 +738,8 @@ pub(crate) fn restore_systems(project_root: &Path, snapshot: &Path) -> MainResul
         })?;
         let name = entry.file_name();
         let sys_dir = project_root.join(&name);
-        let patterns = code_exclusions(&sys_dir)?;
+        // 并集：旧声明（快照里的 sys-prj.yml）∪ 新声明（现场当前的）。
+        let patterns = code_exclusions(&[&sys_dir, &entry.path()])?;
         remove_unprotected(&sys_dir, Path::new(""), &patterns)?;
         copy_tree(&entry.path(), &sys_dir, Path::new(""), &[])?;
     }
@@ -2709,6 +2715,13 @@ mod tests {
         fs::write(sys.join("dev/configs/runtime.json"), "rt-new").unwrap();
         fs::write(sys.join("identity/ca.pem"), "ca-new").unwrap();
         fs::write(sys.join("configs/c.txt"), "cfg-new").unwrap();
+        fs::write(sys.join("knowledge/station/k.txt"), "kb-new").unwrap();
+        // 新版声明删掉了 `knowledge/station` 与 `dev/configs`：回滚必须仍按**旧声明**保护它们。
+        fs::write(
+            sys.join("sys-prj.yml"),
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - configs\n",
+        )
+        .unwrap();
 
         restore_systems(root, &snap).unwrap();
 
@@ -2736,7 +2749,8 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(sys.join("knowledge/station/k.txt")).unwrap(),
-            "kb-old"
+            "kb-new",
+            "新版删掉 protect 项，也不能把旧版保护过的目录当代码删掉/还原"
         );
         // 嵌套的 protect（dev/configs）与 contract（identity）同样不能碰。
         assert_eq!(

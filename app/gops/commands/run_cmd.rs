@@ -14,10 +14,11 @@ use tokio::process::Command as TokioCommand;
 
 use galaxy_ops::error::MainResult;
 use galaxy_ops::infra::DfxArgsGetter;
-use galaxy_ops::prelude::ErrorOwe;
+use galaxy_ops::system::Subscriber;
 use galaxy_ops::system::SysKind;
 use galaxy_ops::system::compose::compose_invocation;
 use galaxy_ops::system::operator::SysOperator;
+use galaxy_ops::system::sec::{SECRET_MASK, SecFile};
 
 use crate::commands::common::DebugLogArgs;
 use crate::commands::gx_dispatch;
@@ -218,12 +219,17 @@ impl RunCommandHandler {
             .args(extra);
         cmd.current_dir(dir);
 
-        // 运行时注入密钥：从 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）读取 SEC_* 变量，
-        // 只进入 docker compose 子进程环境，不落盘、不进 .env。
+        // 密钥按 `sys-prj.yml: secrets.file` 解析（路径限定 / 权限 / 值类型校验都在
+        // `system::sec` 里做）；未声明时回退 `.galaxy/sec_value.yml` 旧约定。
+        // 再按 `secrets.expose.run` 裁剪（缺省 all），只给 compose 它该看的键。
         // diagnose（docker compose config）只读校验，注入掩码值以免泄露明文。
-        let sec_dict = orion_sec::load_sec_dict().source_resource()?;
-        for (key, value) in sec_env_pairs_for(cmd_name, &sec_dict) {
-            cmd.env(key, value);
+        //
+        // 只对“会落地/渲染配置”的子命令加载：密钥文件损坏时不应该连 `status` 都跑不了。
+        if needs_secrets(cmd_name) {
+            let sec = galaxy_ops::system::sec::load_for_system(dir)?.scoped(Subscriber::Run)?;
+            for (key, value) in sec_env_pairs_for(cmd_name, &sec) {
+                cmd.env(key, value);
+            }
         }
 
         gx_dispatch::run_and_stream(cmd, "docker compose").await
@@ -270,34 +276,33 @@ fn compose_subcommand(cmd_name: &str) -> (&str, &'static [&'static str]) {
     }
 }
 
-/// 密钥掩码值，与 `orion-sec` 的 `SECRET_MASK` 保持一致。
-const SECRET_MASK: &str = "********";
+/// `gops run` 的哪些子命令需要密钥。
+///
+/// 只有会把变量真正插进配置/容器的才需要：`start`(up) / `install`(create) / `diagnose`(config)。
+/// `download`(pull) / `stop` / `status`(ps) / `uninstall`(down) 不需要 ——
+/// 否则密钥文件权限不对时，连 `gops run status` 都跑不了，反而破坏排障。
+fn needs_secrets(cmd_name: &str) -> bool {
+    matches!(cmd_name, "start" | "install" | "diagnose")
+}
 
 /// 把 secret dict（SEC_* → 明文值）转成要注入子进程的 (KEY, VALUE) 环境变量对。
 /// `diagnose`（docker compose config）是只读校验，注入掩码值以免泄露明文；其余命令注入明文。
-fn sec_env_pairs_for(
-    cmd_name: &str,
-    dict: &galaxy_ops::prelude::ValueDict,
-) -> Vec<(String, String)> {
+fn sec_env_pairs_for(cmd_name: &str, sec: &SecFile) -> Vec<(String, String)> {
     let mask = cmd_name == "diagnose";
-    dict.iter()
-        .map(|(k, v)| {
-            let value = if mask {
-                SECRET_MASK.to_string()
-            } else {
-                v.to_string()
-            };
-            (k.as_str().to_string(), value)
+    sec.env_pairs()
+        .into_iter()
+        .map(|(key, value)| {
+            let value = if mask { SECRET_MASK.to_string() } else { value };
+            (key, value)
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_subcommand, sec_env_pairs_for};
-    use galaxy_ops::prelude::ValueDict;
+    use super::{compose_subcommand, needs_secrets, sec_env_pairs_for};
     use galaxy_ops::system::compose::compose_global_args;
-    use orion_vars::vars::ValueType;
+    use galaxy_ops::system::sec::SecFile;
     use std::ffi::OsString;
     use std::path::Path;
     use tempfile::tempdir;
@@ -318,6 +323,16 @@ mod tests {
         check("diagnose", "config", &[]);
         // 未知命令透传
         check("whatever", "whatever", &[]);
+    }
+
+    #[test]
+    fn test_needs_secrets_only_for_materializing_commands() {
+        for cmd in ["start", "install", "diagnose"] {
+            assert!(needs_secrets(cmd), "{cmd} 应该需要密钥");
+        }
+        for cmd in ["download", "stop", "status", "uninstall"] {
+            assert!(!needs_secrets(cmd), "{cmd} 不应该读密钥文件");
+        }
     }
 
     #[test]
@@ -377,22 +392,30 @@ mod tests {
 
     #[test]
     fn test_sec_env_pairs_for_diagnose_masks() {
-        let mut dict = ValueDict::new();
-        dict.insert("SEC_DB_PASSWORD", ValueType::from("pw"));
-        dict.insert("SEC_API_KEY", ValueType::from("tok-123"));
+        let sec = SecFile::from_pairs(
+            "test.yml",
+            vec![
+                ("SEC_DB_PASSWORD".to_string(), "pw".to_string()),
+                ("SEC_API_KEY".to_string(), "tok-123".to_string()),
+            ],
+        );
         // diagnose 注入掩码值，不泄露明文
-        let pairs = sec_env_pairs_for("diagnose", &dict);
+        let pairs = sec_env_pairs_for("diagnose", &sec);
         assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "********".to_string())));
         assert!(pairs.contains(&("SEC_API_KEY".to_string(), "********".to_string())));
     }
 
     #[test]
     fn test_sec_env_pairs_for_start_plaintext() {
-        let mut dict = ValueDict::new();
-        dict.insert("SEC_DB_PASSWORD", ValueType::from("pw"));
-        dict.insert("SEC_API_KEY", ValueType::from("tok-123"));
+        let sec = SecFile::from_pairs(
+            "test.yml",
+            vec![
+                ("SEC_DB_PASSWORD".to_string(), "pw".to_string()),
+                ("SEC_API_KEY".to_string(), "tok-123".to_string()),
+            ],
+        );
         // 非 diagnose 注入明文
-        let pairs = sec_env_pairs_for("start", &dict);
+        let pairs = sec_env_pairs_for("start", &sec);
         assert!(pairs.contains(&("SEC_DB_PASSWORD".to_string(), "pw".to_string())));
         assert!(pairs.contains(&("SEC_API_KEY".to_string(), "tok-123".to_string())));
     }

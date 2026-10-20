@@ -64,6 +64,7 @@ mod tests {
         let mut found_prj = false;
         let mut found_self = false;
         let mut found_run = false;
+        let mut found_sec = false;
 
         for subcommand in &subcommands_vec {
             match subcommand.get_name() {
@@ -72,6 +73,7 @@ mod tests {
                 "prj" => found_prj = true,
                 "self" => found_self = true,
                 "run" => found_run = true,
+                "sec" => found_sec = true,
                 _ => {}
             }
         }
@@ -81,9 +83,10 @@ mod tests {
         assert!(found_prj, "Prj subcommand should be available");
         assert!(found_self, "Self subcommand should be available");
         assert!(found_run, "Run subcommand should be available");
+        assert!(found_sec, "Sec subcommand should be available");
 
         // Verify no other subcommands exist
-        let expected_commands = vec!["mod", "sys", "prj", "self", "run"];
+        let expected_commands = vec!["mod", "sys", "prj", "self", "run", "sec"];
         let actual_commands: Vec<&str> = subcommands_vec.iter().map(|cmd| cmd.get_name()).collect();
 
         for expected_cmd in &expected_commands {

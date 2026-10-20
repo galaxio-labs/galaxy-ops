@@ -9,7 +9,10 @@ mod path;
 pub mod perms;
 mod prelude;
 pub mod refs;
+pub mod sec;
 pub mod setting;
 pub mod spec;
-pub use crate::system::conf::{PermsConf, SysConf, SysKind};
+pub use crate::system::conf::{
+    ExposeConf, ExposeRule, PermsConf, SecFileFormat, SecretsConf, Subscriber, SysConf, SysKind,
+};
 pub use crate::system::path::{SysOperatorPath, SysValuePaths};

@@ -3,6 +3,7 @@ pub mod gx_dispatch;
 pub mod mod_cmd;
 pub mod prj_cmd;
 pub mod run_cmd;
+pub mod sec_cmd;
 pub mod self_cmd;
 pub mod sys_cmd;
 
@@ -12,6 +13,7 @@ use galaxy_ops::error::MainResult;
 pub use mod_cmd::{ModCmd, ModCommandHandler};
 pub use prj_cmd::{PrjCmd, PrjCommandHandler};
 pub use run_cmd::{RunCmd, RunCommandHandler};
+pub use sec_cmd::{SecCmd, SecCommandHandler};
 pub use self_cmd::{SelfCmd, SelfCommandHandler};
 pub use sys_cmd::{SysCmd, SysCommandHandler};
 
@@ -48,6 +50,17 @@ pub enum GInsCmd {
     /// 自升级命令 (Self-Update Commands)
     #[command(name = "self", subcommand, about = "自升级命令 (Self-Update Commands)")]
     SelfUpdate(SelfCmd),
+
+    /// 密钥查看 / 带密钥执行 (Secrets)
+    #[command(
+        name = "sec",
+        subcommand,
+        about = "密钥查看 / 带密钥执行 (Secrets)",
+        long_about = "密钥文件的只读视图与“带密钥执行”。\n\
+                     路径由 `sys-prj.yml: secrets.file` 声明（未声明时回退 `.galaxy/sec_value.yml`），\n\
+                     加载前会做路径限定、权限与值类型校验。"
+    )]
+    Sec(SecCmd),
 }
 
 /// 输出模式：Machine 用于机器可读（如 `self check --json`），期间不打印版本横幅。
@@ -63,6 +76,7 @@ impl CommandDispatcher {
     pub fn output_mode(cmd: &GInsCmd) -> OutputMode {
         match cmd {
             GInsCmd::SelfUpdate(SelfCmd::Check(args)) if args.json => OutputMode::Machine,
+            GInsCmd::Sec(SecCmd::List(args)) if args.json => OutputMode::Machine,
             _ => OutputMode::Human,
         }
     }
@@ -74,6 +88,7 @@ impl CommandDispatcher {
             GInsCmd::Sys(sys_cmd) => SysCommandHandler::execute(sys_cmd).await,
             GInsCmd::Run(run_cmd) => RunCommandHandler::execute(run_cmd).await,
             GInsCmd::SelfUpdate(self_cmd) => SelfCommandHandler::execute(self_cmd).await,
+            GInsCmd::Sec(sec_cmd) => SecCommandHandler::execute(sec_cmd).await,
         }
     }
 }

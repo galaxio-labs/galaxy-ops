@@ -54,6 +54,195 @@ pub struct SysConf {
     /// 缺省 = 全部按 compose 的 `user:` / `source` / `read_only` 派生。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     perms: Option<PermsConf>,
+    /// **密钥文件**：`gops run` / `gops sec` 运行时从这里加载 `SEC_*` 环境变量。
+    /// 只指路、不含值；路径受系统根约束（见 `system::sec` 的安全校验）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secrets: Option<SecretsConf>,
+}
+
+/// `sys-prj.yml: secrets` —— 密钥文件声明。
+///
+/// **只声明路径，不声明变量名与值**：变量名由 `orion-sec` 的归一化规则自动派生
+/// （大写 + `SEC_` 前缀，已是 `SEC_` 开头不重复加），所以 `center_admin_token`
+/// 天然映射到 `${SEC_CENTER_ADMIN_TOKEN}`。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsConf {
+    /// 密钥文件路径：**必须是系统根内的相对路径**，不得含 `..`、不得是符号链接。
+    file: String,
+    /// 文件格式：`yaml`（默认）/ `toml`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<SecFileFormat>,
+    /// 注入范围（按消费方）。缺省策略见 [`ExposeConf::rule_for`]。
+    ///
+    /// 这里出现的只是**键名模式**（不是值）；用于落实最小权限：每个消费方只拿到自己需要的键。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expose: Option<ExposeConf>,
+}
+
+impl SecretsConf {
+    pub fn new(file: impl Into<String>) -> Self {
+        Self {
+            file: file.into(),
+            format: None,
+            expose: None,
+        }
+    }
+
+    /// 声明的密钥文件（相对系统根）。空串是无效声明，加载时拒绝。
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// 文件格式；缺省 YAML。
+    pub fn format(&self) -> SecFileFormat {
+        self.format.unwrap_or_default()
+    }
+
+    /// 注入范围声明；缺省 = 各消费方自己的默认策略。
+    pub fn expose(&self) -> Option<&ExposeConf> {
+        self.expose.as_ref()
+    }
+}
+
+/// 消费方：决定“哪些密钥会被注入到这个入口”。
+///
+/// - `Run`：`gops run *` 拉起的 `docker compose` 子进程；
+/// - `Localize`：`gops sys localize` 拉起的 `init-*.sh` 脚本；
+/// - `Sec`：`gops sec run -- <cmd>` 显式执行。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Subscriber {
+    Run,
+    Localize,
+    Sec,
+}
+
+impl Subscriber {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Subscriber::Run => "run",
+            Subscriber::Localize => "localize",
+            Subscriber::Sec => "sec",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("run") {
+            Some(Subscriber::Run)
+        } else if value.eq_ignore_ascii_case("localize") {
+            Some(Subscriber::Localize)
+        } else if value.eq_ignore_ascii_case("sec") {
+            Some(Subscriber::Sec)
+        } else {
+            None
+        }
+    }
+
+    /// 缺省策略：`run` / `sec` 全量（不改变现有行为）；`localize` **默认不注入**
+    /// —— 新入口必须显式开权限（最小权限）。
+    pub fn default_rule(self) -> ExposeRule {
+        match self {
+            Subscriber::Run | Subscriber::Sec => ExposeRule::All,
+            Subscriber::Localize => ExposeRule::Only(Vec::new()),
+        }
+    }
+}
+
+/// `sys-prj.yml: secrets.expose` —— 按消费方的注入范围。
+///
+/// ```yaml
+/// secrets:
+///   file: .wist/sec-value.yml
+///   expose:
+///     run: all                      # 缺省 all
+///     localize:                     # 缺省 none（必须显式开）
+///       - SEC_CENTER_*
+/// ```
+///
+/// 消费方名拼错（如 `loclize`）会在解析清单时直接报错，不会静默忽略。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExposeConf {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<ExposeRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    localize: Option<ExposeRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sec: Option<ExposeRule>,
+}
+
+impl ExposeConf {
+    /// 取某个消费方的规则；未声明时用该消费方的缺省策略。
+    pub fn rule_for(&self, subscriber: Subscriber) -> ExposeRule {
+        let declared = match subscriber {
+            Subscriber::Run => self.run.clone(),
+            Subscriber::Localize => self.localize.clone(),
+            Subscriber::Sec => self.sec.clone(),
+        };
+        declared.unwrap_or_else(|| subscriber.default_rule())
+    }
+}
+
+/// 注入范围：`all` 或一组模式。
+///
+/// 模式只支持 `*`（任意序列，可匹配空串），匹配对象是**归一化后的环境变量名**
+/// （`SEC_...`），大小写不敏感。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExposeRule {
+    All,
+    Only(Vec<String>),
+}
+
+impl<'de> serde::Deserialize<'de> for ExposeRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Keyword(String),
+            List(Vec<String>),
+        }
+
+        match Raw::deserialize(deserializer)? {
+            Raw::Keyword(word) if word.eq_ignore_ascii_case("all") => Ok(ExposeRule::All),
+            Raw::Keyword(word) => Err(serde::de::Error::custom(format!(
+                "secrets.expose 只接受 `all` 或模式列表，收到 `{word}`"
+            ))),
+            Raw::List(patterns) => Ok(ExposeRule::Only(patterns)),
+        }
+    }
+}
+
+impl serde::Serialize for ExposeRule {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            ExposeRule::All => serializer.serialize_str("all"),
+            ExposeRule::Only(patterns) => patterns.serialize(serializer),
+        }
+    }
+}
+
+/// 密钥文件格式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecFileFormat {
+    #[default]
+    Yaml,
+    Toml,
+}
+
+impl From<SecFileFormat> for orion_sec::SecFileFmt {
+    fn from(value: SecFileFormat) -> Self {
+        match value {
+            SecFileFormat::Yaml => orion_sec::SecFileFmt::Yaml,
+            SecFileFormat::Toml => orion_sec::SecFileFmt::Toml,
+        }
+    }
 }
 
 /// `sys-prj.yml: perms` —— 派生不出容器身份，或容器内 uid 与宿主 uid 不等价
@@ -93,6 +282,7 @@ impl SysConf {
             contract: Vec::new(),
             backup: Vec::new(),
             perms: None,
+            secrets: None,
         }
     }
 
@@ -136,7 +326,6 @@ impl SysConf {
     }
 
     /// 备份选取（`sys-prj.yml` 的 `backup:` 节）。与 `contract` 等**互相独立**。
-    ///
     /// 只由本列表决定收什么；不在其中的不收、不碰。
     pub fn backup(&self) -> &[String] {
         &self.backup
@@ -145,6 +334,11 @@ impl SysConf {
     /// 宿主权限对齐的覆盖项（`sys-prj.yml` 的 `perms:` 节）；缺省 = 纯 compose 派生。
     pub fn perms(&self) -> Option<&PermsConf> {
         self.perms.as_ref()
+    }
+
+    /// 密钥文件声明（`sys-prj.yml` 的 `secrets:` 节）；缺省 = 未声明，走 `.galaxy` 旧约定。
+    pub fn secrets(&self) -> Option<&SecretsConf> {
+        self.secrets.as_ref()
     }
 }
 #[async_trait]
@@ -208,6 +402,7 @@ mod tests {
             contract: Vec::new(),
             backup: Vec::new(),
             perms: None,
+            secrets: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("pkg_exclude"), "yaml={yaml}");
@@ -233,6 +428,7 @@ mod tests {
             contract: Vec::new(),
             backup: Vec::new(),
             perms: None,
+            secrets: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("protect"), "yaml={yaml}");
@@ -254,6 +450,7 @@ mod tests {
             contract: vec!["configs/gateway/public".to_string()],
             backup: Vec::new(),
             perms: None,
+            secrets: None,
         };
         assert!(conf.backup().is_empty(), "contract 不应被并入 backup");
 
@@ -266,6 +463,7 @@ mod tests {
             contract: vec!["configs/gateway/public".to_string()],
             backup: vec![".wist".to_string()],
             perms: None,
+            secrets: None,
         };
         assert_eq!(conf2.backup(), &[".wist".to_string()][..]);
     }
@@ -306,6 +504,7 @@ mod tests {
             contract: Vec::new(),
             backup: Vec::new(),
             perms: None,
+            secrets: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("pkg_include"), "yaml={yaml}");
@@ -341,6 +540,7 @@ mod tests {
             contract: vec!["configs/gateway/public".to_string()],
             backup: Vec::new(),
             perms: None,
+            secrets: None,
         };
         let yaml = serde_yaml::to_string(&with).unwrap();
         assert!(yaml.contains("contract"), "yaml={yaml}");

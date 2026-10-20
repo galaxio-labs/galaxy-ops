@@ -5,6 +5,32 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.8.0-alpha] - 2026-10-20
+
+### 新增
+
+- **`gops sec`：密钥只读视图 + 带密钥执行**。`gops sec list`（只出键名与长度）、
+  `gops sec get <key>`（默认掩码 `********`，`--show` 才明文）、
+  `gops sec run -- <cmd>`（注入子进程环境后 `exec`，值不进 argv）。
+  刻意**不提供** `env` 子命令：生成 `export ...` 供 `eval` 是命令注入面，也会让密钥长期留在 shell 环境。
+- **`sys-prj.yml: secrets` 声明密钥文件**：`secrets.file` 指定系统根内的相对路径，
+  `gops run` 与 `gops sec` 共用同一加载器；变量名按 `SEC_` + 大写自动派生（`center_admin_token` →
+  `${SEC_CENTER_ADMIN_TOKEN}`），清单里不写变量名和值。
+- **`secrets.expose` 按消费方限定注入范围**：`run` / `localize` / `sec`，键名模式只支持 `*`；
+  `run`、`sec` 缺省全量，`localize` 缺省**不注入**。`gops sec list --for <消费方>` 可预览。
+
+### 变更
+
+- `gops run` 只在会落地的子命令（`start` / `install` / `diagnose`）读取密钥文件；
+  `status` / `stop` / `download` / `uninstall` 不再因密钥文件异常而无法执行。
+
+### 安全
+
+- 密钥文件加载 fail-closed：路径必须相对系统根（禁 `..` / 绝对路径 / 符号链接，含悬空链接），
+  只允许属主可读（非 0600/0400 拒绝），拒绝硬链接，拒绝数字 / 浮点 / 嵌套值与非法环境变量名；
+  解析错误不输出明文，`SecFile` 的 `Debug` 不含值。
+- `secrets:` 与 `expose:` 拒绝未知字段，消费方名拼错直接报错。
+
 ## [2.7.3-alpha] - 2026-10-19
 
 ### 修复

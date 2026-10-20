@@ -177,20 +177,58 @@ depends.yml   replaced
 
 ## 密钥处理
 
-纯 docker-compose 系统的密钥**不落盘、不进 `.env`**，用 `${SEC_xxx}` 占位 + 运行时注入：
+密钥**不落盘到配置、不进 `.env`**，用 `${SEC_xxx}` 占位 + 运行时注入：
 
 ```text
-sys/docker-compose.yaml   →  ${SEC_DB_PASSWORD}（原生占位；位于 sys/ 或旧布局的系统根）
-sys localize             →  .env = 系统默认值（merged_vars.yml）+ values/sys_value.yml + values/value.yml 覆盖（仅非密钥，后两者可只写要覆盖的项）
-sys start (compose)      →  orion_sec::load_sec_dict()
-                            读 ~/.galaxy/sec_value.yml（或 ./.galaxy/sec_value.yml）
-                            → SEC_DB_PASSWORD=<明文> 注入 docker compose 子进程环境
+```yaml
+sys-prj.yml: secrets.file  →  .wist/sec-value.yml（系统根内的相对路径；只指路，不含值）
+sys/docker-compose.yaml    →  ${SEC_DB_PASSWORD}（原生占位）
+sys localize               →  .env = 系统默认值 + values 覆盖（仅非密钥）
+sys start (compose)        →  system::sec::load_for_system() → secrets.expose.run → 注入子进程环境
 ```
 
-- 密钥文件：`~/.galaxy/sec_value.yml`（YAML），key 会归一化为大写并加 `SEC_` 前缀（如 `db_password` → `SEC_DB_PASSWORD`）。
-- 加载：`orion_sec::load_sec_dict()`（`orion-sec` 依赖），文件缺失时返回空、不报错。
-- 密钥只存在于 `docker compose` 那个瞬时子进程的环境里，进程结束即消失。
-- `sys diagnose`（`docker compose config`）会打印解析后的配置，因此**注入掩码值 `********` 而非明文**，避免泄露；输出里 `${SEC_xxx}` 显示为 `********`。
+### 注入范围（`secrets.expose`）
+
+默认：`run` / `sec` = 全量，`localize` = **不注入**（新入口必须显式开）。
+
+```yaml
+secrets:
+  file: .wist/sec-value.yml
+  expose:
+    run: all                      # 或缺省
+    localize:                     # 缺省 none
+      - SEC_CENTER_*
+      - SEC_STATION_WEB_PASSWORD
+    sec:
+      - SEC_CENTER_*
+```
+
+- 模式只支持 `*`（可匹配空串），匹配对象是**归一化后的变量名**（`SEC_...`），大小写不敏感；
+- 消费方名拼错（`loclize`）会在解析清单时报错；
+- 一条模式都没命中 → 警告（键名漂移的哨兵），不阻断；
+- `[]` = 显式不注入；
+- 只影响**注入**，`gops sec list` / `get` 仍看全量；`gops sec list --for <消费方>` 可预览。
+
+- **变量名自动派生**：`orion-sec` 归一化为「大写 + `SEC_` 前缀」（`db_password` → `SEC_DB_PASSWORD`，
+  已带前缀不重复加），所以清单里**不写变量名**，与 `sys/configs/**.tpl` 的 `${SEC_*}` 占位天然对齐。
+- **加载入口唯一**：`galaxy_ops::system::sec::load_for_system()`；`gops run` 与 `gops sec` 共用。
+- **未声明时**才回退 `<系统根>/.galaxy/sec_value.yml` → `./.galaxy/sec_value.yml` → `~/.galaxy/sec_value.yml`
+  （旧约定），文件缺失返回空集。
+- **声明了就硬失败**：清单写了 `secrets.file` 但文件不存在 → 直接报错，**不会**静默回退到其它文件
+  （静默回退会把 A 栈的密钥注入 B 栈）。
+- **安全校验（全部 fail-closed）**：
+  - 路径必须是系统根内的**相对路径**，不允许 `.` / `..` / 绝对路径 / 符号链接，canonicalize 后仍在根内；
+  - 权限必须只对属主可读（`0600` / `0400` 等），属主须与进程 euid 一致（root 运行时跳过属主判断）；
+  - 只接受**标量字符串**：`123456`（数字）、`0123`（丢前导零）、`1e5`（浮点）、嵌套结构一律拒绝，
+    请在密钥文件里加引号；
+  - 键名归一化后必须是**合法环境变量名**（`[A-Za-z_][A-Za-z0-9_]*`）——`db.password` 这类键会让
+    子进程拿到无效变量，直接拒绝；
+  - 解析错误**只保留位置信息**，不带出值。
+- 密钥只存在于 `docker compose` / `gops sec run` 那个子进程的环境里，进程结束即消失；不进 argv
+  （`ps` 不可见）。
+- `sys diagnose`（`docker compose config`）与 `gops run diagnose` 注入**掩码值 `********`**，避免泄露。
+- `gops sec get` 默认输出掩码，`--show` 才明文；**没有** `sec env` 子命令——生成 `export ...` 供 `eval`
+  会成为命令注入面，并让密钥长期留在交互 shell 的环境里。
 
 ## 输出对象
 

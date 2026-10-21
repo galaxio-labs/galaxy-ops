@@ -82,7 +82,20 @@ gops run download/install/uninstall/start/stop/status/diagnose
 `gops run download/install/uninstall/start/stop/status/diagnose` 按 `sys/sys_model.yml` 的 `kind` 分派：
 
 - `gxl`（默认）：委托给外部 `gx`（`$HOME/bin/gx`，即 `gx run <cmd>`）。
-- `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`diagnose`→`config`）。
+- `docker-compose`：映射到 `docker compose`（`download`→`pull`、`install`→`create`、`start`→`up -d`、`stop`→`stop`、`uninstall`→`down`、`status`→`ps`、`config`→`config`）。
+
+`gops run diagnose` **不再**是 `docker compose config`（那是 `gops run config`），而是**运行时体检**：
+
+1. 采集事实：`compose config --format json` + `ps` + `inspect` + 宿主 `stat` + 容器日志尾部；
+2. 内置检查（通用）：容器状态/健康/重启/OOM、挂载源存在性、端口重复发布、私钥权限、日志错误线索；
+3. 调系统自己的 `diagnose` 流程（`sys/workflows/operators.gxl`）拿**业务结论**；
+4. 归并 → 人读（`[OK]/[WARN]/[FAIL]`，TTY 着色）或 `--json`，退出码 `0/1/2`。
+
+日志检查（`gops.logs.<svc>`）做了三件事：**脱敏**（`password/token/bearer` 的值换成 `***`）、
+**去噪**（否定式/统计行不计，`--log-ignore <子串>` 可重复屏蔽）、**折叠**（同一条错误 `×N`）。
+
+契约（上下文与结果两份 JSON、`GOPS_DIAGNOSE_*` 环境变量）见
+[`docs/design/run-diagnose.md`](../../docs/design/run-diagnose.md)。
 
 ## 值变更表（`sys diff` / `localize` 末尾）
 
@@ -226,7 +239,7 @@ secrets:
   - 解析错误**只保留位置信息**，不带出值。
 - 密钥只存在于 `docker compose` / `gops sec run` 那个子进程的环境里，进程结束即消失；不进 argv
   （`ps` 不可见）。
-- `sys diagnose`（`docker compose config`）与 `gops run diagnose` 注入**掩码值 `********`**，避免泄露。
+- `gops run config`（`docker compose config`）与 `gops run diagnose` 注入**掩码值 `********`**，避免泄露。
 - `gops sec get` 默认输出掩码，`--show` 才明文；**没有** `sec env` 子命令——生成 `export ...` 供 `eval`
   会成为命令注入面，并让密钥长期留在交互 shell 的环境里。
 

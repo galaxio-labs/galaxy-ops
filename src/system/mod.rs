@@ -1,5 +1,6 @@
 pub mod compose;
 mod conf;
+pub mod diagnose;
 pub mod init;
 pub mod lock;
 pub mod mod_list;

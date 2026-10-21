@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use clap::{Args, Parser};
 use derive_getters::Getters;
@@ -22,7 +21,7 @@ use orion_variate::update::DownloadOptions;
 use orion_vars::vars::{EnvDict, EnvEvalable, OriginDict, ValueDict};
 
 use crate::commands::common::DebugLogArgs;
-use crate::commands::gx_dispatch;
+use crate::commands::gx_dispatch::{self, FlowProbe};
 
 /// 解析当前系统的值目录：若系统属于某个运维项目（父目录有 `ops-prj.yml` 且列出该系统），
 /// 使用项目为该系统维护的 `values/<sys_name>`（客户值）；否则使用 `<sys>/values`。
@@ -806,16 +805,18 @@ impl SysCommandHandler {
         if !matches!(kind, SysKind::DockerCompose) {
             return Ok(());
         }
-        match Self::gx_flow_probe(gx_path, flow_name, cwd) {
-            StageProbe::Exists => {}
-            StageProbe::FlowAbsent(reason) => {
+        // 探测逻辑与 `gops run diagnose` 共用一处（`gx_dispatch::probe_flow`）：
+        // 三态必须分开，否则「gx 缺失」会被当成「没有这个流程」静默跳过。
+        match gx_dispatch::probe_flow(gx_path, flow_name, cwd) {
+            FlowProbe::Exists => {}
+            FlowProbe::Absent(reason) => {
                 // compose 项目本来就可以没有流程：默认静默，`-d 1` 给出细节。
                 if debug >= 1 {
                     eprintln!("skip stage flow '{flow_name}': {reason}");
                 }
                 return Ok(());
             }
-            StageProbe::GxUnavailable(reason) => {
+            FlowProbe::Unavailable(reason) => {
                 // gx 不可用 ≠ 没有流程。`prj upgrade` 的事务（strict）必须当场失败：
                 // 放过它只会在 `up` 阶段炸，且现场停在“代码已换、配置没重渲”。
                 if strict_flow {
@@ -845,52 +846,6 @@ impl SysCommandHandler {
         .await
     }
 
-    /// `gx run --exists <flow>`：退出 `0` = 存在；其余（不存在 / conf 不可加载 /
-    /// gx 缺失或过旧）一律视为不可用，并保留原因供 `-d 1` 提示。
-    ///
-    /// 捕获并丢弃输出：探测不应污染 gops 输出（例如 compose 项目没有 `_gal/work.gxl`
-    /// 时 gx 会往 stderr 打 `conf not exists`）。
-    fn gx_flow_probe(gx_path: &str, flow_name: &str, cwd: &Path) -> StageProbe {
-        // 先确认 gx 本身能跑：`--exists` 的非零退出既可能是“没有这个流程”，
-        // 也可能是“gx 根本起不来”——两者不能混为一谈。
-        if let Err(reason) = Self::gx_runs(gx_path) {
-            return StageProbe::GxUnavailable(reason);
-        }
-        match Command::new(gx_path)
-            .args(["run", "--exists", flow_name])
-            .current_dir(cwd)
-            .output()
-        {
-            Ok(out) if out.status.success() => StageProbe::Exists,
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                StageProbe::FlowAbsent(if stderr.is_empty() {
-                    format!("gx --exists 退出码 {:?}", out.status.code())
-                } else {
-                    stderr
-                })
-            }
-            // `-V` 能跑但 `--exists` 直接起不来：仍归为 gx 不可用。
-            Err(e) => StageProbe::GxUnavailable(format!("无法执行 gx: {e}")),
-        }
-    }
-
-    /// `gx -V` 能否成功（判定“gx 可执行”，不依赖具体流程）。
-    fn gx_runs(gx_path: &str) -> Result<(), String> {
-        match Command::new(gx_path).arg("-V").output() {
-            Ok(out) if out.status.success() => Ok(()),
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                Err(if stderr.is_empty() {
-                    format!("`{gx_path} -V` 退出码 {:?}", out.status.code())
-                } else {
-                    format!("`{gx_path} -V` 失败：{stderr}")
-                })
-            }
-            Err(e) => Err(format!("无法执行 {gx_path}：{e}")),
-        }
-    }
-
     pub async fn execute(cmd: SysCmd) -> MainResult<()> {
         match cmd {
             SysCmd::New(args) => Self::handle_new(args).await,
@@ -913,19 +868,6 @@ fn read_version(root: &Path) -> String {
     } else {
         version
     }
-}
-
-/// `gx run --exists` 的探测结果。
-enum StageProbe {
-    /// 存在（退出 0）。
-    Exists,
-    /// gx 可执行，但该项目没有这个流程（compose 项目的正常情况）。
-    FlowAbsent(String),
-    /// gx 根本跑不起来（缺失 / HOME 拼接错 / 版本过旧 / 无执行权限）。
-    ///
-    /// 必须与 [`StageProbe::FlowAbsent`] 分开：前者意味着「项目可能声明了流程却没跑」，
-    /// 后者只是「没有这个流程」。
-    GxUnavailable(String),
 }
 
 /// 把 `--kind` 的字符串解析为系统类型，未知值默认 Gxl。
@@ -1135,31 +1077,27 @@ mod tests {
     fn test_gx_flow_probe() {
         // `true`：`-V` 与 `--exists` 都成功 → 流程存在
         assert!(matches!(
-            SysCommandHandler::gx_flow_probe("true", "localize", std::path::Path::new(".")),
-            StageProbe::Exists
+            gx_dispatch::probe_flow("true", "localize", std::path::Path::new(".")),
+            FlowProbe::Exists
         ));
-        // 有 gx（`-V` 成功）但没有这个流程 → FlowAbsent
+        // 有 gx（`-V` 成功）但没有这个流程 → Absent
         let tmp = tempdir().unwrap();
         let gx = fake_gx(
             tmp.path(),
             "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then exit 0; fi\nexit 1\n",
         );
         assert!(matches!(
-            SysCommandHandler::gx_flow_probe(&gx, "localize", std::path::Path::new(".")),
-            StageProbe::FlowAbsent(_)
+            gx_dispatch::probe_flow(&gx, "localize", std::path::Path::new(".")),
+            FlowProbe::Absent(_)
         ));
-        // gx 本身跑不起来（`-V` 就失败）→ GxUnavailable，不能当成“没有流程”
+        // gx 本身跑不起来（`-V` 就失败）→ Unavailable，不能当成“没有流程”
         assert!(matches!(
-            SysCommandHandler::gx_flow_probe("false", "localize", std::path::Path::new(".")),
-            StageProbe::GxUnavailable(_)
+            gx_dispatch::probe_flow("false", "localize", std::path::Path::new(".")),
+            FlowProbe::Unavailable(_)
         ));
         assert!(matches!(
-            SysCommandHandler::gx_flow_probe(
-                "/nonexistent/gx-xyz",
-                "localize",
-                std::path::Path::new(".")
-            ),
-            StageProbe::GxUnavailable(_)
+            gx_dispatch::probe_flow("/nonexistent/gx-xyz", "localize", std::path::Path::new(".")),
+            FlowProbe::Unavailable(_)
         ));
     }
 

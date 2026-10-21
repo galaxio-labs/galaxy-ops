@@ -1,10 +1,11 @@
-//! `gops sec` —— 密钥文件的只读视图与“带密钥执行”。
+//! `gops sec` —— 密钥文件的只读视图、“带密钥执行”与权限修复。
 //!
 //! 设计约束（安全基线，见 `galaxy_ops::system::sec` 模块文档）：
 //! - **不提供 `env` 子命令**：把 `export ...` 打到 stdout 供 `eval` 会成为命令注入面
 //!   （值里带 `$(...)` 就会执行），而且会让密钥长期留在交互 shell 的环境里；
 //! - `get` **默认掩码**，`--show` 才输出明文；
-//! - `run` 用 `exec` + 进程环境注入，不经过 argv（`ps` 不可见），是唯一推荐入口。
+//! - `run` 用 `exec` + 进程环境注入，不经过 argv（`ps` 不可见），是唯一推荐入口；
+//! - `fix` 是唯一的写入面：只 `chmod` 到 `secrets.mode`（只收缩；不改属主），不碰内容。
 
 use clap::{Args, Parser};
 use galaxy_ops::error::{MainReason, MainResult};
@@ -229,12 +230,22 @@ impl SecCommandHandler {
             return Ok(());
         };
 
+        // `0640` 的“能读”靠属组：本工具不改属组，就把现值摆出来让人自己核对。
+        if let (0o640, Some(gid)) = (outcome.policy, outcome.gid) {
+            println!("  属组   {gid}（0640 需等于容器 gid；本工具不改属组）");
+        }
+
         if !outcome.changed {
             println!("  当前   {before:04o} —— 已符合策略，无需改动");
         } else if args.dry_run {
             println!("  当前   {before:04o} → 将改为 {after:04o}（dry-run，未改动）");
         } else {
             println!("  当前   {before:04o} → {after:04o}（已修复）");
+            // 权限修好不等同于“能用”：内容问题（非字符串值、非法键名）不在 fix 范围内，
+            // 但不应让人拿着一个“已修复”去撞下一个报错。
+            if let Err(err) = sec::load_for_system(&cwd) {
+                println!("  注意   权限已修复，但内容校验仍失败：{err}");
+            }
         }
         Ok(())
     }

@@ -558,6 +558,8 @@ pub struct FixOutcome {
     /// Unix 上修正前后的实际权限；非 Unix 为 `None`。
     pub before: Option<u32>,
     pub after: Option<u32>,
+    /// Unix 上的属组 gid（`0640` 策略需等于容器 gid）；非 Unix 为 `None`。
+    pub gid: Option<u32>,
     /// 是否改动（`--dry-run` 时表示“将会改动”）。
     pub changed: bool,
 }
@@ -583,6 +585,7 @@ pub fn fix_for_system(sys_root: &Path, dry_run: bool) -> MainResult<FixOutcome> 
                     policy: 0o600,
                     before: None,
                     after: None,
+                    gid: None,
                     changed: false,
                 });
             };
@@ -591,7 +594,8 @@ pub fn fix_for_system(sys_root: &Path, dry_run: bool) -> MainResult<FixOutcome> 
     }
 }
 
-/// 只收缩、不放宽：已无写位的文件保持只读（`0400` / `0440`），否则给策略值。
+/// 只收缩、不放宽：已无写位的文件保持只读（`0400` / `0440`），否则给策略值；
+/// 任何情况下都不给 group / other 加权限位。
 fn target_mode_for(actual: u32, policy: u32) -> u32 {
     if actual & 0o222 == 0 {
         policy & !0o222
@@ -652,6 +656,16 @@ fn fix_file_mode(
     }
 
     let before = meta.mode() & 0o777;
+    // `0000` 会被 target_mode_for “修”成 0400 —— 那是加权限，即使只给属主。
+    // 一个没有任何读位的密钥文件通常是故意的或出事了，交给人工确认，不替它作主。
+    if before & 0o444 == 0 {
+        return Err(MainReason::logic_detail(format!(
+            "密钥文件 {} 的权限是 {:04o}（没有任何读权限）：gops sec fix 不会给它加权限；\
+             请确认文件内容后用 `chmod 0400` / `0600` 显式开启",
+            path.display(),
+            before
+        )));
+    }
     let after = target_mode_for(before, policy);
     let changed = before != after;
     if changed && !dry_run {
@@ -664,6 +678,7 @@ fn fix_file_mode(
         policy,
         before: Some(before),
         after: Some(after),
+        gid: Some(meta.gid()),
         changed,
     })
 }
@@ -682,6 +697,7 @@ fn fix_file_mode(
         policy,
         before: None,
         after: None,
+        gid: None,
         changed: false,
     })
 }
@@ -1420,6 +1436,19 @@ mod tests {
 
         let err = fix_for_system(root.path(), false).unwrap_err().to_string();
         assert!(err.contains("硬链接"), "err={err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_refuses_file_without_any_read_bit() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o000);
+        sys_prj_with_secrets(root.path(), "  file: .wist/sec-value.yml\n");
+
+        let err = fix_for_system(root.path(), false).unwrap_err().to_string();
+        assert!(err.contains("没有任何读权限"), "err={err}");
+        assert_eq!(file_mode(&path), 0o000, "拒绝时不能改盘");
     }
 
     #[cfg(not(unix))]

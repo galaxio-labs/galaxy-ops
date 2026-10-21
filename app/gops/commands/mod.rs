@@ -51,14 +51,15 @@ pub enum GInsCmd {
     #[command(name = "self", subcommand, about = "自升级命令 (Self-Update Commands)")]
     SelfUpdate(SelfCmd),
 
-    /// 密钥查看 / 带密钥执行 (Secrets)
+    /// 密钥查看 / 校验修复 / 带密钥执行 (Secrets)
     #[command(
         name = "sec",
         subcommand,
-        about = "密钥查看 / 带密钥执行 (Secrets)",
-        long_about = "密钥文件的只读视图与“带密钥执行”。\n\
+        about = "密钥查看 / 校验修复 / 带密钥执行 (Secrets)",
+        long_about = "密钥文件的只读视图、“带密钥执行”与权限修复。\n\
                      路径由 `sys-prj.yml: secrets.file` 声明（未声明时回退 `.galaxy/sec_value.yml`），\n\
-                     加载前会做路径限定、权限与值类型校验。"
+                     加载前会做路径限定、权限与值类型校验；\n\
+                     `gops sec fix` 只按 `secrets.mode` 收敛文件权限（不改属主）。"
     )]
     Sec(SecCmd),
 }

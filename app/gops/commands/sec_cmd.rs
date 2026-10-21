@@ -62,6 +62,15 @@ pub struct SecRunArgs {
     pub cmd: Vec<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct SecFixArgs {
+    #[clap(flatten)]
+    pub debug_log: DebugLogArgs,
+
+    #[arg(long, help = "只报告将要做什么，不改权限")]
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Parser)]
 pub enum SecCmd {
     /// 列出密钥键名与长度（List Secret Keys）
@@ -91,6 +100,18 @@ pub enum SecCmd {
                      Usage: gops sec run [--raw] -- <cmd...>"
     )]
     Run(SecRunArgs),
+
+    /// 把密钥文件权限修正到 secrets.mode（Fix Secret File Permissions）
+    #[command(
+        about = "把密钥文件权限修正到 secrets.mode（Fix Secret File Permissions）",
+        long_about = "按 `sys-prj.yml: secrets.mode`（缺省 `0600`；与容器共享时 `0640`）把密钥文件的\n\
+                     权限收敛到策略值：**只收缩、不放宽**（原本只读的保持只读），\n\
+                     只改 mode、不改属主，也不解链接 / 硬链接（遇到即报错）。\n\
+                     路径解析与 `gops sec list` 完全一致（`secrets.file` → 回退 `.galaxy/sec_value.yml`）。\n\
+                     幂等：已符合策略时不写盘。\n\
+                     Usage: gops sec fix [--dry-run]"
+    )]
+    Fix(SecFixArgs),
 }
 
 pub struct SecCommandHandler;
@@ -101,6 +122,7 @@ impl SecCommandHandler {
             SecCmd::List(args) => Self::handle_list(args),
             SecCmd::Get(args) => Self::handle_get(args),
             SecCmd::Run(args) => Self::handle_run(args),
+            SecCmd::Fix(args) => Self::handle_fix(args),
         }
     }
 
@@ -167,6 +189,52 @@ impl SecCommandHandler {
             println!("{value}");
         } else {
             println!("{SECRET_MASK}");
+        }
+        Ok(())
+    }
+
+    fn handle_fix(args: SecFixArgs) -> MainResult<()> {
+        galaxy_ops::infra::configure_dfx_logging(&args);
+        let cwd = std::env::current_dir().map_err(|err| {
+            MainReason::logic_detail(format!("无法获取当前目录（回到系统根再试）：{err}"))
+        })?;
+        let outcome = sec::fix_for_system(&cwd, args.dry_run)?;
+
+        if !outcome.found {
+            println!(
+                "未找到密钥文件（{}）：未声明 secrets.file，.galaxy 下也没有 —— 无需修复",
+                outcome.path.display()
+            );
+            return Ok(());
+        }
+
+        let policy_note = if outcome.policy == 0o640 {
+            "属组可读（容器 gid 共享）"
+        } else {
+            "只属主可读"
+        };
+        println!(
+            "密钥文件 {}（{}）",
+            outcome.path.display(),
+            if outcome.declared {
+                "sys-prj.yml 声明"
+            } else {
+                ".galaxy 回退"
+            }
+        );
+        println!("  策略   {:04o}（{policy_note}）", outcome.policy);
+
+        let (Some(before), Some(after)) = (outcome.before, outcome.after) else {
+            println!("  当前   非 Unix 平台：权限修正跳过");
+            return Ok(());
+        };
+
+        if !outcome.changed {
+            println!("  当前   {before:04o} —— 已符合策略，无需改动");
+        } else if args.dry_run {
+            println!("  当前   {before:04o} → 将改为 {after:04o}（dry-run，未改动）");
+        } else {
+            println!("  当前   {before:04o} → {after:04o}（已修复）");
         }
         Ok(())
     }
@@ -246,6 +314,15 @@ impl DfxArgsGetter for SecRunArgs {
     }
 }
 
+impl DfxArgsGetter for SecFixArgs {
+    fn debug_level(&self) -> usize {
+        self.debug_log.debug_level()
+    }
+    fn log_setting(&self) -> Option<String> {
+        self.debug_log.log_setting()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +341,18 @@ mod tests {
         assert!(matches!(
             SecCmd::try_parse_from(["sec", "get", "k", "--show"]).unwrap(),
             SecCmd::Get(a) if a.show
+        ));
+    }
+
+    #[test]
+    fn parses_fix_with_dry_run() {
+        assert!(matches!(
+            SecCmd::try_parse_from(["sec", "fix"]).unwrap(),
+            SecCmd::Fix(a) if !a.dry_run
+        ));
+        assert!(matches!(
+            SecCmd::try_parse_from(["sec", "fix", "--dry-run"]).unwrap(),
+            SecCmd::Fix(a) if a.dry_run
         ));
     }
 

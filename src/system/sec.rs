@@ -14,6 +14,9 @@
 //! 4. **只接受标量字符串**：YAML 会把 `123456` 解析成数字、`0123` 丢前导零、`1e5` 变浮点，
 //!    嵌套结构会变成字面量 `obj...`——都拒绝，要求文件里加引号；
 //! 5. **不泄露明文**：错误与 `Debug` 输出都不带值；解析错误只保留位置信息。
+//!
+//! `fix_for_system`（`gops sec fix`）是本模块**唯一会改盘**的入口：只 `chmod` 到
+//! `secrets.mode` 策略值（只收缩、不放宽），**不改属主、不解链接**。
 use super::prelude::*;
 use crate::error::MainReason;
 use crate::system::conf::{ExposeConf, ExposeRule, SecFileFormat, SecretsConf, Subscriber};
@@ -191,6 +194,14 @@ pub fn load_for_system(sys_root: &Path) -> MainResult<SecFile> {
 
 /// 按显式声明加载（路径校验 + 权限校验 + 类型校验）。
 pub fn load_declared(sys_root: &Path, conf: &SecretsConf) -> MainResult<SecFile> {
+    let path = declared_file_path(sys_root, conf)?;
+    let mode = conf.file_mode().map_err(MainReason::logic_detail)?;
+    load_checked_ex(&path, conf.format(), conf.expose().cloned(), mode)
+}
+
+/// 声明路径解析 + “声明了就必须存在”（`load_declared` 与 `fix_for_system` 共用，
+/// 保证“报错说的文件”与“修的文件”永远一致）。
+fn declared_file_path(sys_root: &Path, conf: &SecretsConf) -> MainResult<PathBuf> {
     let path = resolve_declared_path(sys_root, conf.file())?;
     if !path.exists() {
         return Err(MainReason::logic_detail(format!(
@@ -200,8 +211,7 @@ pub fn load_declared(sys_root: &Path, conf: &SecretsConf) -> MainResult<SecFile>
             path.display()
         )));
     }
-    let mode = conf.file_mode().map_err(MainReason::logic_detail)?;
-    load_checked_ex(&path, conf.format(), conf.expose().cloned(), mode)
+    Ok(path)
 }
 
 /// 路径校验：相对、无 `.`/`..`、无符号链接、结果仍在系统根内。
@@ -290,7 +300,8 @@ fn check_file_security(path: &Path, mode: u32) -> MainResult<()> {
         };
         return Err(MainReason::logic_detail(format!(
             "密钥文件 {} 权限是 {:o}，与 secrets.mode 不符：需要 {expected}（{why}）；\n\
-             共享给容器请用 `secrets.mode: \"0640\"` + 属组 = 容器 gid，不要放宽到 other",
+             共享给容器请用 `secrets.mode: \"0640\"` + 属组 = 容器 gid，不要放宽到 other\n\
+             修复：gops sec fix（先 `--dry-run` 看计划）",
             path.display(),
             actual
         )));
@@ -509,6 +520,17 @@ fn declared_conf(sys_root: &Path) -> MainResult<Option<SecretsConf>> {
 /// 以系统根为准才不会读到“执行者当前目录”的密钥。
 /// 只有“完全没声明”才走到这里；一旦声明，缺文件是硬失败。
 fn load_galaxy_fallback(sys_root: &Path) -> MainResult<SecFile> {
+    let candidates = galaxy_fallback_candidates(sys_root);
+    let Some(path) = candidates.iter().find(|p| p.exists()).cloned() else {
+        return Ok(SecFile::empty(
+            candidates.into_iter().next().unwrap_or_default(),
+        ));
+    };
+    load_checked(&path, SecFileFormat::Yaml)
+}
+
+/// `.galaxy` 回退的文件候选（按优先级）。
+fn galaxy_fallback_candidates(sys_root: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![sys_root.join(".galaxy").join("sec_value.yml")];
     if let Ok(cwd) = std::env::current_dir() {
         let local = cwd.join(".galaxy").join("sec_value.yml");
@@ -519,13 +541,149 @@ fn load_galaxy_fallback(sys_root: &Path) -> MainResult<SecFile> {
     if let Some(home) = home::home_dir() {
         candidates.push(home.join(".galaxy").join("sec_value.yml"));
     }
+    candidates
+}
 
-    let Some(path) = candidates.iter().find(|p| p.exists()).cloned() else {
-        return Ok(SecFile::empty(
-            candidates.into_iter().next().unwrap_or_default(),
-        ));
-    };
-    load_checked(&path, SecFileFormat::Yaml)
+/// `gops sec fix` 的结果（**不含任何密钥值**）。
+#[derive(Debug, Clone)]
+pub struct FixOutcome {
+    /// 被检查的密钥文件；`found == false` 时它只是“候选路径”，并不存在。
+    pub path: PathBuf,
+    /// 文件是否存在；`false` = 未声明且 `.galaxy` 也没有，属于正常状态。
+    pub found: bool,
+    /// 是否由 `sys-prj.yml: secrets.file` 声明（`false` = `.galaxy` 回退）。
+    pub declared: bool,
+    /// 声明策略：`0o600` / `0o640`。
+    pub policy: u32,
+    /// Unix 上修正前后的实际权限；非 Unix 为 `None`。
+    pub before: Option<u32>,
+    pub after: Option<u32>,
+    /// 是否改动（`--dry-run` 时表示“将会改动”）。
+    pub changed: bool,
+}
+
+/// 把密钥文件权限收敛到 `secrets.mode` 策略（`gops sec fix`）。
+///
+/// 路径解析与 `load_for_system` **完全一致**（声明优先，否则 `.galaxy` 回退），
+/// 这样“报错说的文件”和“修的文件”永远是同一个。
+pub fn fix_for_system(sys_root: &Path, dry_run: bool) -> MainResult<FixOutcome> {
+    match declared_conf(sys_root)? {
+        Some(conf) => {
+            let path = declared_file_path(sys_root, &conf)?;
+            let policy = conf.file_mode().map_err(MainReason::logic_detail)?;
+            fix_file_mode(&path, policy, true, dry_run)
+        }
+        None => {
+            let candidates = galaxy_fallback_candidates(sys_root);
+            let Some(path) = candidates.iter().find(|p| p.exists()).cloned() else {
+                return Ok(FixOutcome {
+                    path: candidates.into_iter().next().unwrap_or_default(),
+                    found: false,
+                    declared: false,
+                    policy: 0o600,
+                    before: None,
+                    after: None,
+                    changed: false,
+                });
+            };
+            fix_file_mode(&path, 0o600, false, dry_run)
+        }
+    }
+}
+
+/// 只收缩、不放宽：已无写位的文件保持只读（`0400` / `0440`），否则给策略值。
+fn target_mode_for(actual: u32, policy: u32) -> u32 {
+    if actual & 0o222 == 0 {
+        policy & !0o222
+    } else {
+        policy
+    }
+}
+
+#[cfg(unix)]
+fn fix_file_mode(
+    path: &Path,
+    policy: u32,
+    declared: bool,
+    dry_run: bool,
+) -> MainResult<FixOutcome> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !matches!(policy, 0o600 | 0o640) {
+        return Err(MainReason::logic_detail(format!(
+            "secrets.mode 只支持 0600 / 0640（收到 {:o}）",
+            policy
+        )));
+    }
+
+    // 不跟随符号链接：`chmod` 会改到链接目标，而参数校验又要求“路径上没有链接”。
+    let meta = fs::symlink_metadata(path).source_resource()?;
+    if meta.file_type().is_symlink() {
+        return Err(MainReason::logic_detail(format!(
+            "密钥文件 {} 是符号链接：gops sec fix 只处理普通文件；\
+             请先 `cp` 成普通文件再删掉链接",
+            path.display()
+        )));
+    }
+    if !meta.file_type().is_file() {
+        return Err(MainReason::logic_detail(format!(
+            "密钥文件必须是普通文件：{}",
+            path.display()
+        )));
+    }
+    if meta.nlink() > 1 {
+        return Err(MainReason::logic_detail(format!(
+            "密钥文件 {} 有 {} 个硬链接：先收敛成单链接（保留一个）再用 gops sec fix",
+            path.display(),
+            meta.nlink()
+        )));
+    }
+
+    // `chmod` 需要属主身份（或 root）；这里提前说清楚，别让现场只看到 EPERM。
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 && meta.uid() != euid {
+        return Err(MainReason::logic_detail(format!(
+            "密钥文件 {} 属主 uid={} 与当前进程 euid={} 不一致，无法修改权限；\
+             请用持有该文件的部署账号执行，或以 root 执行",
+            path.display(),
+            meta.uid(),
+            euid
+        )));
+    }
+
+    let before = meta.mode() & 0o777;
+    let after = target_mode_for(before, policy);
+    let changed = before != after;
+    if changed && !dry_run {
+        fs::set_permissions(path, fs::Permissions::from_mode(after)).source_resource()?;
+    }
+    Ok(FixOutcome {
+        path: path.to_path_buf(),
+        found: true,
+        declared,
+        policy,
+        before: Some(before),
+        after: Some(after),
+        changed,
+    })
+}
+
+#[cfg(not(unix))]
+fn fix_file_mode(
+    path: &Path,
+    policy: u32,
+    declared: bool,
+    _dry_run: bool,
+) -> MainResult<FixOutcome> {
+    Ok(FixOutcome {
+        path: path.to_path_buf(),
+        found: true,
+        declared,
+        policy,
+        before: None,
+        after: None,
+        changed: false,
+    })
 }
 
 #[cfg(test)]
@@ -1139,5 +1297,141 @@ mod tests {
         let conf = SecretsConf::new(".wist/sec-value.yml");
         let err = resolve_declared_path(root.path(), conf.file()).unwrap_err();
         assert!(err.to_string().contains("符号链接"), "err={err}");
+    }
+
+    // ============ gops sec fix ============
+
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn sys_prj_with_secrets(root: &Path, body: &str) {
+        fs::write(root.join("sys-prj.yml"), format!("secrets:\n{body}")).unwrap();
+    }
+
+    #[test]
+    fn target_mode_only_narrows() {
+        assert_eq!(target_mode_for(0o644, 0o600), 0o600);
+        assert_eq!(target_mode_for(0o777, 0o600), 0o600);
+        // 原本没有写位 → 保持只读，不为了“对齐策略”而加写位
+        assert_eq!(target_mode_for(0o400, 0o600), 0o400);
+        assert_eq!(target_mode_for(0o444, 0o600), 0o400);
+        assert_eq!(target_mode_for(0o644, 0o640), 0o640);
+        assert_eq!(target_mode_for(0o440, 0o640), 0o440);
+        assert_eq!(target_mode_for(0o600, 0o600), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_narrows_declared_file_to_0600_and_is_idempotent() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o644);
+        sys_prj_with_secrets(root.path(), "  file: .wist/sec-value.yml\n");
+
+        let outcome = fix_for_system(root.path(), false).unwrap();
+        assert!(outcome.found && outcome.declared && outcome.changed);
+        assert_eq!(outcome.policy, 0o600);
+        assert_eq!(outcome.before, Some(0o644));
+        assert_eq!(outcome.after, Some(0o600));
+        assert_eq!(file_mode(&path), 0o600);
+        // 修完即可通过加载校验
+        assert!(load_for_system(root.path()).is_ok());
+
+        let again = fix_for_system(root.path(), false).unwrap();
+        assert!(!again.changed, "幂等：第二次不应再改");
+        assert_eq!(file_mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_keeps_read_only_file_read_only() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o400);
+        sys_prj_with_secrets(root.path(), "  file: .wist/sec-value.yml\n");
+
+        let outcome = fix_for_system(root.path(), false).unwrap();
+        assert!(!outcome.changed);
+        assert_eq!(outcome.after, Some(0o400));
+        assert_eq!(file_mode(&path), 0o400);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_uses_declared_0640_policy() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o644);
+        sys_prj_with_secrets(
+            root.path(),
+            "  file: .wist/sec-value.yml\n  mode: \"0640\"\n",
+        );
+
+        let outcome = fix_for_system(root.path(), false).unwrap();
+        assert!(outcome.changed);
+        assert_eq!(outcome.policy, 0o640);
+        assert_eq!(outcome.after, Some(0o640));
+        assert_eq!(file_mode(&path), 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_dry_run_reports_without_touching() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o644);
+        sys_prj_with_secrets(root.path(), "  file: .wist/sec-value.yml\n");
+
+        let outcome = fix_for_system(root.path(), true).unwrap();
+        assert!(outcome.changed, "dry-run 仍要算出“将会改动”");
+        assert_eq!(outcome.after, Some(0o600));
+        assert_eq!(file_mode(&path), 0o644, "dry-run 不能改盘");
+    }
+
+    /// `.galaxy` 回退路径上的符号链接：`chmod` 会改到链接目标，必须先拒绝。
+    #[cfg(unix)]
+    #[test]
+    fn fix_refuses_symlinked_fallback_file() {
+        let root = temp_root();
+        let real = write_secret(root.path(), "real.yml", "k: \"v\"\n");
+        fs::create_dir_all(root.path().join(".galaxy")).unwrap();
+        std::os::unix::fs::symlink(&real, root.path().join(".galaxy/sec_value.yml")).unwrap();
+
+        let err = fix_for_system(root.path(), false).unwrap_err().to_string();
+        assert!(err.contains("符号链接"), "err={err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_refuses_hardlinked_file() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        fs::hard_link(&path, root.path().join(".wist/alias.yml")).unwrap();
+        sys_prj_with_secrets(root.path(), "  file: .wist/sec-value.yml\n");
+
+        let err = fix_for_system(root.path(), false).unwrap_err().to_string();
+        assert!(err.contains("硬链接"), "err={err}");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn fix_is_noop_on_non_unix() {
+        let root = temp_root();
+        write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        sys_prj_with_secrets(root.path(), "  file: .wist/sec-value.yml\n");
+
+        let outcome = fix_for_system(root.path(), false).unwrap();
+        assert!(outcome.found);
+        assert!(!outcome.changed);
+        assert_eq!(outcome.before, None);
     }
 }

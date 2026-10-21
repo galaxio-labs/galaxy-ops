@@ -5,6 +5,30 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.0-alpha] - 2026-10-21
+
+### 新增
+
+- **`gops run diagnose`：运行时体检**（原来是 `docker compose config`，现在拆开）：
+  采集容器状态/健康/重启/OOM、挂载源、端口冲突、私钥权限、日志错误线索，再调用系统自己的
+  `diagnose` 流程（`sys/workflows/operators.gxl`）拿业务结论；人读 `[OK]/[WARN]/[FAIL]`（TTY 着色）
+  或 `--json`；退出码 `0`（无 FAIL）/ `1`（有 FAIL）/ `2`（诊断自身跑不起来）。
+- **`gops run config`**：打印渲染后的 compose 模型（原 `run diagnose` 的行为，密钥掩码）。
+- **体检契约**（`GOPS_DIAGNOSE_CONTEXT` / `GOPS_DIAGNOSE_RESULT`）：上下文与结果两份 JSON，
+  系统流程按 `_gal` 约定实现即可接入（见 `docs/design/run-diagnose.md`）。
+
+### 改进
+
+- 体检日志检查**脱敏**（`password/token/bearer` 等值换成 `***`）、**去噪**（否定式/统计行不计，
+  `--log-ignore <子串>` 可重复屏蔽）、**折叠**（同一条错误 `×N`）。
+- `gx run --exists` 的三态探测（存在 / 没这个流程 / gx 不可用）收敛到一处，
+  `sys localize` 与 `run diagnose` 共用——避免「gx 不可用」被静默当成「没有流程」。
+- `gops run diagnose` 对一次性任务（`restart: no` + exit 0）不再误报故障。
+
+### 注意
+
+- `gops run diagnose` 现在**不再**打印 `docker compose config`；脚本如需旧行为请改用 `gops run config`。
+
 ## [2.9.6-alpha] - 2026-10-21
 
 ### 新增

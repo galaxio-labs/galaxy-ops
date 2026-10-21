@@ -61,6 +61,13 @@ pub struct ModDiffArgs {
 
     #[arg(long, help = "以 JSON 输出（便于脚本消费）")]
     pub json: bool,
+
+    #[arg(
+        long,
+        short = 'a',
+        help = "显示全部键（含未变更 same）；默认只列 changed / added / removed"
+    )]
+    pub all: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -97,12 +104,13 @@ pub enum ModCmd {
     )]
     Localize(ModLocalizeArgs),
 
-    /// 展示模块值变更 (Show Module Value Diff)
+    /// 展示模块值变更 / 值总览 (Show Module Value Diff)
     #[command(
-        about = "展示模块值变更 (Show Module Value Diff)",
+        about = "展示模块值变更 / 值总览 (Show Module Value Diff)",
         long_about = "只读展示：比对模块默认值与客户覆盖后的生效值，按模型列出每个键的初始值、生效值、来源与可变性。\n\
-                     用于回答“哪些值被覆盖、被哪一层覆盖”。`--json` 输出机器可读结果。\n\
-                     Usage: gops mod diff [--json]"
+                     默认只列变更项（changed / added / removed）；`--all` 列出全部键（含 same，\n\
+                     标题改为「值总览」并带上变更数）。`--json` 输出机器可读结果（同样受 `--all` 影响）。\n\
+                     Usage: gops mod diff [--json] [--all]"
     )]
     Diff(ModDiffArgs),
 }
@@ -208,8 +216,8 @@ impl ModCommandHandler {
             )
             .await
             .err_conv()?;
-        let changes = mod_value_changes(&operator, &val_path)?;
-        print_mod_changes(&changes, false);
+        let changes = mod_value_changes(&operator, &val_path, false)?;
+        print_mod_changes(&changes, false, false);
         Ok(())
     }
 
@@ -219,8 +227,8 @@ impl ModCommandHandler {
 
         let operator = ModOperator::load(&current_dir).err_conv()?;
         let val_path = ModValuePaths::from(current_dir).join(VALUE_DIR);
-        let changes = mod_value_changes(&operator, &val_path)?;
-        print_mod_changes(&changes, args.json);
+        let changes = mod_value_changes(&operator, &val_path, args.all)?;
+        print_mod_changes(&changes, args.json, args.all);
         Ok(())
     }
 
@@ -242,6 +250,7 @@ impl ModCommandHandler {
 fn mod_value_changes(
     operator: &ModOperator,
     val_path: &ModValuePaths,
+    include_same: bool,
 ) -> MainResult<Vec<(String, Vec<report::ValueRow>)>> {
     let mut out = Vec::new();
     for (model, mm) in operator.mod_spec().targets() {
@@ -257,31 +266,33 @@ fn mod_value_changes(
 
         let rows = report::diff_layers(&initial, &effective)
             .into_iter()
-            .filter(|r| r.state() != report::ValueState::Same)
+            .filter(|r| include_same || r.state() != report::ValueState::Same)
             .collect();
         out.push((model.to_string(), rows));
     }
     Ok(out)
 }
 
-/// 统一的变更呈现：`json` 为真输出分组 JSON；否则逐模型打印变更表，均无变更时打 `[OK]`。
-fn print_mod_changes(changes: &[(String, Vec<report::ValueRow>)], json: bool) {
+/// 统一的变更呈现：`json` 为真输出分组 JSON；否则逐模型打印。`all` 控制是否包含 `same` 行。
+fn print_mod_changes(changes: &[(String, Vec<report::ValueRow>)], json: bool, all: bool) {
     if json {
         println!("{}", report::render_json_models(changes));
         return;
     }
     let color = report::use_color();
-    let mut any = false;
+    if report::groups_all_empty(changes.iter().map(|(_, rows)| rows.as_slice())) {
+        println!("[OK] 值无覆盖（全部取模块默认值）");
+        return;
+    }
     for (model, rows) in changes {
         if rows.is_empty() {
             continue;
         }
-        any = true;
-        println!("[{model}] 值变更 ({} 项):", rows.len());
+        println!(
+            "{}",
+            report::value_section_title(&format!("[{model}]"), rows, all)
+        );
         print!("{}", report::render_table(rows, color));
-    }
-    if !any {
-        println!("[OK] 值无覆盖（全部取模块默认值）");
     }
 }
 
@@ -307,7 +318,7 @@ mod tests {
         let val_path = ModValuePaths::from(mod_dir.clone()).join(VALUE_DIR);
 
         // 无覆盖：所有模型值都取默认值，不应有变更行
-        let changes = mod_value_changes(&operator, &val_path).unwrap();
+        let changes = mod_value_changes(&operator, &val_path, false).unwrap();
         assert!(
             changes.iter().all(|(_, rows)| rows.is_empty()),
             "no override expected: {changes:?}"
@@ -326,7 +337,7 @@ mod tests {
         std::fs::create_dir_all(model_path.mod_value_file().parent().unwrap()).unwrap();
         std::fs::write(model_path.mod_value_file(), format!("{var}: 7777\n")).unwrap();
 
-        let changes = mod_value_changes(&operator, &val_path).unwrap();
+        let changes = mod_value_changes(&operator, &val_path, false).unwrap();
         let (_, rows) = changes
             .iter()
             .find(|(m, _)| m == &model_key.to_string())
@@ -338,6 +349,33 @@ mod tests {
         assert_eq!(row.state(), report::ValueState::Changed);
         assert_eq!(row.effective(), Some("7777"));
         assert_eq!(row.origin(), Some("mod-setting"));
+
+        // `--all`：同一份层比对保留 same 行（上面断言过默认模式下它们被过滤）
+        let all_changes = mod_value_changes(&operator, &val_path, true).unwrap();
+        let (_, all_rows) = all_changes
+            .iter()
+            .find(|(m, _)| m == &model_key.to_string())
+            .expect("model group");
+        assert!(all_rows.len() > rows.len(), "--all 应包含 same 行");
+        assert!(
+            all_rows
+                .iter()
+                .any(|r| r.state() == report::ValueState::Same)
+        );
+    }
+
+    #[test]
+    fn test_mod_diff_all_flag_parses() {
+        match ModCmd::try_parse_from(["mod", "diff"]).unwrap() {
+            ModCmd::Diff(a) => assert!(!a.all, "缺省只看变更"),
+            _ => panic!("expected diff"),
+        }
+        for argv in [["mod", "diff", "--all"], ["mod", "diff", "-a"]] {
+            match ModCmd::try_parse_from(argv).unwrap() {
+                ModCmd::Diff(a) => assert!(a.all),
+                _ => panic!("expected diff"),
+            }
+        }
     }
 
     #[ignore = "reason"]

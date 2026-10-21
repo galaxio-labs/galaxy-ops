@@ -5,6 +5,28 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.9.6-alpha] - 2026-10-21
+
+### 新增
+
+- **`gops sys diff --all`（`-a`）**：默认仍只列变更项（`changed` / `added` / `removed`），
+  `--all` 列出**全部键**（含 `same`）。
+  - 标题随模式变化：`[sys] 值变更 (14 项)` / `[sys] 值总览 (39 项，其中 14 项变更)`，
+    不让人把未变更行误读成“都改了”；
+  - **各模块小节同样生效**（否则“全部”是假的）；`--json` 也受 `--all` 影响
+    （`state` 字段本就完整，只差是否过滤）；
+  - `localize` 结尾的变更汇总**不变**（仍只列变更），两处共享的 `value_rows()` 加了一个
+    `include_same` 参数而非另开一条筛选路径。
+- **`gops mod diff --all`（`-a`）同步支持**：与 `sys diff` 行为一致（默认只列变更）。
+  两边共用 `report::value_section_title()` / `report::groups_all_empty()`，文案与
+  “是否打 `[OK]`”的判定不会分叉。
+
+### 测试
+
+- 既有 sys/mod diff 用例补 `--all` 断言（`same` 行参与、总数/变更数、标题文案）；
+  新增标题文案与空集判定单测（2 例）、`sys`/`mod` 的 `-a` 解析各 1 例；
+  全量 `588+102+6+1+4` passed。
+
 ## [2.9.5-alpha] - 2026-10-21
 
 ### 新增

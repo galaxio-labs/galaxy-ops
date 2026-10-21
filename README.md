@@ -137,7 +137,7 @@ gops <COMMAND>
 ```bash
 gops mod new --name nginx        # 创建模块
 gops mod localize                # 本地化模块配置
-gops mod diff                    # 查看值变更（哪些值被覆盖、被哪一层覆盖）
+gops mod diff                    # 查看值变更（哪些值被覆盖、被哪一层覆盖；--all 看全部键）
 ```
 
 ### `gops sys` — 系统（定义 / 交付）
@@ -145,7 +145,7 @@ gops mod diff                    # 查看值变更（哪些值被覆盖、被哪
 ```bash
 gops sys new --name web-stack    # 创建系统
 gops sys resolve                 # 解析系统定义（取模块 / 解析变量 → merged_vars.yml）
-gops sys diff                    # 查看值变更（初始值 / 生效值 / 来源 / 可变性；--json 机器可读）
+gops sys diff                    # 查看值变更（初始值 / 生效值 / 来源 / 可变性；--all 全部键；--json 机器可读）
 gops sys perms                   # 宿主 bind 挂载权限自检（--apply 幂等修复，--json 机器可读）
 gops sys package                 # 打包为 .tar.gz（在系统目录内执行）
 ```

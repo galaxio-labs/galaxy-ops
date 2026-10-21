@@ -124,6 +124,13 @@ pub struct SysDiffArgs {
 
     #[arg(long, help = "以 JSON 输出（便于脚本消费）")]
     pub json: bool,
+
+    #[arg(
+        long,
+        short = 'a',
+        help = "显示全部键（含未变更 same）；默认只列 changed / added / removed"
+    )]
+    pub all: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -186,12 +193,14 @@ pub enum SysCmd {
     )]
     Localize(SysLocalizeArgs),
 
-    /// 展示系统值变更 (Show System Value Diff)
+    /// 展示系统值变更 / 值总览 (Show System Value Diff)
     #[command(
-        about = "展示系统值变更 (Show System Value Diff)",
+        about = "展示系统值变更 / 值总览 (Show System Value Diff)",
         long_about = "只读展示：比对系统默认值与客户覆盖后的生效值，列出每个键的初始值、生效值、来源与可变性。\n\
-                     用于回答“哪些值被覆盖、被哪一层覆盖”。`--json` 输出机器可读结果。\n\
-                     Usage: gops sys diff [--json]"
+                     默认只列变更项（changed / added / removed）；`--all` 列出系统层与各模块小节的全部键\n\
+                     （含 same，标题改为「值总览」并带上变更数）。文件覆盖节始终只列差异（新增 / 替换）。\n\
+                     `--json` 输出机器可读结果（同样受 `--all` 影响）。\n\
+                     Usage: gops sys diff [--json] [--all]"
     )]
     Diff(SysDiffArgs),
 
@@ -436,9 +445,9 @@ impl SysCommandHandler {
         // 合并顺序与“初始层 / 生效层”的划分集中在此，供 diff 与 localize 共用。
         let (initial, dict) = Self::sys_value_layers(&spec, &val_path)?;
         // 系统层 + 各模块层（`sys/mod_list.yml`）：localize 会逐模块消费 `values/<mod>/`
-        let sys_rows = Self::value_rows(&initial, &dict);
+        let sys_rows = Self::value_rows(&initial, &dict, false);
         let modules = Self::sys_modules(&spec);
-        let mut module_rows = Self::module_value_changes(&modules, &val_path, &dict)?;
+        let mut module_rows = Self::module_value_changes(&modules, &val_path, &dict, false)?;
         if let Some(only) = &args.module {
             module_rows.retain(|(name, _)| name == only);
         }
@@ -555,36 +564,45 @@ impl SysCommandHandler {
         modules: &[(String, Vec<report::ValueRow>)],
         json: bool,
     ) {
-        Self::print_sys_diff(sys_rows, modules, &[], json);
+        Self::print_sys_diff(sys_rows, modules, &[], json, false);
     }
 
-    /// 打印值变更（系统层 + 各模块）+ 文件覆盖。
+    /// 打印值行（系统层 + 各模块）+ 文件覆盖。
+    ///
+    /// `all` 为真时表内保留 `same` 行（标题改为“值总览”）；`false` 时只打印差异。
     fn print_sys_diff(
         sys_rows: &[report::ValueRow],
         modules: &[(String, Vec<report::ValueRow>)],
         files: &[(String, Vec<report::FileRow>)],
         json: bool,
+        all: bool,
     ) {
         if json {
             println!("{}", report::render_sys_diff_json(sys_rows, modules, files));
             return;
         }
         let color = report::use_color();
-        let has_module = modules.iter().any(|(_, rows)| !rows.is_empty());
         let has_file = files.iter().any(|(_, rows)| !rows.is_empty());
-        if sys_rows.is_empty() && !has_module && !has_file {
+        // `--all` 时 `same` 行也算有行可展示，零变更系统不会落进 `[OK]` 分支。
+        let no_value_rows = report::groups_all_empty(
+            std::iter::once(sys_rows).chain(modules.iter().map(|(_, rows)| rows.as_slice())),
+        );
+        if no_value_rows && !has_file {
             println!("[OK] 值无覆盖（全部取系统默认值）");
             return;
         }
         if !sys_rows.is_empty() {
-            println!("[sys] 值变更 ({} 项):", sys_rows.len());
+            println!("{}", report::value_section_title("[sys]", sys_rows, all));
             print!("{}", report::render_table(sys_rows, color));
         }
         for (name, rows) in modules {
             if rows.is_empty() {
                 continue;
             }
-            println!("[mod: {name}] 值变更 ({} 项):", rows.len());
+            println!(
+                "{}",
+                report::value_section_title(&format!("[mod: {name}]"), rows, all)
+            );
             print!("{}", report::render_table(rows, color));
         }
         for (target, rows) in files {
@@ -592,11 +610,18 @@ impl SysCommandHandler {
         }
     }
 
-    /// 取「非未变更」的值行（供 diff / localize 复用）。
-    fn value_rows(initial: &OriginDict, effective: &OriginDict) -> Vec<report::ValueRow> {
+    /// 取参与呈现的值行（供 diff / localize 复用）。
+    ///
+    /// `include_same = false`（localize、默认 diff）只留 changed / added / removed；
+    /// `true`（`--all`）连 `same` 一并返回。
+    fn value_rows(
+        initial: &OriginDict,
+        effective: &OriginDict,
+        include_same: bool,
+    ) -> Vec<report::ValueRow> {
         report::diff_layers(initial, effective)
             .into_iter()
-            .filter(|r| r.state() != report::ValueState::Same)
+            .filter(|r| include_same || r.state() != report::ValueState::Same)
             .collect()
     }
 
@@ -638,13 +663,17 @@ impl SysCommandHandler {
         modules: &[SysModuleView],
         val_path: &SysValuePaths,
         sys_dict: &OriginDict,
+        include_same: bool,
     ) -> MainResult<Vec<(String, Vec<report::ValueRow>)>> {
         let mut out = Vec::new();
         for m in modules {
             let mod_root = val_path.root().join(&m.name);
             let (initial, effective) =
                 galaxy_ops::project::mod_value_layers(m.mm.vars(), &mod_root, sys_dict.clone())?;
-            out.push((m.name.clone(), Self::value_rows(&initial, &effective)));
+            out.push((
+                m.name.clone(),
+                Self::value_rows(&initial, &effective, include_same),
+            ));
         }
         Ok(out)
     }
@@ -711,16 +740,16 @@ impl SysCommandHandler {
         let spec = SysOperator::load(&current_dir).err_conv()?;
         let val_path = resolve_sys_value_path(&current_dir);
         let (initial, effective) = Self::sys_value_layers(&spec, &val_path)?;
-        let sys_rows = Self::value_rows(&initial, &effective);
+        let sys_rows = Self::value_rows(&initial, &effective, args.all);
         let modules = Self::sys_modules(&spec);
-        let module_rows = Self::module_value_changes(&modules, &val_path, &effective)?;
+        let module_rows = Self::module_value_changes(&modules, &val_path, &effective, args.all)?;
         // 文件覆盖的路径模板需展开（`${GXL_PRJ_ROOT}` 等）
         let evaled = effective
             .clone()
             .env_eval(&EnvDict::default())
             .export_dict();
         let file_rows = Self::sys_file_overrides(&modules, &spec, &evaled);
-        Self::print_sys_diff(&sys_rows, &module_rows, &file_rows, args.json);
+        Self::print_sys_diff(&sys_rows, &module_rows, &file_rows, args.json, args.all);
         Ok(())
     }
 
@@ -1577,6 +1606,27 @@ exit 0
         // 未被覆盖的默认值不出现
         assert!(!rows.iter().any(|r| r.key() == "REPLICAS"));
 
+        // `--all`：同一份层比对保留 same 行；默认模式不含
+        let all_rows = SysCommandHandler::value_rows(&initial, &effective, true);
+        assert!(all_rows.len() > rows.len());
+        assert!(
+            all_rows
+                .iter()
+                .any(|r| r.key() == "REPLICAS" && r.state() == report::ValueState::Same)
+        );
+        assert_eq!(
+            report::value_section_title("[sys]", &all_rows, true),
+            format!(
+                "[sys] 值总览 ({} 项，其中 {} 项变更):",
+                all_rows.len(),
+                rows.len()
+            )
+        );
+        assert_eq!(
+            report::value_section_title("[sys]", &rows, false),
+            format!("[sys] 值变更 ({} 项):", rows.len())
+        );
+
         // handle_diff 端到端可跑通（含 --json 分支）
         {
             let _wd = WorkDirWithLock::change(&sys_dir).unwrap();
@@ -1586,9 +1636,34 @@ exit 0
                     log: None,
                 },
                 json: true,
+                all: false,
             })
             .await
             .unwrap();
+            SysCommandHandler::handle_diff(SysDiffArgs {
+                debug_log: DebugLogArgs {
+                    debug: 0,
+                    log: None,
+                },
+                json: true,
+                all: true,
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_sys_diff_all_flag_parses() {
+        match SysCmd::try_parse_from(["gops", "diff"]).unwrap() {
+            SysCmd::Diff(a) => assert!(!a.all, "缺省只看变更"),
+            _ => panic!("expected diff"),
+        }
+        for argv in [["gops", "diff", "--all"], ["gops", "diff", "-a"]] {
+            match SysCmd::try_parse_from(argv).unwrap() {
+                SysCmd::Diff(a) => assert!(a.all),
+                _ => panic!("expected diff"),
+            }
         }
     }
 

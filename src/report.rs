@@ -4,6 +4,10 @@
 //!   逐键列出 `KEY` / `INITIAL` / `EFFECTIVE` / `ORIGIN` / `MUTABILITY` / `STATE`；
 //! - **文件变更表**：localize 渲染文件前后各取一次内容指纹快照（[`snapshot_tree`]），
 //!   只列出**新增 / 替换**的文件（`FILE` / `STATE`）。
+//!
+//! 两个 diff 命令（`sys` / `mod`）共用 [`value_section_title`]（标题文案）与
+//! [`groups_all_empty`]（是否打 `[OK] 值无覆盖`）—— 这两处一旦分叉，用户就会看到
+//! 同一份数据两种口径。
 
 use crate::internal_prelude::*;
 use orion_vars::vars::{Mutability, ValueType};
@@ -194,6 +198,34 @@ pub fn render_table(rows: &[ValueRow], color: bool) -> String {
         out.push('\n');
     }
     out
+}
+
+/// 值变更表的小节标题（`sys diff` / `mod diff` 共用）。
+///
+/// 默认（只看差异）报“值变更 (N 项)”；`all` 时是“值总览 (N 项，其中 M 项变更)”，
+/// 让读者一眼看到总数与变更数，而不会把 `same` 行误当成“都改了”。
+///
+/// `scope` 由调用方给（`[sys]` / `[mod: x]` / `[model]`），本函数不管分组语义。
+pub fn value_section_title(scope: &str, rows: &[ValueRow], all: bool) -> String {
+    if !all {
+        return format!("{scope} 值变更 ({} 项):", rows.len());
+    }
+    let changed = rows
+        .iter()
+        .filter(|r| r.state() != ValueState::Same)
+        .count();
+    format!("{scope} 值总览 ({} 项，其中 {changed} 项变更):", rows.len())
+}
+
+/// 分组行是否**全为空** —— 决定是否打印 `[OK] 值无覆盖…`。
+///
+/// 注意：`--all` 时 `same` 行也算“有行可展示”，所以零变更的系统**不会**落进这个分支
+/// （否则 `--all` 会只打一句 `[OK]` 而看不到任何键）。
+pub fn groups_all_empty<'a, I>(groups: I) -> bool
+where
+    I: IntoIterator<Item = &'a [ValueRow]>,
+{
+    groups.into_iter().all(|rows| rows.is_empty())
 }
 
 /// 平铺 JSON 数组（`gops sys diff --json`）。
@@ -1073,5 +1105,51 @@ mod tests {
         assert_eq!(v["system"].as_array().unwrap().len(), 0);
         assert_eq!(v["modules"].as_array().unwrap().len(), 0);
         assert_eq!(v["files"].as_array().unwrap().len(), 0);
+    }
+
+    fn row(key: &str, state: ValueState) -> ValueRow {
+        ValueRow {
+            key: key.into(),
+            initial: Some("a".into()),
+            effective: Some("b".into()),
+            origin: Some("sys-setting".into()),
+            mutability: Some("module".into()),
+            state,
+        }
+    }
+
+    /// 标题是“差异视图”与“全量视图”的唯一可见分界线，文案要能直接看懂。
+    #[test]
+    fn section_title_differs_between_diff_and_all() {
+        let rows = vec![
+            row("A", ValueState::Changed),
+            row("B", ValueState::Same),
+            row("C", ValueState::Same),
+        ];
+        assert_eq!(
+            value_section_title("[sys]", &rows, false),
+            "[sys] 值变更 (3 项):"
+        );
+        assert_eq!(
+            value_section_title("[sys]", &rows, true),
+            "[sys] 值总览 (3 项，其中 1 项变更):"
+        );
+        // 空集：标题也要能渲染（`--all` 打在无变量的系统上）
+        assert_eq!(
+            value_section_title("[x]", &[], true),
+            "[x] 值总览 (0 项，其中 0 项变更):"
+        );
+        assert_eq!(value_section_title("[x]", &[], false), "[x] 值变更 (0 项):");
+    }
+
+    /// `--all` 下零变更的系统不能落进 `[OK]` 分支：`same` 行也算“有行可展示”。
+    #[test]
+    fn groups_all_empty_respects_same_rows() {
+        let same_only = vec![row("A", ValueState::Same)];
+        assert!(!groups_all_empty([same_only.as_slice()]));
+        assert!(groups_all_empty([&[][..]]));
+        assert!(groups_all_empty(std::iter::empty::<&[ValueRow]>()));
+        // 混合分组：只要有一组非空，就不该打 `[OK]`
+        assert!(!groups_all_empty([&[][..], same_only.as_slice(), &[][..],]));
     }
 }

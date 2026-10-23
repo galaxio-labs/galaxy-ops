@@ -312,7 +312,7 @@ impl PermsReport {
         } else if !self.errors.is_empty() {
             let _ = writeln!(
                 out,
-                "结论: 配置冲突（{} 项），无法用单一属主/属组满足",
+                "结论: 配置冲突（{} 项），请先修正配置再对齐",
                 self.errors.len()
             );
         } else if self.failed() > 0 {
@@ -365,18 +365,7 @@ pub fn load_conf(system_root: &Path) -> MainResult<Option<SysConf>> {
 pub fn run_with_conf(system_root: &Path, do_apply: bool) -> MainResult<PermsReport> {
     let conf = load_conf(system_root)?;
     let perms = conf.as_ref().and_then(|c| c.perms());
-    // `secrets.file` 的期望模式由 `secrets.mode` 决定（0600 / 0640）；属主始终是部署账号。
-    // 0640 时属组 = 容器 gid，部署账号按 owner 读、容器按 group 读 —— 不需要提权。
-    let secret = match conf.as_ref().and_then(|c| c.secrets()) {
-        Some(s) if !s.file().trim().is_empty() => {
-            let mode = s.file_mode().map_err(MainReason::logic_detail)?;
-            Some((
-                canonical_or_parent(&system_root.join(s.file().trim())),
-                mode,
-            ))
-        }
-        _ => None,
-    };
+    let secret = resolve_secret(system_root, conf.as_ref())?;
     run(
         system_root,
         perms,
@@ -385,6 +374,29 @@ pub fn run_with_conf(system_root: &Path, do_apply: bool) -> MainResult<PermsRepo
             .map(|(path, mode)| SecretTarget { path, mode: *mode }),
         do_apply,
     )
+}
+
+/// 解析 `sys-prj.yml: secrets.file` 的宿主路径与期望模式（`0600` / `0640`）。
+///
+/// 只做**路径校验**（复用 `system::sec` 的规则）：相对系统根、不含 `.`/`..`、
+/// 不含符号链接、解析后仍在根内。perms 不读内容，但绝不能因为清单里写了
+/// 绝对路径 / `..` 就把 chmod 作用到系统根之外。
+///
+/// 文件缺失是**允许**的：`apply` 会明确报“perms 不创建密钥”，而不是猜一个空文件。
+fn resolve_secret(
+    system_root: &Path,
+    conf: Option<&SysConf>,
+) -> MainResult<Option<(PathBuf, u32)>> {
+    let Some(secrets) = conf.and_then(|c| c.secrets()) else {
+        return Ok(None);
+    };
+    let declared = secrets.file().trim();
+    if declared.is_empty() {
+        return Ok(None);
+    }
+    let mode = secrets.file_mode().map_err(MainReason::logic_detail)?;
+    let path = crate::system::sec::resolve_declared_path(system_root, declared)?;
+    Ok(Some((path, mode)))
 }
 
 // === 派生 ===
@@ -2110,6 +2122,79 @@ mod tests {
         };
         let (ok, _) = aligned(snapshot, false, &m, deploy_identity().0);
         assert!(ok, "owner == 容器 uid 时必须原样放过");
+    }
+
+    #[test]
+    fn test_resolve_secret_uses_sec_path_validation() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".wist")).unwrap();
+        let file = root.join(".wist/sec-value.yml");
+        std::fs::write(&file, "k: \"v\"\n").unwrap();
+
+        let conf: SysConf = serde_yaml::from_str(
+            "test_envs:\n  dep_root: ''\n  deps: []\nsecrets:\n  file: .wist/sec-value.yml\n  mode: \"0640\"\n",
+        )
+        .unwrap();
+        let (path, mode) = resolve_secret(root, Some(&conf)).unwrap().expect("secret");
+        assert_eq!(mode, 0o640);
+        assert_eq!(path, canonical_or_parent(&file));
+
+        // 绝对路径 / `..` / 符号链接都必须拒绝（与 sec 的路径校验一致）。
+        for declared in ["/etc/passwd", "../outside.yml"] {
+            let conf: SysConf = serde_yaml::from_str(&format!(
+                "test_envs:\n  dep_root: ''\n  deps: []\nsecrets:\n  file: {declared}\n"
+            ))
+            .unwrap();
+            let err = resolve_secret(root, Some(&conf)).unwrap_err();
+            assert!(
+                err.to_string().contains("相对系统根")
+                    || err.to_string().contains("普通的相对路径段"),
+                "declared={declared}, err={err}"
+            );
+        }
+
+        // 合法声明但文件缺失：允许（perms 不负责创建密钥）。
+        let conf: SysConf = serde_yaml::from_str(
+            "test_envs:\n  dep_root: ''\n  deps: []\nsecrets:\n  file: .wist/missing.yml\n",
+        )
+        .unwrap();
+        let (path, mode) = resolve_secret(root, Some(&conf)).unwrap().expect("secret");
+        assert_eq!(mode, 0o600);
+        assert!(path.ends_with(".wist/missing.yml"));
+
+        // 无 secrets 声明 → None。
+        let plain: SysConf =
+            serde_yaml::from_str("test_envs:\n  dep_root: ''\n  deps: []\n").unwrap();
+        assert!(resolve_secret(root, Some(&plain)).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_run_with_conf_rejects_absolute_secret_before_docker() {
+        // secrets.file 绝对路径必须在派生之前就被拒绝，否则可能把 chmod 作用到根外。
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sys-prj.yml"),
+            "test_envs:\n  dep_root: ''\n  deps: []\nsecrets:\n  file: /etc/passwd\n",
+        )
+        .unwrap();
+        let err = run_with_conf(dir.path(), false).unwrap_err();
+        assert!(err.to_string().contains("相对系统根"), "{err}");
+    }
+
+    #[test]
+    fn test_run_with_conf_rejects_symlinked_secret() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real.yml");
+        std::fs::write(&real, "k: \"v\"\n").unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link.yml")).unwrap();
+        std::fs::write(
+            dir.path().join("sys-prj.yml"),
+            "test_envs:\n  dep_root: ''\n  deps: []\nsecrets:\n  file: link.yml\n",
+        )
+        .unwrap();
+        let err = run_with_conf(dir.path(), false).unwrap_err();
+        assert!(err.to_string().contains("符号链接"), "{err}");
     }
 
     #[test]

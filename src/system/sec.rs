@@ -16,7 +16,8 @@
 //! 5. **不泄露明文**：错误与 `Debug` 输出都不带值；解析错误只保留位置信息。
 //!
 //! `fix_for_system`（`gops sec fix`）是本模块**唯一会改盘**的入口：只 `chmod` 到
-//! `secrets.mode` 策略值（只收缩、不放宽），**不改属主、不解链接**。
+//! `secrets.mode` 策略值（只收缩写位 / other 位；`0640` 会为只读文件补属组读位），
+//! **不改属主、不解链接**。
 use super::prelude::*;
 use crate::error::MainReason;
 use crate::system::conf::{ExposeConf, ExposeRule, SecFileFormat, SecretsConf, Subscriber};
@@ -215,7 +216,10 @@ fn declared_file_path(sys_root: &Path, conf: &SecretsConf) -> MainResult<PathBuf
 }
 
 /// 路径校验：相对、无 `.`/`..`、无符号链接、结果仍在系统根内。
-fn resolve_declared_path(sys_root: &Path, declared: &str) -> MainResult<PathBuf> {
+///
+/// `gops sys perms` 也用它解析 `secrets.file`：perms 虽然只改模式、不读内容，
+/// 但绝不能因为清单里写了一个绝对路径 / `..` 就把 chmod 作用到系统根之外。
+pub(crate) fn resolve_declared_path(sys_root: &Path, declared: &str) -> MainResult<PathBuf> {
     if declared.trim().is_empty() {
         return Err(MainReason::logic_detail(
             "sys-prj.yml 的 secrets.file 为空；要么删除 secrets 节，要么给一个相对路径",
@@ -594,8 +598,10 @@ pub fn fix_for_system(sys_root: &Path, dry_run: bool) -> MainResult<FixOutcome> 
     }
 }
 
-/// 只收缩、不放宽：已无写位的文件保持只读（`0400` / `0440`），否则给策略值；
-/// 任何情况下都不给 group / other 加权限位。
+/// 只收缩写位：已无写位的文件保持只读（`0400` / `0440`），否则给策略值。
+///
+/// `0640` 策略下，只读的 `0400` 会补上**属组读位**（`0440`）——这是共享语义要求的；
+/// 但永远不会给 group 加**写位**，也不会给 other 加任何位。
 fn target_mode_for(actual: u32, policy: u32) -> u32 {
     if actual & 0o222 == 0 {
         policy & !0o222
@@ -1342,6 +1348,9 @@ mod tests {
         assert_eq!(target_mode_for(0o444, 0o600), 0o400);
         assert_eq!(target_mode_for(0o644, 0o640), 0o640);
         assert_eq!(target_mode_for(0o440, 0o640), 0o440);
+        // 0640 是显式的组共享策略：只读的 0400 需要补属组读位；但不会加写位。
+        assert_eq!(target_mode_for(0o400, 0o640), 0o440);
+        assert_eq!(target_mode_for(0o400, 0o640) & 0o222, 0, "不能加写位");
         assert_eq!(target_mode_for(0o600, 0o600), 0o600);
     }
 

@@ -106,8 +106,9 @@ pub enum SecCmd {
     #[command(
         about = "把密钥文件权限修正到 secrets.mode（Fix Secret File Permissions）",
         long_about = "按 `sys-prj.yml: secrets.mode`（缺省 `0600`；与容器共享时 `0640`）把密钥文件的\n\
-                     权限收敛到策略值：**只收缩、不放宽**（原本只读的保持只读），\n\
-                     只改 mode、不改属主，也不解链接 / 硬链接（遇到即报错）。\n\
+                     权限收敛到策略值：**只收缩写位与 other 位**（原本只读的保持只读；\n\
+                     `0640` 会为只读文件补属组读位），只改 mode、不改属主，\n\
+                     也不解链接 / 硬链接（遇到即报错）。\n\
                      路径解析与 `gops sec list` 完全一致（`secrets.file` → 回退 `.galaxy/sec_value.yml`）。\n\
                      幂等：已符合策略时不写盘。\n\
                      Usage: gops sec fix [--dry-run]"

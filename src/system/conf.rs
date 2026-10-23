@@ -322,6 +322,7 @@ impl ServicePerm {
 /// `sys-prj.yml: perms` —— 派生不出容器身份，或容器内 uid 与宿主 uid 不等价
 /// （rootless / userns-remap）时的显式覆盖。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermsConf {
     /// 宿主上应属容器的 uid（userns-remap 后是映射后的宿主 uid）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,6 +447,29 @@ impl SystemLocalizable<()> for SysConf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_perms_conf_rejects_unknown_fields() {
+        // 拼写错误（service 单数）不能被静默忽略，否则对齐会被悄悄关掉。
+        let err = serde_yaml::from_str::<PermsConf>(
+            "container_uid: 1\ncontainer_gid: 1\nservice:\n  app:\n    uid: 1\n    gid: 1\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn test_perms_conf_parses_global_and_per_service() {
+        let conf: PermsConf = serde_yaml::from_str(
+            "container_uid: 1000\ncontainer_gid: 1000\nallow_external:\n  - /srv/shared\nservices:\n  gateway:\n    uid: 999\n    gid: 999\n",
+        )
+        .unwrap();
+        assert_eq!(conf.container_uid(), Some(1000));
+        assert_eq!(conf.container_gid(), Some(1000));
+        assert_eq!(conf.allow_external(), &["/srv/shared".to_string()][..]);
+        let gateway = conf.services().get("gateway").unwrap();
+        assert_eq!((gateway.uid(), gateway.gid()), (999, 999));
+    }
 
     #[test]
     fn test_sys_kind_serde_kebab_case() {

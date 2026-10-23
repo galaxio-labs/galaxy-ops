@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.1-alpha] - 2026-10-22
+
+### 修复
+
+- **`sys perms` 的密钥路径校验**：`secrets.file` 现在与 `gops sec` 使用同一套规则
+  （相对系统根、无 `.`/`..`、无符号链接）。绝对路径或越界路径会在派生之前直接报错，
+  避免误把 chmod 作用到系统根之外。
+- **`sys-prj.yml: perms` 拼写错误不再被静默忽略**：未知字段（如把 `services` 写成
+  `service`）会直接报错，避免对齐被悄悄关掉。
+- **`gops sec fix` 的说明与实际行为对齐**：`0640` 策略会把只读的 `0400` 补成 `0440`
+  （只补属组读位，始终不加写位）。
+
 ## [2.10.0-alpha] - 2026-10-21
 
 ### 新增

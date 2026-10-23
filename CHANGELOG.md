@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.4-alpha] - 2026-10-23
+
+### 修复
+
+- **`sys perms` 的第二类宿主预置也不再逐项刷屏**：挂载源里的文件若属主既不是部署账号、
+  也不是容器身份（Docker 为嵌套挂载点建的 `root` 空目录/空文件、root 跑过的恢复/脚本），
+  非 root 既不能 `chown` 也不能 `chmod`。现在按**挂载源**汇总成一条 `[FAIL]`，给出可直接执行的
+  `sudo chown -R <部署账号>:<容器 gid> <source>`，文本输出里该挂载标 `[BLOCKED]`。
+  与上一版的缺组成员共用同一套「一次说清」机制（`MountReport.blocked`）；`--apply` **照常修复
+  其它未被拦的挂载**，已对齐的现场不受影响。
+  （现场形态：`d data-plane-run/work/.run 2755 0:999 → 2770 1000:999 [failed]` ×107。）
+
+### 兼容性
+
+- `--json` 的 `mounts[].blocked_by_group`（2.10.3 刚引入）改为统一的 `mounts[].blocked`：
+  `null` 或 `{"kind":"group","gid":N}` / `{"kind":"owner","uid":U,"gid":N}`。
+  其余字段（`items[]` / `summary` / `errors`）不变。
+
 ## [2.10.3-alpha] - 2026-10-23
 
 ### 修复

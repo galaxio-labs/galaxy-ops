@@ -425,7 +425,7 @@ fn check_perms(root: &Path, names: &[&String], strict: bool, report: &mut Diagno
                     report.warn("perms.drift", title, detail);
                 }
                 report.hint_last(
-                    "看 `gops sys perms` 明细：可修复项用 `--apply`，配置 / 宿主组问题按提示处理",
+                    "看 `gops sys perms` 明细：可修复项用 `--apply`，配置 / 宿主组 / 属主问题按提示处理",
                 );
             }
             Err(err) => {

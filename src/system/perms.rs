@@ -11,7 +11,9 @@
 //! - 属主 = 部署账号（`SUDO_UID` / euid），属组 = 容器 gid；
 //! - **属组是唯一的共享通道**（属主不 chown 给容器 uid，那需要提权），所以 `chgrp` 到
 //!   容器 gid 要求部署账号**已是该组成员**（内核按 gid 数字比对自己的凭据）。
-//!   缺这一步时**先一次性报出**、不做逐项失败：它是宿主预置，`--apply` 不能修（也不提权）。
+//! - **属主不可改时也只能 sudo**：挂载源里的文件若既不是部署账号、也不是容器身份
+//!   （Docker 为嵌套挂载点建的 root 空目录/空文件、root 跑过的恢复/脚本），非 root 无法 chown/chmod。
+//!   这两种都属于**宿主预置**：先一次性报出、不做逐项失败（`--apply` 不能修、也不提权）。
 //! - `secrets.file`：属主仍是部署账号，模式由 `secrets.mode`（`0600` / `0640`）决定；
 //!   `0640` 时容器按属组读——**不通过 chown 到容器 uid 共享**（那需要提权）；
 //! - 以 root 运行的服务跳过（root 不受宿主模式限制，强行对齐只会收紧模式）；
@@ -19,7 +21,7 @@
 //! - 只处理系统根内的 bind `source`；根外需 `sys-prj.yml: perms.allow_external` 显式声明；
 //! - 不跟随符号链接；不修改挂载根的父目录；不碰 named volume。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -112,6 +114,27 @@ pub struct ItemReport {
     pub reason: String,
 }
 
+/// 需要**宿主预置**（提权 / 加组）才能对齐的原因。
+///
+/// 这类问题 `--apply` 修不了（它只 chmod/chgrp，不提权），逐项明细全是同一个 `EPERM`：
+/// 文本输出里收成一行 `[BLOCKED]`，另由一条汇总 `errors` 给出可直接执行的命令。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Blocked {
+    /// 部署账号不在该容器 gid 的组里 → `sudo usermod -aG <gid>`。
+    Group(u32),
+    /// 属主既不是部署账号、也不是容器身份（root / 别的账号建的文件）→ `sudo chown -R`。
+    Owner { uid: u32, gid: u32 },
+}
+
+impl Blocked {
+    fn describe(&self) -> String {
+        match self {
+            Blocked::Group(gid) => format!("部署账号不在容器 gid {gid} 的组里"),
+            Blocked::Owner { .. } => "有项属主不是部署账号，需管理员 chown".to_string(),
+        }
+    }
+}
+
 /// 单个服务的 bind 挂载报告。
 #[derive(Clone, Debug)]
 pub struct MountReport {
@@ -120,9 +143,9 @@ pub struct MountReport {
     pub read_only: bool,
     pub container: ContainerId,
     pub items: Vec<ItemReport>,
-    /// 部署账号不在该 gid 组里（宿主预置缺失）：明细不在文本输出里展开，
-    /// 改由一条汇总 `errors` 说清 —— N 个文件报同一个 `EPERM` 只是噪声。
-    pub blocked_by_group: Option<u32>,
+    /// 需要宿主预置才能对齐（缺组 / 属主不可改）：明细不在文本输出里展开，
+    /// 改由汇总 `errors` 说清 —— N 个文件报同一个 `EPERM` 只是噪声。
+    pub blocked: Option<Blocked>,
 }
 
 /// `sys perms` 的整体报告。
@@ -139,7 +162,7 @@ pub struct PermsReport {
     pub notes: Vec<String>,
     /// 无法靠改权限解决、`--apply` 也不会「修」的阻断项：
     /// 配置错误（同一路径两种容器身份、0600 密钥配非 root 容器）与**宿主预置**
-    /// （部署账号不在容器 gid 组里，chgrp 必然 EPERM）。非空即判定失败。
+    /// （部署账号不在容器 gid 组里、挂载源里有 root/别的账号的文件）。非空即判定失败。
     pub errors: Vec<String>,
 }
 
@@ -219,7 +242,12 @@ impl PermsReport {
                     "source": m.source.display().to_string(),
                     "read_only": m.read_only,
                     "container": { "uid": m.container.uid, "gid": m.container.gid },
-                    "blocked_by_group": m.blocked_by_group,
+                    "blocked": m.blocked.as_ref().map(|blocked| match blocked {
+                        Blocked::Group(gid) => serde_json::json!({ "kind": "group", "gid": gid }),
+                        Blocked::Owner { uid, gid } => {
+                            serde_json::json!({ "kind": "owner", "uid": uid, "gid": gid })
+                        }
+                    }),
                     "items": items,
                 })
             })
@@ -265,7 +293,7 @@ impl PermsReport {
                 .iter()
                 .filter(|i| !matches!(i.status, ItemStatus::Aligned))
                 .collect();
-            let tag = if mount.blocked_by_group.is_some() {
+            let tag = if mount.blocked.is_some() {
                 "[BLOCKED]"
             } else if bad.is_empty() {
                 "[OK]"
@@ -286,11 +314,12 @@ impl PermsReport {
                 mount.container.gid,
                 mount.items.len()
             );
-            // 宿主组这一层缺失时，逐项明细全是同一个 `EPERM`：收成一行，修复办法看汇总的 [FAIL]。
-            if let Some(gid) = mount.blocked_by_group {
+            // 宿主侧这一层缺失时，逐项明细全是同一个 `EPERM`：收成一行，修复办法看汇总的 [FAIL]。
+            if let Some(blocked) = &mount.blocked {
                 let _ = writeln!(
                     out,
-                    "       部署账号不在 gid {gid} 组里，{} 项明细已省略（修复办法见下方 [FAIL]）",
+                    "       {}，{} 项明细已省略（修复办法见下方 [FAIL]）",
+                    blocked.describe(),
                     bad.len()
                 );
                 continue;
@@ -895,32 +924,50 @@ fn run_derived_with_groups(
     let apply = do_apply && !config_error;
     let mut errors = derived.errors;
     // gid → (待修项数, 涉及服务)：同一个 gid 只报一条。
-    let mut blocked: BTreeMap<u32, (usize, Vec<String>)> = BTreeMap::new();
+    let mut blocked_gids: BTreeMap<u32, (usize, Vec<String>)> = BTreeMap::new();
     let mut mounts = Vec::new();
 
     for mount in &derived.mounts {
         let mut items = scan_mount_with_secret(mount, deploy_uid, secret)?;
-        // 只在**确实有东西要改**时才拦：已对齐的现场不需要为「组关系」报错。
-        let needs_fix = items.iter().any(|i| i.status != ItemStatus::Aligned);
-        let blocked_by_group = (!config_error
-            && !privileged
-            && mount.container.uid != 0
-            && !groups.contains(&mount.container.gid)
-            && needs_fix)
-            .then_some(mount.container.gid);
-        if let Some(gid) = blocked_by_group {
-            let entry = blocked.entry(gid).or_insert_with(|| (0, Vec::new()));
-            entry.0 += items
-                .iter()
-                .filter(|i| i.status != ItemStatus::Aligned)
-                .count();
-            for name in mount.service.split(',') {
-                if !entry.1.iter().any(|s| s == name) {
-                    entry.1.push(name.to_string());
+        let blocked = blocked_reason(privileged, config_error, mount, groups, deploy_uid, &items);
+        match &blocked {
+            // 组缺失：按 gid 汇总，一个 gid 只报一条。
+            Some(Blocked::Group(gid)) => {
+                let entry = blocked_gids.entry(*gid).or_insert_with(|| (0, Vec::new()));
+                entry.0 += items
+                    .iter()
+                    .filter(|i| i.status != ItemStatus::Aligned)
+                    .count();
+                for name in mount.service.split(',') {
+                    if !entry.1.iter().any(|s| s == name) {
+                        entry.1.push(name.to_string());
+                    }
                 }
             }
+            // 属主不可改：按**挂载源**报，因为修复命令里必须带路径。
+            Some(Blocked::Owner { gid, .. }) => {
+                // 只数「属主不是部署账号、也不是容器身份」的项：同一个挂载里可能还混着
+                // 只差模式的文件（这些在 chown 后会被 apply 一并收掉），不能拿总数冒充。
+                let (foreign, count) = foreign_owners(&items, deploy_uid, mount.container.uid);
+                let uids = foreign
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("、");
+                errors.push(format!(
+                    "{count} 项属主是 {uids}（既不是部署账号 {deploy_uid}，也不是容器身份 {}），\
+                     非 root 无法 chown/chmod。请管理员执行：\n  \
+                     sudo chown -R {deploy_uid}:{gid} {}\n  \
+                     再跑 `gops sys perms --apply` 收模式（0660/2770）。\
+                     常见来源：Docker 为**嵌套挂载点**在父 bind 里建的空目录/空文件、\
+                     root 身份跑过的恢复/脚本",
+                    mount.container.uid,
+                    mount.source.display(),
+                ));
+            }
+            _ => {}
         }
-        if apply && blocked_by_group.is_none() {
+        if apply && blocked.is_none() {
             for item in items.iter_mut() {
                 if item.status != ItemStatus::Pending {
                     continue;
@@ -965,11 +1012,11 @@ fn run_derived_with_groups(
             read_only: mount.read_only,
             container: mount.container,
             items,
-            blocked_by_group,
+            blocked,
         });
     }
 
-    for (gid, (count, services)) in &blocked {
+    for (gid, (count, services)) in &blocked_gids {
         let current = groups
             .iter()
             .map(u32::to_string)
@@ -996,6 +1043,58 @@ fn run_derived_with_groups(
         notes: derived.notes,
         errors,
     })
+}
+
+/// 一个挂载里「属主既不是部署账号、也不是容器身份」的项：去重后的 uid + 项数。
+///
+/// 容器自建的（`uid == container_uid`）按约定不碰，部署账号自己的项改得动，两者都不算。
+fn foreign_owners(
+    items: &[ItemReport],
+    deploy_uid: u32,
+    container_uid: u32,
+) -> (BTreeSet<u32>, usize) {
+    let mut uids = BTreeSet::new();
+    let mut count = 0usize;
+    for item in items.iter().filter(|i| i.status != ItemStatus::Aligned) {
+        let Some(snapshot) = item.current else {
+            continue;
+        };
+        if snapshot.uid != deploy_uid && snapshot.uid != container_uid {
+            uids.insert(snapshot.uid);
+            count += 1;
+        }
+    }
+    (uids, count)
+}
+
+/// 这次对齐是否需要**宿主预置**才能做成（`--apply` 修不了）：缺组成员，或属主不可改。
+///
+/// 只在**确实有脏项**时才判：已对齐的现场不应该因为「组关系 / 属主策略」报错。
+fn blocked_reason(
+    privileged: bool,
+    config_error: bool,
+    mount: &BindMount,
+    groups: &[u32],
+    deploy_uid: u32,
+    items: &[ItemReport],
+) -> Option<Blocked> {
+    if privileged || config_error {
+        return None;
+    }
+    let dirty = || items.iter().filter(|i| i.status != ItemStatus::Aligned);
+    dirty().next()?;
+    // 1) 组：`chgrp` 到不在的组，非 root 一律 EPERM。
+    if mount.container.uid != 0 && !groups.contains(&mount.container.gid) {
+        return Some(Blocked::Group(mount.container.gid));
+    }
+    // 2) 属主：既不是部署账号（可改），也不是容器身份（约定不碰）→ 只能 sudo。
+    dirty()
+        .filter_map(|i| i.current.map(|s| s.uid))
+        .find(|uid| *uid != deploy_uid && *uid != mount.container.uid)
+        .map(|uid| Blocked::Owner {
+            uid,
+            gid: mount.container.gid,
+        })
 }
 
 /// 当前进程真实拥有的组（egid + 补充组）。
@@ -1771,7 +1870,7 @@ mod tests {
                     status: ItemStatus::Pending,
                     reason: "属主 0 不是部署账号 1000".to_string(),
                 }],
-                blocked_by_group: None,
+                blocked: None,
             }],
             warnings: vec![],
             notes: vec![],
@@ -2489,7 +2588,7 @@ mod tests {
             0o644,
             "组关系缺失时 --apply 不能改盘"
         );
-        assert_eq!(report.mounts[0].blocked_by_group, Some(9999));
+        assert_eq!(report.mounts[0].blocked, Some(Blocked::Group(9999)));
 
         let text = report.render_text();
         assert!(text.contains("[BLOCKED]"), "{text}");
@@ -2498,7 +2597,8 @@ mod tests {
             "逐项明细应收起（否则就是 136 行同一个 EPERM）：{text}"
         );
         let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
-        assert_eq!(json["mounts"][0]["blocked_by_group"], 9999);
+        assert_eq!(json["mounts"][0]["blocked"]["kind"], "group");
+        assert_eq!(json["mounts"][0]["blocked"]["gid"], 9999);
     }
 
     #[test]
@@ -2522,7 +2622,7 @@ mod tests {
         // 故意给一个不含该 gid 的组集合：只要有项要改才会拦。
         let report = run_derived_with_groups(root, derived, None, false, false, &[4242]).unwrap();
         assert!(report.errors.is_empty(), "{}", report.render_text());
-        assert_eq!(report.mounts[0].blocked_by_group, None);
+        assert_eq!(report.mounts[0].blocked, None);
         assert!(report.is_ok(), "{}", report.render_text());
     }
 
@@ -2550,7 +2650,279 @@ mod tests {
         };
         let report = run_derived_with_groups(root, derived, None, false, true, &[4242]).unwrap();
         assert!(report.errors.is_empty(), "{}", report.render_text());
-        assert_eq!(report.mounts[0].blocked_by_group, None);
+        assert_eq!(report.mounts[0].blocked, None);
+    }
+
+    #[test]
+    fn render_and_json_mark_owner_blocked_mount() {
+        let report = PermsReport {
+            system_root: PathBuf::from("/site"),
+            skipped: None,
+            deploy_uid: 1000,
+            deploy_gid: 1001,
+            mounts: vec![MountReport {
+                service: "wparse".to_string(),
+                source: PathBuf::from("/site/data-plane-run/work"),
+                read_only: false,
+                container: ContainerId { uid: 999, gid: 999 },
+                items: vec![ItemReport {
+                    path: PathBuf::from("/site/data-plane-run/work/.run"),
+                    kind: "dir",
+                    read_only: false,
+                    current: Some(FileSnapshot {
+                        uid: 0,
+                        gid: 999,
+                        mode: 0o2755,
+                    }),
+                    expected_mode: RW_DIR,
+                    expected_gid: 999,
+                    is_secret: false,
+                    status: ItemStatus::Pending,
+                    reason: "属主 0 不是部署账号 1000".to_string(),
+                }],
+                blocked: Some(Blocked::Owner { uid: 0, gid: 999 }),
+            }],
+            warnings: vec![],
+            notes: vec![],
+            errors: vec!["需要 sudo chown".to_string()],
+        };
+
+        let text = report.render_text();
+        assert!(text.contains("[BLOCKED]"), "{text}");
+        assert!(text.contains("需管理员 chown"), "{text}");
+        assert!(
+            !text.contains("/site/data-plane-run/work/.run"),
+            "逐项明细应收起：{text}"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        assert_eq!(json["mounts"][0]["blocked"]["kind"], "owner");
+        assert_eq!(json["mounts"][0]["blocked"]["uid"], 0);
+        assert_eq!(json["mounts"][0]["blocked"]["gid"], 999);
+    }
+
+    #[test]
+    fn foreign_owners_only_counts_foreign_uids() {
+        let item = |uid: u32, status: ItemStatus| ItemReport {
+            path: PathBuf::from("/site/work/x"),
+            kind: "file",
+            read_only: false,
+            current: Some(FileSnapshot {
+                uid,
+                gid: 999,
+                mode: 0o644,
+            }),
+            expected_mode: RW_FILE,
+            expected_gid: 999,
+            is_secret: false,
+            status,
+            reason: String::new(),
+        };
+        let items = vec![
+            item(0, ItemStatus::Pending),
+            item(0, ItemStatus::Pending),
+            item(1000, ItemStatus::Pending), // 部署账号：改得动，不算
+            item(999, ItemStatus::Pending),  // 容器自建：约定不碰，不算
+            item(0, ItemStatus::Aligned),    // 已对齐不算
+        ];
+        let (uids, count) = foreign_owners(&items, 1000, 999);
+        assert_eq!(count, 2, "只数真正改不动的项");
+        assert_eq!(uids.into_iter().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn blocked_mount_does_not_stop_other_mounts() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let blocked_dir = root.join("work");
+        let ok_dir = root.join("configs");
+        std::fs::create_dir_all(&blocked_dir).unwrap();
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        chmod(&blocked_dir, 0o755);
+        chmod(&ok_dir, 0o755);
+
+        let derived = Derived {
+            mounts: vec![
+                mount(
+                    &blocked_dir,
+                    false,
+                    ContainerId {
+                        uid: 9999,
+                        gid: 9999,
+                    },
+                ),
+                mount(&ok_dir, false, current_id()),
+            ],
+            warnings: vec![],
+            notes: vec![],
+            errors: vec![],
+        };
+        let groups = [current_id().gid];
+        let report = run_derived_with_groups(root, derived, None, true, false, &groups).unwrap();
+
+        assert_eq!(report.errors.len(), 1, "{}", report.render_text());
+        assert_eq!(
+            std::fs::metadata(&blocked_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755,
+            "被拦的挂载不能被动过"
+        );
+        assert_eq!(
+            std::fs::metadata(&ok_dir).unwrap().permissions().mode() & 0o7777,
+            0o2770,
+            "其它挂载照常修复"
+        );
+        assert!(
+            report.mounts[1]
+                .items
+                .iter()
+                .all(|i| i.status == ItemStatus::Applied),
+            "{}",
+            report.render_text()
+        );
+    }
+
+    #[test]
+    fn group_blocking_aggregates_across_services() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        chmod(&a, 0o755);
+        chmod(&b, 0o755);
+        let id = ContainerId {
+            uid: 9999,
+            gid: 9999,
+        };
+        let derived = Derived {
+            mounts: vec![
+                BindMount {
+                    service: "wparse".to_string(),
+                    source: a,
+                    read_only: false,
+                    container: id,
+                },
+                BindMount {
+                    service: "gateway".to_string(),
+                    source: b,
+                    read_only: false,
+                    container: id,
+                },
+            ],
+            warnings: vec![],
+            notes: vec![],
+            errors: vec![],
+        };
+        let report = run_derived_with_groups(root, derived, None, false, false, &[4242]).unwrap();
+
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "一个 gid 只报一条：{:?}",
+            report.errors
+        );
+        let err = &report.errors[0];
+        assert!(err.contains("2 项"), "{err}");
+        assert!(err.contains("wparse") && err.contains("gateway"), "{err}");
+        assert!(
+            report
+                .mounts
+                .iter()
+                .all(|m| matches!(m.blocked, Some(Blocked::Group(9999)))),
+            "{:?}",
+            report.mounts.iter().map(|m| &m.blocked).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn blocked_reason_covers_group_owner_and_aligned_cases() {
+        let mount = mount(
+            Path::new("/site/work"),
+            false,
+            ContainerId { uid: 999, gid: 999 },
+        );
+        let deploy = 1000;
+        let item = |uid: u32, status: ItemStatus| ItemReport {
+            path: PathBuf::from("/site/work/x"),
+            kind: "file",
+            read_only: false,
+            current: Some(FileSnapshot {
+                uid,
+                gid: 999,
+                mode: 0o644,
+            }),
+            expected_mode: RW_FILE,
+            expected_gid: 999,
+            is_secret: false,
+            status,
+            reason: String::new(),
+        };
+
+        // 已对齐 → 不拦（哪怕缺组、属主策略也不该报）
+        assert_eq!(
+            blocked_reason(
+                false,
+                false,
+                &mount,
+                &[4242],
+                deploy,
+                &[item(0, ItemStatus::Aligned)]
+            ),
+            None
+        );
+        // 缺组成员 → 先报组（chgrp 也过不了）
+        assert_eq!(
+            blocked_reason(
+                false,
+                false,
+                &mount,
+                &[4242],
+                deploy,
+                &[item(0, ItemStatus::Pending)]
+            ),
+            Some(Blocked::Group(999))
+        );
+        // 组没问题（在 999 里），但属主是 root → 需要 sudo chown
+        assert_eq!(
+            blocked_reason(
+                false,
+                false,
+                &mount,
+                &[999],
+                deploy,
+                &[item(0, ItemStatus::Pending)]
+            ),
+            Some(Blocked::Owner { uid: 0, gid: 999 })
+        );
+        // 容器自建的文件（uid == 容器 uid）约定不碰 → 不拦
+        assert_eq!(
+            blocked_reason(
+                false,
+                false,
+                &mount,
+                &[999],
+                deploy,
+                &[item(999, ItemStatus::Pending)]
+            ),
+            None
+        );
+        // root / sudo 一律不拦
+        assert_eq!(
+            blocked_reason(
+                true,
+                false,
+                &mount,
+                &[4242],
+                deploy,
+                &[item(0, ItemStatus::Pending)]
+            ),
+            None
+        );
     }
 
     #[test]

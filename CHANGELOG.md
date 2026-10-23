@@ -5,6 +5,21 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.5-alpha] - 2026-10-23
+
+### 修复
+
+- **`sys perms --apply` 的 `[applied]` 行不再印成「0660 → 0660」**：修复后的复核会把
+  `current` 刷成新值，before 被覆盖，行看上去像什么都没做。现在 `Applied` 项**保留修复前快照**
+  （文本读作 `0640 1000:999 → 0660 1000:999 [applied] 模式 0640 不是 0660`），
+  只有失败项才刷新成「修复后仍不一致」的现状。
+
+### 工程
+
+- **分组统计不再打印为 0 的段**：`gops run diagnose` 输出 `gops: 2 ok   diagnose: 1 warn`，
+  不再是 `1 ok / 0 warn / 0 fail` —— `0 fail` 在日志查看器 / CI 的关键词高亮里会被涂红，
+  读起来像“有失败”。（`wist-stackcheck` 的汇总行同口径，见 `wist-stackcheck-core` 0.1.4。）
+
 ## [2.10.4-alpha] - 2026-10-23
 
 ### 修复

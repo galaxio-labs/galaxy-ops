@@ -105,6 +105,10 @@ pub struct ItemReport {
     pub path: PathBuf,
     pub kind: &'static str,
     pub read_only: bool,
+    /// 扫描（或 `--apply` 前）观察到的状态。
+    ///
+    /// `Applied` 项故意不刷新为修复后的值：文本输出靠它显示「修复前 → 目标」，
+    /// 刷新后会印成 `0660:999 → 0660:999 [applied]`。失败项则是「修复后仍不一致」的现状。
     pub current: Option<FileSnapshot>,
     pub expected_mode: u32,
     pub expected_gid: u32,
@@ -999,10 +1003,15 @@ fn run_derived_with_groups(
                     deploy_uid,
                     secret_mode,
                 );
-                item.current = Some(snapshot);
+                // `Applied` 项**保留修复前的快照**：文本输出是「修复前 → 目标」，刷新成修复后
+                // 会印成 `0660 1000:999 → 0660 1000:999 [applied]`，看上去像什么都没做。
+                // 失败时刷新（展示卡在哪），本来就对齐的项也刷新（无副作用）。
                 if !ok {
+                    item.current = Some(snapshot);
                     item.status = ItemStatus::Failed;
                     item.reason = format!("修复后仍不一致：{reason}（ACL / 只读挂载？）");
+                } else if item.status != ItemStatus::Applied {
+                    item.current = Some(snapshot);
                 }
             }
         }
@@ -1796,6 +1805,20 @@ mod tests {
         let pkg_mode = std::fs::metadata(&pkg).unwrap().permissions().mode() & 0o7777;
         assert_eq!(pkg_mode, 0o640);
         assert_eq!(pkg_mode & 0o004, 0, "只读挂载不放宽到 other");
+
+        // `[applied]` 行必须保留修复前的快照：否则文本会印成 `0660 → 0660 [applied]`。
+        let applied_log = report
+            .mounts
+            .iter()
+            .flat_map(|m| m.items.iter())
+            .find(|i| i.path.ends_with("gateway.log"))
+            .expect("log item");
+        assert_eq!(applied_log.status, ItemStatus::Applied);
+        assert_eq!(
+            applied_log.current.expect("snapshot").mode & 0o7777,
+            0o644,
+            "applied 项应展示修复前的模式"
+        );
 
         // 3) 再跑一次：无改动、全部对齐（幂等）
         let derived = derive_from_json(root, &json, None).unwrap();

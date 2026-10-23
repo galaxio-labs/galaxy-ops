@@ -181,6 +181,28 @@ struct SourceCounts {
     fail: usize,
 }
 
+/// 分组统计里的一条：**为 0 的段不打印**。
+///
+/// `0 fail` 在日志查看器 / CI 的关键词高亮里会被涂红，看起来像“有失败”；
+/// 分组名已经限定了上下文，省掉零段不丢信息。
+fn count_segments(counts: &SourceCounts) -> String {
+    let mut parts = Vec::new();
+    if counts.ok > 0 {
+        parts.push(format!("{} ok", counts.ok));
+    }
+    if counts.warn > 0 {
+        parts.push(format!("{} warn", counts.warn));
+    }
+    if counts.fail > 0 {
+        parts.push(format!("{} fail", counts.fail));
+    }
+    if parts.is_empty() {
+        "无检查".to_string()
+    } else {
+        parts.join(" / ")
+    }
+}
+
 /// 一次诊断的全部检查结果。
 #[derive(Clone, Debug, Default)]
 pub struct Report {
@@ -421,12 +443,7 @@ impl Report {
         if sources.len() > 1 {
             let parts: Vec<String> = sources
                 .iter()
-                .map(|(name, counts)| {
-                    format!(
-                        "{name}: {} ok / {} warn / {} fail",
-                        counts.ok, counts.warn, counts.fail
-                    )
-                })
+                .map(|(name, counts)| format!("{name}: {}", count_segments(counts)))
                 .collect();
             let _ = writeln!(out, "{}", paint(BOLD, &parts.join("   ")));
         }
@@ -667,8 +684,12 @@ mod tests {
         report.push(Check::ok("gops", "gops.a", "a"));
         report.push(Check::warn("diagnose", "w.parse", "b"));
         let text = report.render_text(false, "h", false);
-        assert!(text.contains("gops: 1 ok / 0 warn / 0 fail"), "{text}");
-        assert!(text.contains("diagnose: 0 ok / 1 warn / 0 fail"), "{text}");
+        assert!(text.contains("gops: 1 ok"), "{text}");
+        assert!(text.contains("diagnose: 1 warn"), "{text}");
+        assert!(
+            !text.contains("0 fail"),
+            "为 0 的段不该打印（会被日志高亮涂红）：{text}"
+        );
 
         let value: Value =
             serde_json::from_str(&report.render_json(&json!({}), None, false)).unwrap();

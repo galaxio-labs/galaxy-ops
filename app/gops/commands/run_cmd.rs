@@ -538,10 +538,11 @@ fn perms_preflight(dir: &Path, apply_fix: bool) -> MainResult<()> {
     }
     match galaxy_ops::system::perms::run_with_conf(dir, apply_fix) {
         Ok(report) if report.is_ok() => Ok(()),
-        // 配置错误（密钥策略 / 身份冲突）不能靠改权限修复，也不引导提权。
+        // 配置错误（密钥策略 / 身份冲突）或宿主预置缺失（不在容器 gid 组里）
+        // 都不能靠改权限修复，也不引导提权。
         Ok(report) if !report.errors.is_empty() => {
             Err(galaxy_ops::error::MainReason::logic_detail(format!(
-                "宿主 bind 挂载配置错误（{} 项）：`--apply` 不能修复，按下面的提示修改配置\n{}",
+                "宿主 bind 挂载有 {} 项无法靠改权限解决（`--apply` 不会修），按下面的 [FAIL] 处理\n{}",
                 report.errors.len(),
                 report.render_text()
             )))

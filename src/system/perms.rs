@@ -9,6 +9,9 @@
 //! - 写需求（`read_only != true`）：文件 `0660`，目录 `2770`（setgid）；
 //! - 读需求（`read_only == true`）：只补属组读位，文件 `0640`，目录 `2750`；
 //! - 属主 = 部署账号（`SUDO_UID` / euid），属组 = 容器 gid；
+//! - **属组是唯一的共享通道**（属主不 chown 给容器 uid，那需要提权），所以 `chgrp` 到
+//!   容器 gid 要求部署账号**已是该组成员**（内核按 gid 数字比对自己的凭据）。
+//!   缺这一步时**先一次性报出**、不做逐项失败：它是宿主预置，`--apply` 不能修（也不提权）。
 //! - `secrets.file`：属主仍是部署账号，模式由 `secrets.mode`（`0600` / `0640`）决定；
 //!   `0640` 时容器按属组读——**不通过 chown 到容器 uid 共享**（那需要提权）；
 //! - 以 root 运行的服务跳过（root 不受宿主模式限制，强行对齐只会收紧模式）；
@@ -117,6 +120,9 @@ pub struct MountReport {
     pub read_only: bool,
     pub container: ContainerId,
     pub items: Vec<ItemReport>,
+    /// 部署账号不在该 gid 组里（宿主预置缺失）：明细不在文本输出里展开，
+    /// 改由一条汇总 `errors` 说清 —— N 个文件报同一个 `EPERM` 只是噪声。
+    pub blocked_by_group: Option<u32>,
 }
 
 /// `sys perms` 的整体报告。
@@ -131,8 +137,9 @@ pub struct PermsReport {
     /// 不需要对齐、但值得告知的跳过原因（例如容器以 root 运行）。
     /// 与 `warnings` 区分：`notes` 不影响退出码，`localize` 也不会打到 stderr。
     pub notes: Vec<String>,
-    /// 配置错误（例如同一路径被不同容器身份挂载，或 0600 密钥被非 root 容器挂载）。
-    /// 非空即判定失败：这些错误不能靠改权限修复，必须改配置。
+    /// 无法靠改权限解决、`--apply` 也不会「修」的阻断项：
+    /// 配置错误（同一路径两种容器身份、0600 密钥配非 root 容器）与**宿主预置**
+    /// （部署账号不在容器 gid 组里，chgrp 必然 EPERM）。非空即判定失败。
     pub errors: Vec<String>,
 }
 
@@ -212,6 +219,7 @@ impl PermsReport {
                     "source": m.source.display().to_string(),
                     "read_only": m.read_only,
                     "container": { "uid": m.container.uid, "gid": m.container.gid },
+                    "blocked_by_group": m.blocked_by_group,
                     "items": items,
                 })
             })
@@ -257,7 +265,9 @@ impl PermsReport {
                 .iter()
                 .filter(|i| !matches!(i.status, ItemStatus::Aligned))
                 .collect();
-            let tag = if bad.is_empty() {
+            let tag = if mount.blocked_by_group.is_some() {
+                "[BLOCKED]"
+            } else if bad.is_empty() {
                 "[OK]"
             } else if bad.iter().any(|i| i.status == ItemStatus::Failed) {
                 "[FAIL]"
@@ -276,6 +286,15 @@ impl PermsReport {
                 mount.container.gid,
                 mount.items.len()
             );
+            // 宿主组这一层缺失时，逐项明细全是同一个 `EPERM`：收成一行，修复办法看汇总的 [FAIL]。
+            if let Some(gid) = mount.blocked_by_group {
+                let _ = writeln!(
+                    out,
+                    "       部署账号不在 gid {gid} 组里，{} 项明细已省略（修复办法见下方 [FAIL]）",
+                    bad.len()
+                );
+                continue;
+            }
             for item in bad {
                 let current = item
                     .current
@@ -312,7 +331,7 @@ impl PermsReport {
         } else if !self.errors.is_empty() {
             let _ = writeln!(
                 out,
-                "结论: 配置冲突（{} 项），请先修正配置再对齐",
+                "结论: {} 项无法靠改权限解决（配置或宿主预置），按上面的 [FAIL] 处理后重跑",
                 self.errors.len()
             );
         } else if self.failed() > 0 {
@@ -852,15 +871,56 @@ fn run_derived_with_secret(
     secret: Option<SecretTarget<'_>>,
     do_apply: bool,
 ) -> MainResult<PermsReport> {
+    // root（含 sudo）能 chgrp 到任意 gid，不存在「成员缺失」；其余情况先取一次真实生效的组，
+    // 必要时把 N 个文件的同一个 EPERM 收成一条。
+    let privileged = unsafe { libc::geteuid() } == 0;
+    let groups = effective_groups();
+    run_derived_with_groups(system_root, derived, secret, do_apply, privileged, &groups)
+}
+
+/// 可注入「是否有特权 / 进程属于哪些组」的版本：单测不需要依赖跑测试的账号。
+fn run_derived_with_groups(
+    system_root: &Path,
+    derived: Derived,
+    secret: Option<SecretTarget<'_>>,
+    do_apply: bool,
+    privileged: bool,
+    groups: &[u32],
+) -> MainResult<PermsReport> {
     let (deploy_uid, deploy_gid) = deploy_identity();
     // 配置错误不能靠改权限修复（例如 0600 密钥配非 root 容器、同一路径两种身份）：
     // 此时 `--apply` 不应动盘，避免把错误配置“应用”出去。
-    let apply = do_apply && derived.errors.is_empty();
+    // 有配置错误时也不再报「宿主组缺失」：身份本身就还没定下来，先把配置修正。
+    let config_error = !derived.errors.is_empty();
+    let apply = do_apply && !config_error;
+    let mut errors = derived.errors;
+    // gid → (待修项数, 涉及服务)：同一个 gid 只报一条。
+    let mut blocked: BTreeMap<u32, (usize, Vec<String>)> = BTreeMap::new();
     let mut mounts = Vec::new();
 
     for mount in &derived.mounts {
         let mut items = scan_mount_with_secret(mount, deploy_uid, secret)?;
-        if apply {
+        // 只在**确实有东西要改**时才拦：已对齐的现场不需要为「组关系」报错。
+        let needs_fix = items.iter().any(|i| i.status != ItemStatus::Aligned);
+        let blocked_by_group = (!config_error
+            && !privileged
+            && mount.container.uid != 0
+            && !groups.contains(&mount.container.gid)
+            && needs_fix)
+            .then_some(mount.container.gid);
+        if let Some(gid) = blocked_by_group {
+            let entry = blocked.entry(gid).or_insert_with(|| (0, Vec::new()));
+            entry.0 += items
+                .iter()
+                .filter(|i| i.status != ItemStatus::Aligned)
+                .count();
+            for name in mount.service.split(',') {
+                if !entry.1.iter().any(|s| s == name) {
+                    entry.1.push(name.to_string());
+                }
+            }
+        }
+        if apply && blocked_by_group.is_none() {
             for item in items.iter_mut() {
                 if item.status != ItemStatus::Pending {
                     continue;
@@ -905,7 +965,25 @@ fn run_derived_with_secret(
             read_only: mount.read_only,
             container: mount.container,
             items,
+            blocked_by_group,
         });
+    }
+
+    for (gid, (count, services)) in &blocked {
+        let current = groups
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("、");
+        errors.push(format!(
+            "部署账号（uid {deploy_uid}；当前组 {current}）不在容器 gid {gid} 的组里：\
+             {count} 项要 chgrp 到 {gid}（服务：{}）。非 root 只能 chgrp 到自己所在的组，\
+             这是宿主预置、gops 不提权。请管理员执行：\n  \
+             sudo groupadd -g {gid} <组名>      # 该 gid 尚无对应组时才需要\n  \
+             sudo usermod -aG {gid} <部署账号>   # 之后重新登录；systemd 服务需重启单元\n\
+             再重跑 `gops sys perms --apply`",
+            services.join("、")
+        ));
     }
 
     Ok(PermsReport {
@@ -916,8 +994,28 @@ fn run_derived_with_secret(
         mounts,
         warnings: derived.warnings,
         notes: derived.notes,
-        errors: derived.errors,
+        errors,
     })
+}
+
+/// 当前进程真实拥有的组（egid + 补充组）。
+///
+/// 只用于「动手前判定 `chgrp` 能不能成」：内核按**数字**比对进程凭据（`in_group_p`），
+/// 与 `/etc/group` 里有没有同名组无关。root 不受此限，调用方自行跳过。
+fn effective_groups() -> Vec<u32> {
+    let mut groups = vec![unsafe { libc::getegid() }];
+    // getgroups(2) 两次调用：先问个数、再取列表；组的集合在两次之间理论上可变，取回填值兜底。
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if count > 0 {
+        let mut buf = vec![0 as libc::gid_t; count as usize];
+        let filled = unsafe { libc::getgroups(count, buf.as_mut_ptr()) };
+        if filled > 0 {
+            groups.extend(buf[..filled as usize].iter().copied());
+        }
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    groups
 }
 
 fn scan_mount_with_secret(
@@ -1673,6 +1771,7 @@ mod tests {
                     status: ItemStatus::Pending,
                     reason: "属主 0 不是部署账号 1000".to_string(),
                 }],
+                blocked_by_group: None,
             }],
             warnings: vec![],
             notes: vec![],
@@ -1880,7 +1979,7 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
         assert_eq!(json["errors"].as_array().unwrap().len(), 1);
-        assert!(report.render_text().contains("配置冲突"));
+        assert!(report.render_text().contains("无法靠改权限解决"));
     }
 
     #[test]
@@ -2347,6 +2446,111 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("不创建密钥"), "{err}");
         assert!(!missing.exists(), "不能凭空造出密钥文件/目录");
+    }
+
+    #[test]
+    fn test_missing_container_group_reports_once_and_skips_apply() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let configs = root.join("configs");
+        std::fs::create_dir_all(&configs).unwrap();
+        let file = configs.join("app.conf");
+        std::fs::write(&file, "x").unwrap();
+        chmod(&configs, 0o755);
+        chmod(&file, 0o644);
+
+        // 容器 gid 用一个进程肯定不在的组，模拟「部署账号没加进容器组」。
+        let derived = Derived {
+            mounts: vec![mount(
+                &configs,
+                false,
+                ContainerId {
+                    uid: 9999,
+                    gid: 9999,
+                },
+            )],
+            warnings: vec![],
+            notes: vec![],
+            errors: vec![],
+        };
+        let report = run_derived_with_groups(root, derived, None, true, false, &[4242]).unwrap();
+
+        // 一次说清：只有一条 error，不展开逐项，也不动盘。
+        assert_eq!(report.errors.len(), 1, "{}", report.render_text());
+        assert!(report.errors[0].contains("9999"), "{}", report.errors[0]);
+        assert!(
+            report.errors[0].contains("usermod -aG"),
+            "{}",
+            report.errors[0]
+        );
+        assert_eq!(report.applied(), 0);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+            0o644,
+            "组关系缺失时 --apply 不能改盘"
+        );
+        assert_eq!(report.mounts[0].blocked_by_group, Some(9999));
+
+        let text = report.render_text();
+        assert!(text.contains("[BLOCKED]"), "{text}");
+        assert!(
+            !text.contains("app.conf"),
+            "逐项明细应收起（否则就是 136 行同一个 EPERM）：{text}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        assert_eq!(json["mounts"][0]["blocked_by_group"], 9999);
+    }
+
+    #[test]
+    fn test_aligned_mount_does_not_require_group_membership() {
+        // 反向保护：文件本来就对齐时，缺组成员关系不应报错（否则已经对齐的现场会被误拦）。
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let configs = root.join("configs");
+        std::fs::create_dir_all(&configs).unwrap();
+        let file = configs.join("app.conf");
+        std::fs::write(&file, "x").unwrap();
+        chmod(&configs, 0o2770);
+        chmod(&file, 0o660);
+
+        let derived = Derived {
+            mounts: vec![mount(&configs, false, current_id())],
+            warnings: vec![],
+            notes: vec![],
+            errors: vec![],
+        };
+        // 故意给一个不含该 gid 的组集合：只要有项要改才会拦。
+        let report = run_derived_with_groups(root, derived, None, false, false, &[4242]).unwrap();
+        assert!(report.errors.is_empty(), "{}", report.render_text());
+        assert_eq!(report.mounts[0].blocked_by_group, None);
+        assert!(report.is_ok(), "{}", report.render_text());
+    }
+
+    #[test]
+    fn test_privileged_apply_does_not_require_group_membership() {
+        // root / sudo 能 chgrp 到任意 gid：不报「宿主预置缺失」（是否能改盘由内核判）。
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let configs = root.join("configs");
+        std::fs::create_dir_all(&configs).unwrap();
+        chmod(&configs, 0o755);
+
+        let derived = Derived {
+            mounts: vec![mount(
+                &configs,
+                false,
+                ContainerId {
+                    uid: 9999,
+                    gid: 9999,
+                },
+            )],
+            warnings: vec![],
+            notes: vec![],
+            errors: vec![],
+        };
+        let report = run_derived_with_groups(root, derived, None, false, true, &[4242]).unwrap();
+        assert!(report.errors.is_empty(), "{}", report.render_text());
+        assert_eq!(report.mounts[0].blocked_by_group, None);
     }
 
     #[test]

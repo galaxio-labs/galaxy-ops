@@ -5,6 +5,19 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.3-alpha] - 2026-10-23
+
+### 修复
+
+- **`sys perms` 不再把「宿主预置缺失」打成 N 行同一个错**：部署账号不在容器 gid 的组里时，
+  `chgrp` 必然 `EPERM`（内核按 gid 数字判定，不看 `/etc/group` 里的名字）。现在动手前先取一次
+  真实生效的组，按 gid 汇总成**一条** `[FAIL]`（含 `groupadd` / `usermod -aG` 命令与重新登录提醒），
+  受影响挂载在文本里标 `[BLOCKED]`、不展开逐项明细；`--json` 新增 `mounts[].blocked_by_group`。
+  root（含 sudo）不受影响；**本来就已对齐**的现场不会因为缺组成员而报错（只在确实有项要改时才拦）。
+- `gops run start` 的权限 preflight 与 `prj diagnose` 的措辞随之对齐：从「配置错误 / 配置冲突」改为
+  「无法靠改权限解决（配置或宿主预置）」——两者修法不同（改清单 vs 管理员加组），提示不再把人引向
+  无效的 `--apply`。
+
 ## [2.10.2-alpha] - 2026-10-23
 
 ### 修复

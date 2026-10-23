@@ -507,8 +507,8 @@ impl SysCommandHandler {
             Ok(report) => {
                 if !report.errors.is_empty() {
                     eprintln!(
-                        "[WARN] 宿主 bind 挂载配置错误（{} 项）：`--apply` 不能修复，\
-                         请按 `gops sys perms` 的提示修改配置（`--no-perms-check` 关闭本检查）",
+                        "[WARN] 宿主 bind 挂载有 {} 项无法靠改权限解决（配置或宿主预置），\
+                         按 `gops sys perms` 的 [FAIL] 处理（`--no-perms-check` 关闭本检查）",
                         report.errors.len()
                     );
                 } else if !report.is_ok() {

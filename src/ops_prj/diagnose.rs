@@ -403,7 +403,7 @@ fn check_perms(root: &Path, names: &[&String], strict: bool, report: &mut Diagno
                     if perms.errors.is_empty() {
                         String::new()
                     } else {
-                        format!("，{} 项配置冲突", perms.errors.len())
+                        format!("，{} 项无法靠改权限解决", perms.errors.len())
                     }
                 );
                 let mut detail = perms.errors.clone();
@@ -424,8 +424,9 @@ fn check_perms(root: &Path, names: &[&String], strict: bool, report: &mut Diagno
                 } else {
                     report.warn("perms.drift", title, detail);
                 }
-                report
-                    .hint_last("运行 `gops sys perms --apply` 修复（只动系统根内的 bind source）");
+                report.hint_last(
+                    "看 `gops sys perms` 明细：可修复项用 `--apply`，配置 / 宿主组问题按提示处理",
+                );
             }
             Err(err) => {
                 report.warn(

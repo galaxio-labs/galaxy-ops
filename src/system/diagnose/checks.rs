@@ -273,10 +273,17 @@ fn port_conflicts(services: &[ServiceFacts]) -> Vec<Check> {
     checks
 }
 
-/// 私钥类文件不应被同组/其他用户读到（`0600`/`0400` 才对）。
+/// 私钥类文件不应被「其他用户」或「非容器的组」读到。
+///
+/// 例外：私钥**只读挂进非 root 容器**时，设计模式就是 `0640` + 属组=容器 gid（
+/// `gops sys perms` 的 `RO_FILE`）——属主=部署账号、容器按组读。所以「组读」只在
+/// **属组与 compose 里 `user:` 的 gid 一致**时放行；`0644` 这类 other 位与组写/组执行
+/// 一律算过宽。旧规则（`mode & 0o077 != 0`）会把本栈合理的 0640 判成问题，
+/// 还提示 `chmod 600` —— 那会让容器直接读不到私钥，反而把栈跑挂。
 fn cert_checks(services: &[ServiceFacts]) -> Vec<Check> {
     let mut checks = Vec::new();
     for service in services {
+        let container_gid = service.user.as_deref().and_then(container_gid_of);
         for mount in &service.mounts {
             if mount.kind != "bind" || mount.source_exists != Some(true) {
                 continue;
@@ -293,20 +300,46 @@ fn cert_checks(services: &[ServiceFacts]) -> Vec<Check> {
             let Ok(mode) = u32::from_str_radix(mode, 8) else {
                 continue;
             };
-            if mode & 0o077 != 0 {
-                checks.push(
-                    Check::warn(
-                        SOURCE,
-                        format!("gops.cert.{}", service.name),
-                        "私钥文件的权限过宽",
-                    )
-                    .with_detail(format!("{} mode={mode:04o}（应为 600/400）", mount.source))
-                    .with_hint("chmod 600 <私钥>；属主按容器 uid"),
-                );
+            let file_gid = mount.owner.as_deref().and_then(file_gid_of);
+            let other_or_write = mode & 0o007 != 0 || mode & 0o030 != 0;
+            let group_read_too_broad = mode & 0o040 != 0 && file_gid != container_gid;
+            if !other_or_write && !group_read_too_broad {
+                continue;
             }
+            let container = container_gid
+                .map(|gid| gid.to_string())
+                .unwrap_or_else(|| "未知".to_string());
+            let group = file_gid
+                .map(|gid| gid.to_string())
+                .unwrap_or_else(|| "未知".to_string());
+            checks.push(
+                Check::warn(
+                    SOURCE,
+                    format!("gops.cert.{}", service.name),
+                    "私钥文件对其他用户/非容器组可读或可写",
+                )
+                .with_detail(format!(
+                    "{} mode={mode:04o}（属组 {group}，容器 gid {container}）",
+                    mount.source
+                ))
+                .with_hint(
+                    "私钥应 0600/0400；只读挂进非 root 容器时用 0640 且属组=容器 gid\
+                     （`gops sys perms` 会对齐）",
+                ),
+            );
         }
     }
     checks
+}
+
+/// `user: "999:999"` → `Some(999)`；名字 / 只给 uid → `None`。
+fn container_gid_of(user: &str) -> Option<u32> {
+    user.split_once(':')?.1.trim().parse().ok()
+}
+
+/// `mount.owner`（`uid:gid`）→ gid。
+fn file_gid_of(owner: &str) -> Option<u32> {
+    owner.rsplit_once(':')?.1.trim().parse().ok()
 }
 
 /// 每个运行中容器最近 N 行里有没有 error 级线索（**只采集 + 脱敏，不解读**）。
@@ -570,6 +603,7 @@ mod tests {
             name: name.to_string(),
             container: Some(format!("stack-{name}-1")),
             image: Some("img:1".to_string()),
+            user: Some("999:999".to_string()),
             state: Some("running".to_string()),
             restart: Some("unless-stopped".to_string()),
             health: None,
@@ -729,6 +763,73 @@ mod tests {
             .unwrap();
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.detail.as_deref().unwrap().contains("0644"));
+    }
+
+    #[test]
+    fn a_group_readable_key_matching_the_container_gid_is_fine() {
+        // 本栈的设计模式：属主=部署账号、属组=容器 gid、0640（`gops sys perms` 的 RO_FILE）。
+        let mut svc = service("a");
+        svc.mounts = vec![MountFacts {
+            kind: "bind".into(),
+            source: "/srv/identity/private/admin.key.pem".into(),
+            target: "/cfg/key.pem".into(),
+            read_only: true,
+            source_exists: Some(true),
+            owner: Some("1000:999".into()),
+            mode: Some("0640".into()),
+        }];
+        let checks = builtin_all(&context(vec![svc]), 0);
+        assert!(
+            !codes(&checks).contains(&"gops.cert.a"),
+            "属组就是容器 gid 的 0640 不该报（否则会把人骗去 chmod 600 把栈跑挂）：{:?}",
+            codes(&checks)
+        );
+    }
+
+    #[test]
+    fn a_group_readable_key_with_another_group_is_a_warning() {
+        let mut svc = service("a");
+        svc.mounts = vec![MountFacts {
+            kind: "bind".into(),
+            source: "/srv/identity/private/admin.key.pem".into(),
+            target: "/cfg/key.pem".into(),
+            read_only: true,
+            source_exists: Some(true),
+            owner: Some("1000:1001".into()),
+            mode: Some("0640".into()),
+        }];
+        let checks = builtin_all(&context(vec![svc]), 0);
+        let check = checks
+            .iter()
+            .find(|check| check.code == "gops.cert.a")
+            .expect("属组不是容器 gid 时，0640 仍算过宽");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.as_deref().unwrap().contains("0640"));
+        assert!(
+            check.hint.as_deref().unwrap().contains("gops sys perms"),
+            "{}",
+            check.hint.as_deref().unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn a_group_writable_key_is_a_warning() {
+        let mut svc = service("a");
+        svc.mounts = vec![MountFacts {
+            kind: "bind".into(),
+            source: "/srv/identity/private/admin.key.pem".into(),
+            target: "/cfg/key.pem".into(),
+            read_only: true,
+            source_exists: Some(true),
+            owner: Some("1000:999".into()),
+            mode: Some("0660".into()),
+        }];
+        let checks = builtin_all(&context(vec![svc]), 0);
+        assert!(
+            codes(&checks).contains(&"gops.cert.a"),
+            "组可写对私钥仍然过宽：{:?}",
+            codes(&checks)
+        );
     }
 
     #[test]

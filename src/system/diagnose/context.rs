@@ -79,6 +79,11 @@ pub struct ServiceFacts {
     pub container: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// compose 里的 `user:`（`900:900` / `wist` / 缺省）。
+    ///
+    /// 用于判断「私钥 0640 的属组是不是容器 gid」——只看数字形式。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     /// `running` / `exited` / `created` / …；拿不到就是 `None`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
@@ -269,6 +274,7 @@ fn compose_facts(
                 .get("image")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            user: spec.get("user").and_then(Value::as_str).map(str::to_string),
             state: runtime.and_then(|item| field_str(item, "state")),
             restart: declared_restart(spec),
             health: runtime.and_then(|item| field_str(item, "health")),

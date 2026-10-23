@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.6-alpha] - 2026-10-23
+
+### 修复
+
+- **`gops.cert.*` 不再把「只读挂进非 root 容器的私钥」误报成权限过宽**：`0640` + 属组=容器 gid
+  是 `gops sys perms` 的设计模式（`RO_FILE`），旧判据（`mode & 0o077`）会建议 `chmod 600`，
+  照做后容器直接读不到私钥，反而把栈跑挂。现在从 compose 的 `user:` 取容器 gid：
+  `0640` 且属组一致 → 不报；`0644`（other 位）、组写/组执行、或属组不是容器 gid → 仍报。
+  诊断上下文新增 `services[].user`（可选，纯增量）。
+
 ## [2.10.5-alpha] - 2026-10-23
 
 ### 修复

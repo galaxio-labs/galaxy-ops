@@ -27,6 +27,10 @@ pub struct SysDefine {
     model: Option<ModelSTD>,
     #[serde(default, skip_serializing_if = "SysKind::is_gxl")]
     kind: SysKind,
+    /// 厂商标识。**缺省为空**（`#[serde(default)]`）：手写 / 老文件不写它时，
+    /// 整份 `sys_model.yml` 不能因为这一个字段解析失败 —— 那会让 `load_kind` 回落成 `gxl`，
+    /// 把 docker-compose 系统当成 gxl（`start`/`stop` 分派错，`diagnose` 还会报“无 diagnose 流程”）。
+    #[serde(default)]
     #[getset(set_with = "pub ")]
     vender: String,
 }

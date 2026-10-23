@@ -398,6 +398,11 @@ pub mod tests {
             .source_resource()?;
         assert_eq!(SysOperator::load_kind(&root), SysKind::DockerCompose);
 
+        // 4. 缺 `vender` 也应识别成 DockerCompose
+        //    （以前整份解析失败会静默回落 gxl，把 compose 系统当成 gxl）
+        std::fs::write(&define_file, "name: x\nkind: docker-compose\n").source_resource()?;
+        assert_eq!(SysOperator::load_kind(&root), SysKind::DockerCompose);
+
         Ok(())
     }
 

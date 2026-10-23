@@ -222,6 +222,24 @@ stop → run start(全部) → health(全部) → 报「已回滚（整工程）
 
 （`gxl` 的 module op-flow 本来就有 `update`/`restart`，见 `README.md` 的 ops-gxl 契约。）
 
+### 3.6 阶段流程的执行环境
+
+`gx run <flow>` 由 gops 拉起，子进程环境 = 发起 gops 那个环境，**除了一处**：
+
+- gops 会把**自身二进制所在目录**（`current_exe`）、**`argv[0]` 所在目录**与 `gx` 所在目录
+  **前置**进 `PATH`（再拼上原 `PATH`，去重，只收绝对路径）。
+
+`argv[0]` 那一项是为了软链到**改过名**的二进制（`/usr/local/bin/gops -> /opt/gops/gops-2.10.1`）：
+`current_exe` 指向的目录里没有叫 `gops` 的文件，只有软链所在目录有。
+
+理由：`gx.cmd` 的内容原样交给 `sh -c`，流程里普遍按裸名字调用 gops（如
+`gops sys perms --apply`）。而 gwlinkd / systemd / cron 触发升级时 `PATH` 往往只有系统目录，
+裸调用会「找不到命令」退 127，让整次升级被判失败并回滚。前置保证流程里拿到的就是
+**拉起这次流程的那个 gops**（不被 PATH 里的旧版抢走）。
+
+代价：gops 目录里若有同名命令（`docker` / `python3` 的 shim），流程会优先用它——与
+「交互式 shell 把 `~/bin` 放前面」同口径。流程作者若要绝对路径，写绝对路径即可。
+
 ## 4. 边界（哪些进 gops，哪些留系统侧）
 
 | 进 gops（通用，可复用于任何 gops prj） | 留系统侧 / 编排方（gops 不该知道） |

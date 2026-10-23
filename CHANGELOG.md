@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.2-alpha] - 2026-10-23
+
+### 修复
+
+- **非交互环境触发的升级不再因“找不到 gops”失败**：`gx run <flow>` 的子进程 `PATH`
+  会前置 gops / `gx` 所在目录（原 `PATH` 保留），流程里按裸名字调 `gops ...`
+  （如 `gops sys perms --apply`）在 systemd / gwlinkd / cron 下也能找到正确版本。
+- **`sys_model.yml` 缺 `vender` 时不再误判系统类型**：该字段改为可缺省，
+  docker-compose 系统不会被静默当成 gxl（避免 `start` / `stop` 分派错、
+  `diagnose` 报“无 diagnose 流程”）。
+
 ## [2.10.1-alpha] - 2026-10-22
 
 ### 修复

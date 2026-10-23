@@ -123,6 +123,109 @@ pub(crate) fn gx_run_args(
     args
 }
 
+/// 为 `gx` 子进程补 `PATH`：把**当前 gops 可执行文件所在目录**（以及调用它的目录、`gx`
+/// 所在目录）前置。
+///
+/// 为什么要补：`gx.cmd` 的内容由 `gx` 原样交给 `sh -c`，流程里普遍按裸名字调用 gops
+/// （例如 `gops sys perms --apply`）。而 `gx` 继承的是**发起 gops 那个环境**的 `PATH` ——
+/// 交互式 shell 里 gops 常在 `~/bin`、`/root/bin`，非交互场景（gwlinkd / systemd / cron
+/// 触发的升级）`PATH` 往往只有系统目录，裸调用会「找不到命令」退 127，整次升级被判定失败
+/// 并回滚（2026-10-22 的网关升级事故）。
+///
+/// 为什么要两个来源：
+///   · `current_exe()`：自更新把二进制装在**当前 exe 目录**且名字固定为 `gops`，最权威；
+///   · `argv[0]` 的目录：手动软链到**改过名**的二进制时（`/usr/local/bin/gops ->
+///     /opt/gops/gops-2.10.1`），exe 目录里并没有叫 `gops` 的文件，只有软链所在目录有。
+///
+/// 只**前置**不替换：原 `PATH` 全部保留在后面，不影响流程里的其它命令。
+///
+/// 代价（已知且接受）：gops 目录里如果同时放了别的同名命令（如 `docker`/`python3` 的
+/// shim），流程里会优先用到它们。这与「交互式 shell 把 `~/bin` 放在 PATH 前面」一致，
+/// 而正确的 gops 版本比避开这一点更重要（版本错配时 `sys perms` 一类子命令会直接不可用）。
+fn apply_gx_child_path(cmd: &mut TokioCommand, gx_path: &str) {
+    let base = std::env::var_os("PATH");
+    apply_gx_child_path_with(
+        cmd,
+        gx_path,
+        current_exe_dir(),
+        argv0_dir(),
+        base.as_deref(),
+    );
+}
+
+/// 真正组装并写入 `PATH` 的那一步：候选来源作为参数传入，便于用合成值单测。
+fn apply_gx_child_path_with(
+    cmd: &mut TokioCommand,
+    gx_path: &str,
+    exe_dir: Option<std::path::PathBuf>,
+    argv0_dir: Option<std::path::PathBuf>,
+    base: Option<&std::ffi::OsStr>,
+) {
+    let gops_dirs = gops_search_dirs(exe_dir, argv0_dir);
+    // 拼不出合法 PATH（目录名里带分隔符这类怪情况）就**不动**，交给子进程继承：
+    // 写一个空 PATH 比不写更糟，会把流程里的 sh/docker 一起弄死。
+    if let Some(path) = gx_child_path(&gops_dirs, gx_path, base) {
+        cmd.env("PATH", path);
+    }
+}
+
+/// 当前 gops 可执行文件所在目录。
+fn current_exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+}
+
+/// `argv[0]` 所在目录（裸名字时为 `None` / 相对路径后续会被过滤）。
+fn argv0_dir() -> Option<std::path::PathBuf> {
+    std::env::args_os()
+        .next()
+        .map(std::path::PathBuf::from)
+        .and_then(|argv0| argv0.parent().map(Path::to_path_buf))
+}
+
+/// 流程里要前置的 gops 目录：**exe 目录 → `argv[0]` 目录**。
+///
+/// 顺序有意义：`current_exe()` 最权威（自更新把二进制装在当前 exe 目录、名字固定 `gops`）；
+/// `argv[0]` 目录只在「软链到改过名的二进制」时才补位。
+fn gops_search_dirs(
+    exe_dir: Option<std::path::PathBuf>,
+    argv0_dir: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    [exe_dir, argv0_dir].into_iter().flatten().collect()
+}
+
+/// [`apply_gx_child_path`] 的纯函数部分（便于单测）：
+/// `gops_dirs`（exe 目录、argv[0] 目录）→ `gx` 目录 → 原 `PATH`，去重。
+///
+/// 只收**绝对路径**：相对目录进 `PATH` 后会按**流程 cwd** 解析，比不补更危险。
+/// 返回 `None` = 「按原样继承」，调用方就不要设 `PATH`。
+fn gx_child_path(
+    gops_dirs: &[std::path::PathBuf],
+    gx_path: &str,
+    base: Option<&std::ffi::OsStr>,
+) -> Option<std::ffi::OsString> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut candidates: Vec<std::path::PathBuf> = gops_dirs.to_vec();
+    // `gx_path` 是裸名字时 parent 为空串：交给下面的绝对路径过滤跳过。
+    if let Some(parent) = Path::new(gx_path).parent() {
+        candidates.push(parent.to_path_buf());
+    }
+    for dir in candidates {
+        if dir.is_absolute() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    if let Some(base) = base {
+        for dir in std::env::split_paths(base) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    std::env::join_paths(dirs).ok()
+}
+
 /// 统一的 gx 流程执行入口：`gx run -e <env> -d <n> [--cmd-arg <mod>] <flow>`，
 /// 并可按需把 `inject_env` 注入子进程环境。
 ///
@@ -139,6 +242,7 @@ pub(crate) async fn run_gx_flow(
 ) -> MainResult<()> {
     let mut cmd = TokioCommand::new(gx_path);
     cmd.args(gx_run_args(flow, env, debug, module));
+    apply_gx_child_path(&mut cmd, gx_path);
     // `gx` 按**工作目录**解析工程：目录可变时（如 `prj upgrade` 对某系统目录）必须显式设置，
     // 否则会拿进程 CWD 去解析，探测与流程都会落错地方。
     if let Some(dir) = cwd {
@@ -318,6 +422,7 @@ pub(crate) async fn run_gx_flow_capture(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    apply_gx_child_path(&mut cmd, gx_path);
     for (key, value) in inject_env {
         if is_reserved_env(key) {
             continue;
@@ -408,7 +513,10 @@ fn push_tail(tail: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::FlowProbe;
-    use super::{gx_bin_path_from, gx_run_args, is_reserved_env, probe_flow, run_gx_flow_capture};
+    use super::{
+        apply_gx_child_path, apply_gx_child_path_with, gops_search_dirs, gx_bin_path_from,
+        gx_child_path, gx_run_args, is_reserved_env, probe_flow, run_gx_flow_capture,
+    };
 
     #[cfg(unix)]
     fn fake_gx(dir: &std::path::Path, body: &str) -> String {
@@ -611,5 +719,222 @@ mod tests {
     fn gx_never_invents_slash_bin_gx_for_empty_home() {
         let got = gx_bin_path_from(Some(std::ffi::OsString::new()), None);
         assert_eq!(got, "gx", "HOME 空时不能拼出 /bin/gx");
+    }
+
+    #[test]
+    fn gx_child_path_prepends_gops_dir_and_keeps_base() {
+        // 非交互场景（systemd/gwlinkd）：base 只有系统目录，必须把 gops/gx 目录前置。
+        let base = std::ffi::OsString::from("/usr/bin:/bin");
+        let got = gx_child_path(
+            &[std::path::PathBuf::from("/root/bin")],
+            "/root/bin/gx",
+            Some(&base),
+        );
+        let dirs: Vec<_> = std::env::split_paths(&got.unwrap()).collect();
+        assert_eq!(dirs[0], std::path::Path::new("/root/bin"));
+        assert_eq!(dirs[1], std::path::Path::new("/usr/bin"));
+        assert_eq!(dirs[2], std::path::Path::new("/bin"));
+        assert_eq!(dirs.len(), 3, "gops 与 gx 同目录时只保留一份");
+    }
+
+    #[test]
+    fn gx_child_path_orders_exe_then_argv0_then_gx() {
+        // 软链到改过名的二进制：exe 目录里没有 `gops`，argv[0] 目录（软链所在处）有。
+        let got = gx_child_path(
+            &[
+                std::path::PathBuf::from("/opt/gops"),
+                std::path::PathBuf::from("/usr/local/bin"),
+            ],
+            "/home/u/bin/gx",
+            None,
+        );
+        let dirs: Vec<_> = std::env::split_paths(&got.unwrap()).collect();
+        assert_eq!(
+            dirs,
+            vec![
+                std::path::PathBuf::from("/opt/gops"),
+                std::path::PathBuf::from("/usr/local/bin"),
+                std::path::PathBuf::from("/home/u/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn gx_child_path_keeps_gx_dir_when_it_differs() {
+        let got = gx_child_path(
+            &[std::path::PathBuf::from("/opt/gops/bin")],
+            "/home/u/bin/gx",
+            None,
+        );
+        let dirs: Vec<_> = std::env::split_paths(&got.unwrap()).collect();
+        assert_eq!(
+            dirs,
+            vec![
+                std::path::PathBuf::from("/opt/gops/bin"),
+                std::path::PathBuf::from("/home/u/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn gx_child_path_skips_empty_parent_of_bare_name() {
+        let got = gx_child_path(&[std::path::PathBuf::from("/root/bin")], "gx", None);
+        let dirs: Vec<_> = std::env::split_paths(&got.unwrap()).collect();
+        assert_eq!(dirs, vec![std::path::PathBuf::from("/root/bin")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gx_child_path_gives_up_when_dirs_are_not_joinable() {
+        // 目录名里带 PATH 分隔符（unix 的 ':'）：拼不出合法 PATH 就返回 None，
+        // 调用方宁可不设 PATH，也不能写一个空/残缺的 PATH 把 sh、docker 一起弄死。
+        assert!(gx_child_path(&[std::path::PathBuf::from("/a:b")], "/a:b/gx", None).is_none());
+    }
+
+    #[test]
+    fn gx_child_path_skips_relative_dirs() {
+        // 相对目录进 PATH 会按**流程 cwd** 解析（如 ./bin/gops），比不补更危险。
+        let got =
+            gx_child_path(&[std::path::PathBuf::from("/root/bin")], "./bin/gx", None).unwrap();
+        let dirs: Vec<_> = std::env::split_paths(&got).collect();
+        assert_eq!(dirs, vec![std::path::PathBuf::from("/root/bin")]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_flow_sees_gops_dir_first_in_path() {
+        // 端到端：真的 spawn 一个 gx（假脚本），让它把看到的 PATH 写下来。
+        // 这条比「检查 Command 的 env」强：它穿过 run_gx_flow_capture 的完整路径。
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("path.txt");
+        let gx = fake_gx(
+            dir.path(),
+            &format!("printf '%s' \"$PATH\" > {}\n", out.display()),
+        );
+        run_gx_flow_capture(
+            &gx,
+            "default",
+            0,
+            "diagnose",
+            None,
+            &[],
+            dir.path(),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let seen = std::fs::read_to_string(&out).unwrap();
+        let dirs: Vec<_> = std::env::split_paths(&seen).collect();
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(
+            dirs.first().map(|d| d.to_path_buf()),
+            Some(exe_dir),
+            "流程里拿到的 PATH 应把 gops 目录放在最前：{seen}"
+        );
+        assert_eq!(
+            dirs.get(1).map(|d| d.to_path_buf()),
+            Some(dir.path().to_path_buf()),
+            "gx 目录紧随其后：{seen}"
+        );
+    }
+
+    #[test]
+    fn apply_gx_child_path_sets_gops_dir_first() {
+        // 守住接线：纯函数写对了，但忘了/写错在 run_gx_flow 里生效也白搭。
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        apply_gx_child_path(&mut cmd, "/bin/sh");
+
+        let path = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+            .expect("PATH 应被显式设置");
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(dirs.first(), Some(&exe_dir), "gops 自身目录必须在最前面");
+
+        // 原 PATH 必须一项不少地跟在后面（不假设它是哪个目录，免得在精简环境的 CI 上误报）。
+        if let Some(base) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&base) {
+                assert!(
+                    dirs.contains(&dir),
+                    "原 PATH 项丢了：{}（{path:?}）",
+                    dir.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gops_search_dirs_orders_exe_then_argv0() {
+        let dirs = gops_search_dirs(
+            Some(std::path::PathBuf::from("/opt/gops")),
+            Some(std::path::PathBuf::from("/usr/local/bin")),
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                std::path::PathBuf::from("/opt/gops"),
+                std::path::PathBuf::from("/usr/local/bin"),
+            ],
+            "exe 目录在前，argv[0] 目录补位"
+        );
+    }
+
+    #[test]
+    fn gops_search_dirs_tolerates_missing_sources() {
+        assert!(gops_search_dirs(None, None).is_empty());
+        assert_eq!(
+            gops_search_dirs(None, Some(std::path::PathBuf::from("/usr/local/bin"))),
+            vec![std::path::PathBuf::from("/usr/local/bin")],
+            "取不到 exe 目录时不能把 argv[0] 目录一起丢了"
+        );
+        assert_eq!(
+            gops_search_dirs(Some(std::path::PathBuf::from("/root/bin")), None),
+            vec![std::path::PathBuf::from("/root/bin")]
+        );
+    }
+
+    #[test]
+    fn apply_gx_child_path_with_puts_both_sources_before_base() {
+        // 用合成目录：exe 目录与 argv[0] 目录不同，才能看出两个都写进去了（真实进程里二者相同）。
+        // 这条能钉住「有没有把 argv[0] 目录传给 gops_search_dirs」—— 删掉那一项会直接红。
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        let base = std::ffi::OsString::from("/usr/bin:/bin");
+        apply_gx_child_path_with(
+            &mut cmd,
+            "/home/u/bin/gx",
+            Some(std::path::PathBuf::from("/opt/gops")),
+            Some(std::path::PathBuf::from("/usr/local/bin")),
+            Some(&base),
+        );
+
+        let path = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+            .expect("PATH 应被显式设置");
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            vec![
+                std::path::PathBuf::from("/opt/gops"),
+                std::path::PathBuf::from("/usr/local/bin"),
+                std::path::PathBuf::from("/home/u/bin"),
+                std::path::PathBuf::from("/usr/bin"),
+                std::path::PathBuf::from("/bin"),
+            ]
+        );
     }
 }

@@ -16,6 +16,11 @@ use galaxy_ops::prelude::ErrorOwe;
 /// 外部执行器 `gx`（galaxy-flow）的最低版本要求。
 pub(crate) const GX_MIN_VERSION: (u32, u32, u32) = (0, 13, 0);
 
+/// `gx run --exists` 从 galaxy-flow 0.14 开始提供。
+///
+/// 比这个版本更老的 gx 会把 `--exists` 当成非法参数；这不是「没有这个流程」。
+pub(crate) const GX_EXISTS_MIN_VERSION: (u32, u32) = (0, 14);
+
 /// `gx` 可执行文件路径（`$HOME/bin/gx`）。
 pub(crate) fn gx_bin_path() -> String {
     gx_bin_path_from(std::env::var_os("HOME"), std::env::var_os("PATH"))
@@ -368,9 +373,19 @@ pub(crate) enum FlowProbe {
 }
 
 /// 探测项目里是否有某个流程（`gx run --exists`）。
+///
+/// `--exists` 是 galaxy-flow 0.14 才有的参数：更老的 gx 会把它当成非法参数（clap 退 2，
+/// stderr `error: unexpected argument '--exists' found`）。这不是「没有这个流程」，必须
+/// 归到 `Unavailable` —— 否则**所有**阶段流程都会被静默跳过（2026-10-30 的中心栈事故：
+/// gx 0.13.10 上 `sys localize` 不跑 `localize` 流程，`configs/` 整棵没生成，
+/// 直到 `docker compose config` 找不到 `env_file` 才暴露）。
 pub(crate) fn probe_flow(gx_path: &str, flow: &str, cwd: &Path) -> FlowProbe {
-    match Command::new(gx_path).arg("-V").output() {
-        Ok(output) if output.status.success() => {}
+    let version = match Command::new(gx_path).arg("-V").output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // 形如 `gx 0.13.10`：取第二个词给报错文案用，解析不出来就留空。
+            stdout.split_whitespace().nth(1).unwrap_or("").to_string()
+        }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return FlowProbe::Unavailable(if stderr.is_empty() {
@@ -380,7 +395,10 @@ pub(crate) fn probe_flow(gx_path: &str, flow: &str, cwd: &Path) -> FlowProbe {
             });
         }
         Err(err) => return FlowProbe::Unavailable(format!("无法执行 {gx_path}：{err}")),
-    }
+    };
+    // `--exists` 本身成功时以结果为准（允许旧版本移植），所以版本只做**失败后的兜底**：
+    // 0.13.x 的报错文案随 clap 版本变化，不能只靠 stderr 字符串。
+    let before_exists = gx_before_exists_support(&version).unwrap_or(false);
     match Command::new(gx_path)
         .args(["run", "--exists", flow])
         .current_dir(cwd)
@@ -389,6 +407,9 @@ pub(crate) fn probe_flow(gx_path: &str, flow: &str, cwd: &Path) -> FlowProbe {
         Ok(output) if output.status.success() => FlowProbe::Exists,
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if rejects_exists_flag(&stderr) || before_exists {
+                return FlowProbe::Unavailable(unsupported_exists_reason(gx_path, &version, flow));
+            }
             FlowProbe::Absent(if stderr.is_empty() {
                 format!("gx --exists 退出码 {:?}", output.status.code())
             } else {
@@ -397,6 +418,43 @@ pub(crate) fn probe_flow(gx_path: &str, flow: &str, cwd: &Path) -> FlowProbe {
         }
         Err(err) => FlowProbe::Unavailable(format!("无法执行 gx：{err}")),
     }
+}
+
+/// `gx -V` 的版本是否**明确**低于 `--exists` 的最低要求。
+///
+/// 解析 `0.13.10` / `v0.13.10-alpha`；解析不出来（自定义构建 / 输出格式变化）返回 `None`，
+/// 让调用方退回 stderr 判定。
+fn gx_before_exists_support(version: &str) -> Option<bool> {
+    let version = version.trim().trim_start_matches('v');
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let mut parts = core.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    Some((major, minor) < GX_EXISTS_MIN_VERSION)
+}
+
+fn unsupported_exists_reason(gx_path: &str, version: &str, flow: &str) -> String {
+    let shown = if version.is_empty() {
+        "版本未知".to_string()
+    } else {
+        format!("当前 {version}")
+    };
+    format!(
+        "`{gx_path}` 不支持 `run --exists`（需要 galaxy-flow >= 0.14），{shown}；\
+         无法判定流程 `{flow}` 是否存在，先用 `gx self update` 升级 gx"
+    )
+}
+
+/// `gx run --exists` 的 stderr 是否在说「不认识这个参数」（clap 的非法参数报错）。
+///
+/// 兼容 clap 3（`Found argument ... which wasn't expected`）与 clap 4
+/// （`unexpected argument ... found`）：只认带 `--exists` 的参数报错，
+/// 避免把「流程不存在」误判成「gx 太旧」。
+fn rejects_exists_flag(stderr: &str) -> bool {
+    stderr.contains("--exists")
+        && (stderr.contains("unexpected argument")
+            || stderr.contains("wasn't expected")
+            || stderr.contains("unknown argument"))
 }
 
 /// 跑一个流程并把它的输出**全部收进 stderr**（stdout 留给 `gops run diagnose --json`）。
@@ -514,8 +572,9 @@ fn push_tail(tail: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: &str) {
 mod tests {
     use super::FlowProbe;
     use super::{
-        apply_gx_child_path, apply_gx_child_path_with, gops_search_dirs, gx_bin_path_from,
-        gx_child_path, gx_run_args, is_reserved_env, probe_flow, run_gx_flow_capture,
+        apply_gx_child_path, apply_gx_child_path_with, gops_search_dirs, gx_before_exists_support,
+        gx_bin_path_from, gx_child_path, gx_run_args, is_reserved_env, probe_flow,
+        rejects_exists_flag, run_gx_flow_capture,
     };
 
     #[cfg(unix)]
@@ -561,6 +620,75 @@ mod tests {
             probe_flow(&ok, "diagnose", dir.path()),
             FlowProbe::Exists
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_flow_reports_old_gx_without_exists_flag_as_unavailable() {
+        // gx < 0.14：`run --exists` 是非法参数（clap 退 2）。若归到 `Absent`，
+        // compose 系统的阶段流程会被**静默跳过** —— 报了成功、配置却没渲染。
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = fake_gx(
+            dir.path(),
+            "if [ \"$1\" = \"-V\" ]; then echo 'gx 0.13.10'; exit 0; fi\n\
+             echo \"error: unexpected argument '--exists' found\" >&2\n\
+             exit 2\n",
+        );
+        match probe_flow(&legacy, "localize", dir.path()) {
+            FlowProbe::Unavailable(reason) => {
+                assert!(reason.contains("0.13.10"), "reason={reason}");
+                assert!(reason.contains("0.14"), "reason={reason}");
+                assert!(reason.contains("gx self update"), "reason={reason}");
+            }
+            _ => panic!("gx 太旧时必须报 Unavailable，否则阶段流程会被静默跳过"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_flow_reports_old_gx_by_version_even_without_clap_wording() {
+        // 0.13.x 的 `--exists` 失败文案不只一种（clap 版本/包装脚本都可能不同）：
+        // 版本已明确 < 0.14 时，不应再依赖 stderr 字符串。
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = fake_gx(
+            dir.path(),
+            "if [ \"$1\" = \"-V\" ]; then echo 'gx 0.13.10'; exit 0; fi\n\
+             echo 'unknown command' >&2\n\
+             exit 1\n",
+        );
+        match probe_flow(&legacy, "localize", dir.path()) {
+            FlowProbe::Unavailable(reason) => {
+                assert!(reason.contains("0.13.10"), "reason={reason}");
+                assert!(reason.contains("0.14"), "reason={reason}");
+            }
+            _ => panic!("版本明确 < 0.14 时必须报 Unavailable"),
+        }
+    }
+
+    #[test]
+    fn gx_before_exists_support_parses_common_versions() {
+        assert_eq!(gx_before_exists_support("0.13.10"), Some(true));
+        assert_eq!(gx_before_exists_support("v0.13.10-alpha"), Some(true));
+        assert_eq!(gx_before_exists_support("0.14.0"), Some(false));
+        assert_eq!(gx_before_exists_support("0.14.0-alpha"), Some(false));
+        assert_eq!(gx_before_exists_support("0.17.0"), Some(false));
+        // 解析不出来时不能乱猜：留给 stderr 判定
+        assert_eq!(gx_before_exists_support(""), None);
+        assert_eq!(gx_before_exists_support("dev"), None);
+    }
+
+    #[test]
+    fn rejects_exists_flag_accepts_clap_variants_only() {
+        assert!(rejects_exists_flag(
+            "error: unexpected argument '--exists' found"
+        ));
+        assert!(rejects_exists_flag(
+            "error: Found argument '--exists' which wasn't expected"
+        ));
+        assert!(rejects_exists_flag("unknown argument --exists"));
+        // 只是提到 --exists（如“流程不存在”）不能当成参数不识别
+        assert!(!rejects_exists_flag("flow `--exists` not found"));
+        assert!(!rejects_exists_flag("unexpected argument '--foo' found"));
     }
 
     #[cfg(unix)]

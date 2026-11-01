@@ -179,8 +179,12 @@ depends.yml   replaced
 
 - **声明只有一处**：流程写在 `_gal/work.gxl`，不在 `sys_model.yml` 里再声明。
 - **判定确定**：用 `gx run --exists localize`（galaxy-flow ≥ 0.14）判定存在性，不靠试跑猜退出码。
+  gx < 0.14 不认识 `--exists`（clap 退 2，`unexpected argument`）——这**不是**「没有这个流程」，
+  否则所有阶段流程都会被静默跳过（报成功、配置却没渲染）。这类情况归到「gx 不可用」，按下面的口径报出来。
 - **执行命令**：`gx run -e default -d <debug> localize`——因此流程需能用 `env default` 运行（conf 里声明 `env default`；脚手架生成的 `_gal/work.gxl` 已包含）。
-- **可选依赖**：gx 未安装 / 版本过旧 / 项目没有该流程 → **静默跳过**（compose 系统照常可用）；`-d 1` 会打印**跳过原因**（如 conf 解析错误、gx 过旧），便于排障。
+- **跳过与告警**：项目**没有**该流程 → 跳过（compose 系统照常可用；`-d 1` 打印跳过原因）；
+  gx **不可用**（未安装 / 版本过旧 / 跑不起来）→ 交互式 `sys localize` 打**一行 WARN**（不再静默），
+  `prj upgrade` 的事务（strict）直接失败。确实不需要流程时用 `--no-flow`。
 - **顺序**：gops 先写完 `.env`，再跑流程。
 - **值传递**：合并后的配置（与 `.env` **完全一致**——同一批键、同样做过 `${}` 展开）会作为**环境变量注入** gx 子进程，流程里可直接读 `${DOMAIN}` 等；注入时会**保留** `PATH`/`HOME`/`SHELL`/`LD_*`/`DYLD_*`/`GX*`/`GXL_*` 等关键变量不被覆盖（避免破坏 gx 自身或其 shell）。
 - **失败即失败**：流程非零退出 → `sys localize` 整体失败。

@@ -524,7 +524,10 @@ impl SysCommandHandler {
                     eprintln!("[WARN] {warning}");
                 }
             }
-            Err(err) => eprintln!("[WARN] 宿主权限自检跳过：{err}"),
+            Err(err) => eprintln!(
+                "[WARN] 宿主权限自检跳过：{}",
+                galaxy_ops::error::user_message(&err)
+            ),
         }
     }
 

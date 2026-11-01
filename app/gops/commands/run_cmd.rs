@@ -12,7 +12,7 @@ use clap::{Args, Parser};
 use derive_getters::Getters;
 use tokio::process::Command as TokioCommand;
 
-use galaxy_ops::error::MainResult;
+use galaxy_ops::error::{MainResult, user_message};
 use galaxy_ops::infra::DfxArgsGetter;
 use galaxy_ops::system::Subscriber;
 use galaxy_ops::system::SysKind;
@@ -426,7 +426,7 @@ impl RunCommandHandler {
         )
         .await
         {
-            report.flow_failure(diagnose::FLOW_NAME, &format!("{err}"));
+            report.flow_failure(diagnose::FLOW_NAME, &user_message(&err));
             return;
         }
 
@@ -440,7 +440,7 @@ impl RunCommandHandler {
                 ),
             },
             Ok(None) => report.flow_empty(diagnose::FLOW_NAME),
-            Err(err) => report.flow_failure(diagnose::FLOW_NAME, &format!("{err}")),
+            Err(err) => report.flow_failure(diagnose::FLOW_NAME, &user_message(&err)),
         }
     }
 
@@ -554,7 +554,12 @@ fn perms_preflight(dir: &Path, apply_fix: bool) -> MainResult<()> {
             report.render_text()
         ))),
         Err(err) => {
-            eprintln!("[WARN] 宿主权限 preflight 跳过：{err}");
+            // 派生依赖 `docker compose config`：渲染不出来（如 compose 声明的 `env_file`
+            // 还没生成）时不只是“跳过自检”，`gops run start` 同样会失败，所以要把 detail 原样说清。
+            eprintln!(
+                "[WARN] 宿主权限 preflight 跳过：{}",
+                galaxy_ops::error::user_message(&err)
+            );
             Ok(())
         }
     }

@@ -512,7 +512,11 @@ fn apply_sys_perms(sys_dir: &Path) {
             report.pending(),
             report.failed()
         ),
-        Err(err) => eprintln!("[WARN] {} 宿主权限对齐跳过：{err}", sys_dir.display()),
+        Err(err) => eprintln!(
+            "[WARN] {} 宿主权限对齐跳过：{}",
+            sys_dir.display(),
+            galaxy_ops::error::user_message(&err)
+        ),
     }
 }
 

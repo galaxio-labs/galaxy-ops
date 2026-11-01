@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.7-alpha] - 2026-11-01
+
+### 修复
+
+- **旁路提示不再变成多行噪声**：`gops run diagnose` 的流程失败、`sys perms` / `prj restore|upgrade`
+  的跳过告警，现在只输出**可执行的原因（单行 detail）**，不再附带 `reason + Info + Trace` 多行块。
+- **旧版 gx（< 0.14，不支持 `run --exists`）不再被当成“没有流程”静默跳过**：交互式
+  `sys localize` 会打 WARN，`prj upgrade` 事务直接失败并提示 `gx self update`，避免
+  “报了成功、配置却没渲染”。版本判定有版本号兜底，且兼容 clap 3/4 的报错文案。
+
 ## [2.10.6-alpha] - 2026-10-23
 
 ### 修复

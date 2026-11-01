@@ -185,6 +185,20 @@ impl MainReason {
 pub type MainResult<T> = Result<T, StructError<MainReason>>;
 pub type MainError = StructError<MainReason>;
 
+/// 面向人的错误说明：**优先 `detail`**（通常才是可执行的那句话），没有才退回 reason。
+///
+/// `StructError` 的 `Display` 是“reason + `-> Info: <detail>` + 可能的 Trace”多行输出；
+/// 单行 WARN / 报告条目里直接 `{err}` 会打断版面、标题也没有信息量（`logic_detail(...)`
+/// 的 reason 是 `internal logic error`）。这里只取 detail 这一行，保证旁路提示可读。
+pub fn user_message(err: &MainError) -> String {
+    err.detail()
+        .as_deref()
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| err.reason().to_string())
+}
+
 pub const PATH_NOT_EXIST: &str = "path not exists";
 
 pub fn report_error(e: StructError<MainReason>) {
@@ -239,5 +253,21 @@ mod tests {
             reason,
             MainReason::Accessor(AddrReason::OperationTimeoutExceeded { attempts: 2, .. })
         ));
+    }
+
+    #[test]
+    fn test_user_message_prefers_detail_over_reason() {
+        // `logic_detail` 的 reason 文本是 `internal logic error`：旁路 WARN 打它等于没说。
+        let err = MainReason::logic_detail("`docker compose config` 失败：env_file 不存在");
+        assert_eq!(
+            user_message(&err),
+            "`docker compose config` 失败：env_file 不存在"
+        );
+    }
+
+    #[test]
+    fn test_user_message_falls_back_to_reason_without_detail() {
+        let err: MainError = StructError::new(MainReason::Sys(SysReason::Load), None, None, vec![]);
+        assert_eq!(user_message(&err), "sys load fail");
     }
 }

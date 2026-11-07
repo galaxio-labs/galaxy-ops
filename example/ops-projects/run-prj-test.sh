@@ -40,7 +40,7 @@ if [ -z "${GOPS:-}" ]; then
   fi
 fi
 if ! command -v "$GOPS" >/dev/null 2>&1 && [ ! -x "$GOPS" ]; then
-  echo "未找到可执行的 gops：$GOPS（用 GOPS=... 指定）" >&2
+  echo "未找到可执行的 gops：${GOPS}（用 GOPS=... 指定）" >&2
   exit 1
 fi
 

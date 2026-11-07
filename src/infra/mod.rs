@@ -1,3 +1,4 @@
+pub mod http;
 mod log;
 mod path;
 pub use log::once_init_log;

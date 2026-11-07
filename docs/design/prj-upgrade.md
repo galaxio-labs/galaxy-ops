@@ -90,6 +90,18 @@ git tag、本地包目录读取。普通 HTTP 包地址：
 - `latest`：没有天然停止条件，仍需在 `addr` 版本段的父目录放 `versions.json` 或
   `versions.txt`（每行/每项一个版本），例如 `https://.../wist-center-stack/versions.json`；
 - 没有清单且探测不到时，退化为精确版本或 `--to`。
+
+GitHub 镜像前缀（`https://githubproxy.cc/https://github.com/<owner>/<repo>/...`）按 GitHub
+仓库处理：`latest` 仍走 `api.github.com` 的 release 列表（镜像只代理制品下载，不提供
+`versions.json`）；API 不可达时 `patch` / `minor` / `major` 退回到直接探测镜像上的制品地址，
+`latest` 会明确报错并提示改用 `patch` / 精确版本 / `--to`。
+
+**网络 / 代理**：目标地址存在但请求发不出去时，gops 先用系统代理（`HTTP(S)_PROXY` /
+`ALL_PROXY`）请求，**传输层**失败再用直连重试一次；直连成功时只把这台主机加进 `NO_PROXY`，
+让后续下载（含 `orion-accessor` 内部的客户端）也对它跳过代理，不影响其它确实需要代理的目标。
+`wget` 不使用 `ALL_PROXY`，所以「`wget` 能下、`gops` 报 `error sending request for url (...)`」
+通常就是这里；错误信息会带完整 `source` 链（DNS / 代理 / TLS / 超时），不再是只有顶层一句。
+
 通道 `stable|alpha|beta` 对齐 `gops self`，`-c/--channel` 缺省按当前部署版本后缀推断。
 解析出的具体版本在**任何副作用之前**确定，并在成功后回写 `ops-prj.yml` 的 `version:`
 （`--no-save` 可关闭）。

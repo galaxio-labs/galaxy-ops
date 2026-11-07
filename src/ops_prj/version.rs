@@ -199,15 +199,28 @@ pub async fn try_list_versions(
         return Ok(Some(list_git_tags(&template).await?));
     }
     if template.starts_with("http://") || template.starts_with("https://") {
-        // 通用 HTTP 版本目录：在版本段父目录放 versions.json / versions.txt。
-        // 这样不绑定 GitHub，普通对象存储（COS/S3/OSS/nginx）也能枚举版本。
-        if let Some(base) = http_version_base(&template)
+        let github = github_repo(&template);
+        let direct_github = is_direct_github(&template);
+        // GitHub 镜像前缀（`https://githubproxy.cc/https://github.com/...`）只代理制品下载，
+        // 不提供 `versions.json` 之类的目录：请求只会拿到镜像首页的 200 HTML。
+        // 当成清单解析会把「解析 versions.json 失败」这种莫名其妙的错误抛给用户。
+        if !uses_github_mirror(&template)
+            && let Some(base) = http_version_base(&template)
             && let Some(entries) = fetch_version_manifest(&base).await?
         {
             return Ok(Some(entries));
         }
-        if let Some((owner, repo)) = github_repo(&template) {
-            return Ok(Some(list_github_releases(&owner, &repo).await?));
+        if let Some((owner, repo)) = github {
+            match list_github_releases(&owner, &repo).await {
+                Ok(entries) => return Ok(Some(entries)),
+                // 走镜像的常见原因是 api.github.com 不可达；`patch`/`minor`/`major`
+                // 仍可按版本规则探测 URL，交给调用方（`latest` 会在那里明确报错）。
+                Err(err) if !direct_github => {
+                    debug!("GitHub Releases 枚举失败（走镜像，改为 URL 探测）：{err}");
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            }
         }
         return Ok(None);
     }
@@ -244,10 +257,18 @@ pub async fn probe_versions(
 ) -> MainResult<Vec<VersionEntry>> {
     match spec {
         VersionSpec::Latest => {
+            let template = sys.addr_template();
+            let mirror_hint = if uses_github_mirror(&template) {
+                "\n  当前 addr 走 GitHub 镜像前缀（如 githubproxy.cc）：镜像只代理制品下载，\
+                 无法枚举 release；latest 需要能访问 api.github.com，\
+                 或改用 `-v patch` / 精确版本 / `--to <完整地址>`。"
+            } else {
+                ""
+            };
             return Err(MainReason::logic_detail(format!(
                 "系统 {} 的 latest 需要可枚举的版本清单（versions.json / versions.txt、\
                  GitHub Releases、git tag 或本地目录）；\n  \
-                 `patch` / `minor` / `major` 可以按规则做 URL 探测。",
+                 `patch` / `minor` / `major` 可以按规则做 URL 探测。{mirror_hint}",
                 sys.sys().name()
             )));
         }
@@ -271,20 +292,19 @@ pub async fn probe_versions(
     let current = parse_current(current)?;
     let suffix = channel_suffix(channel);
     let candidates = candidate_versions(&current, spec, suffix)?;
-    let client = reqwest::Client::builder()
-        .user_agent("gops")
-        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
+    let timeout = Duration::from_secs(PROBE_TIMEOUT_SECS);
+    let client = crate::infra::http::client(timeout)?;
+    let direct = crate::infra::http::direct_client(timeout)?;
 
     for chunk in candidates.chunks(PROBE_CONCURRENCY) {
         let mut tasks = tokio::task::JoinSet::new();
         for version in chunk {
             let client = client.clone();
+            let direct = direct.clone();
             let url = sys.resolved_addr_with(&version.to_string())?;
             let version = version.clone();
             tasks.spawn(async move {
-                let exists = http_object_exists(&client, &url).await?;
+                let exists = http_object_exists(&client, &direct, &url).await?;
                 Ok::<_, MainError>((version, exists))
             });
         }
@@ -387,15 +407,26 @@ fn channel_suffix(channel: ReleaseChannel) -> &'static str {
     }
 }
 
-async fn http_object_exists(client: &reqwest::Client, url: &str) -> MainResult<bool> {
-    let mut head = client.head(url);
-    if let Some(token) = github_token_for(url) {
-        head = head.bearer_auth(token);
-    }
-    let resp = head
-        .send()
-        .await
-        .map_err(|e| MainReason::resource_detail(format!("探测目标失败（HEAD）{url}: {e}")))?;
+async fn http_object_exists(
+    client: &reqwest::Client,
+    direct: &reqwest::Client,
+    url: &str,
+) -> MainResult<bool> {
+    let auth = github_token_for(url);
+    let (resp, _) = crate::infra::http::send_with_direct_retry(url, client, direct, |client| {
+        let req = client.head(url);
+        match auth.clone() {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        }
+    })
+    .await
+    .map_err(|(first, second)| {
+        MainReason::resource_detail(format!(
+            "探测目标失败（HEAD）{url}: {}",
+            crate::infra::http::retry_failed_note(&first, &second)
+        ))
+    })?;
     let status = resp.status();
     if status.is_success() {
         return Ok(true);
@@ -406,12 +437,19 @@ async fn http_object_exists(client: &reqwest::Client, url: &str) -> MainResult<b
 
     // 部分对象存储/静态服务器不接受 HEAD；用最小 Range GET 再确认。
     if matches!(status.as_u16(), 403 | 405 | 501) {
-        let mut get = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
-        if let Some(token) = github_token_for(url) {
-            get = get.bearer_auth(token);
-        }
-        let resp = get.send().await.map_err(|e| {
-            MainReason::resource_detail(format!("探测目标失败（GET Range）{url}: {e}"))
+        let (resp, _) = crate::infra::http::send_with_direct_retry(url, client, direct, |client| {
+            let req = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
+            match auth.clone() {
+                Some(token) => req.bearer_auth(token),
+                None => req,
+            }
+        })
+        .await
+        .map_err(|(first, second)| {
+            MainReason::resource_detail(format!(
+                "探测目标失败（GET Range）{url}: {}",
+                crate::infra::http::retry_failed_note(&first, &second)
+            ))
         })?;
         let status = resp.status();
         if status.is_success() {
@@ -643,32 +681,38 @@ fn http_version_base(template: &str) -> Option<String> {
         .iter()
         .position(|segment| segment.contains(VERSION_PLACEHOLDER))?;
 
+    // 原样拼回版本段之前的路径：不能丢掉空段，否则镜像前缀里的 `https://` 会被压成
+    // `https:/`（`https://proxy/https://github.com/...` → `https://proxy/https:/github.com/...`）。
     let mut base = format!("{scheme}://{authority}");
-    for segment in &segments[..version_idx] {
-        if !segment.is_empty() {
-            base.push('/');
-            base.push_str(segment);
-        }
+    let prefix = segments[..version_idx].join("/");
+    if !prefix.is_empty() {
+        base.push_str(&prefix);
     }
-    base.push('/');
+    if !base.ends_with('/') {
+        base.push('/');
+    }
     Some(base)
 }
 
 /// 读取通用 HTTP 版本清单：优先 `versions.json`，其次 `versions.txt`。
 async fn fetch_version_manifest(base: &str) -> MainResult<Option<Vec<VersionEntry>>> {
-    let client = reqwest::Client::builder()
-        .user_agent("gops")
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
+    let timeout = Duration::from_secs(20);
+    let client = crate::infra::http::client(timeout)?;
+    let direct = crate::infra::http::direct_client(timeout)?;
 
     for (file, is_json) in [("versions.json", true), ("versions.txt", false)] {
         let url = format!("{base}{file}");
-        let resp = client
-            .get(&url)
-            .send()
+        let (resp, _) =
+            crate::infra::http::send_with_direct_retry(&url, &client, &direct, |client| {
+                client.get(&url)
+            })
             .await
-            .map_err(|e| MainReason::resource_detail(format!("读取版本清单失败 {url}: {e}")))?;
+            .map_err(|(first, second)| {
+                MainReason::resource_detail(format!(
+                    "读取版本清单失败 {url}: {}",
+                    crate::infra::http::retry_failed_note(&first, &second)
+                ))
+            })?;
         let status = resp.status();
         // 清单是可选增强：部分对象存储对不存在的对象返回 401/403，
         // 不能因此拦住后面的 URL 探测；真不存在与无权限在这里等价。
@@ -757,12 +801,12 @@ fn normalize_entries(mut entries: Vec<VersionEntry>) -> MainResult<Vec<VersionEn
 }
 
 /// 从 GitHub 地址里取 `owner/repo`。
+///
+/// 除直连 GitHub 外，也识别被镜像前缀包住的地址：
+/// `https://githubproxy.cc/https://github.com/dayu-sec/wist-cred-stack/...`。
 pub fn github_repo(template: &str) -> Option<(String, String)> {
-    let rest = template
-        .strip_prefix("https://github.com/")
-        .or_else(|| template.strip_prefix("http://github.com/"))
-        .or_else(|| template.strip_prefix("https://www.github.com/"))
-        .or_else(|| template.strip_prefix("http://www.github.com/"))?;
+    let marker = "github.com/";
+    let rest = &template[template.find(marker)? + marker.len()..];
     let mut parts = rest.split('/');
     let owner = parts.next()?.trim();
     let repo = parts.next()?.trim().trim_end_matches(".git");
@@ -770,6 +814,25 @@ pub fn github_repo(template: &str) -> Option<(String, String)> {
         return None;
     }
     Some((owner.to_string(), repo.to_string()))
+}
+
+/// 地址本身是不是 GitHub（而不是被镜像前缀包住的 GitHub 地址）。
+fn is_direct_github(template: &str) -> bool {
+    [
+        "https://github.com/",
+        "http://github.com/",
+        "https://www.github.com/",
+        "http://www.github.com/",
+    ]
+    .iter()
+    .any(|prefix| template.starts_with(prefix))
+}
+
+/// 地址是不是「镜像前缀 + GitHub 地址」（如 `https://githubproxy.cc/https://github.com/...`）。
+///
+/// 这类镜像通常只代理制品下载，不提供 `versions.json` 之类可枚举目录。
+fn uses_github_mirror(template: &str) -> bool {
+    github_repo(template).is_some() && !is_direct_github(template)
 }
 
 #[derive(Debug, Deserialize)]
@@ -781,20 +844,26 @@ struct GhRelease {
 
 async fn list_github_releases(owner: &str, repo: &str) -> MainResult<Vec<VersionEntry>> {
     let api = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
-    let client = reqwest::Client::builder()
-        .user_agent("gops")
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
-    let mut req = client
-        .get(&api)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json");
-    if let Some(token) = github_token() {
-        req = req.bearer_auth(token);
-    }
+    let timeout = Duration::from_secs(20);
+    let client = crate::infra::http::client(timeout)?;
+    let direct = crate::infra::http::direct_client(timeout)?;
+    let token = github_token();
 
-    let resp = req.send().await.map_err(|e| {
-        MainReason::resource_detail(format!("请求 GitHub Releases 失败 {api}: {e}"))
+    let (resp, _) = crate::infra::http::send_with_direct_retry(&api, &client, &direct, |client| {
+        let req = client
+            .get(&api)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json");
+        match token.clone() {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        }
+    })
+    .await
+    .map_err(|(first, second)| {
+        MainReason::resource_detail(format!(
+            "请求 GitHub Releases 失败 {api}: {}",
+            crate::infra::http::retry_failed_note(&first, &second)
+        ))
     })?;
     let status = resp.status();
     let body = resp
@@ -1195,6 +1264,13 @@ mod tests {
             Some("https://host/".to_string())
         );
         assert_eq!(http_version_base("https://host/pkgs/s.tar.gz"), None);
+        // 镜像前缀里的 `https://` 不能压成 `https:/`，否则清单请求会打到镜像首页而不是目录。
+        assert_eq!(
+            http_version_base(
+                "https://githubproxy.cc/https://github.com/o/r/releases/download/v{version}/x.tar.gz"
+            ),
+            Some("https://githubproxy.cc/https://github.com/o/r/releases/download/".to_string())
+        );
     }
 
     #[test]
@@ -1754,6 +1830,27 @@ mod tests {
         );
         assert_eq!(github_repo("https://example.com/o/r.tar.gz"), None);
         assert_eq!(github_repo("https://github.com/o"), None);
+        // 镜像前缀包住的 GitHub 地址也要能认出 owner/repo。
+        assert_eq!(
+            github_repo(
+                "https://githubproxy.cc/https://github.com/dayu-sec/wist-cred-stack/releases/download/v{version}/x.tar.gz"
+            ),
+            Some(("dayu-sec".to_string(), "wist-cred-stack".to_string()))
+        );
+    }
+
+    #[test]
+    fn uses_github_mirror_only_for_proxied_github_urls() {
+        assert!(uses_github_mirror(
+            "https://githubproxy.cc/https://github.com/o/r/releases/download/v{version}/x.tar.gz"
+        ));
+        assert!(uses_github_mirror(
+            "https://ghproxy.net/github.com/o/r/releases/download/v{version}/x.tar.gz"
+        ));
+        assert!(!uses_github_mirror(
+            "https://github.com/o/r/releases/download/v{version}/x.tar.gz"
+        ));
+        assert!(!uses_github_mirror("https://host/pkgs/s-v{version}.tar.gz"));
     }
 
     #[test]

@@ -28,6 +28,7 @@ use super::version::{self, VersionSpec, infer_channel};
 use crate::accessor::accessor_for_default;
 use crate::const_vars::SYS_PRJ_CONF_FILE_V2;
 use crate::error::{MainError, MainReason};
+use crate::infra::http;
 use crate::self_update::ReleaseChannel;
 use crate::system::SysConf;
 use crate::system::lock::DeliverLock;
@@ -984,53 +985,75 @@ async fn verify_target_exists(project_root: &Path, addr: &str) -> MainResult<()>
 }
 
 async fn verify_http_target(url: &str) -> MainResult<()> {
-    let client = reqwest::Client::builder()
-        .user_agent("gops")
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| MainReason::resource_detail(format!("创建 HTTP 客户端失败：{e}")))?;
+    let timeout = Duration::from_secs(20);
+    let client = http::client(timeout)?;
+    let direct = http::direct_client(timeout)?;
+    let auth = github_token_for(url);
 
-    let mut head = client.head(url);
-    if let Some(token) = github_token_for(url) {
-        head = head.bearer_auth(token);
-    }
-    let resp = head
-        .send()
-        .await
-        .map_err(|e| MainReason::resource_detail(format!("检查目标包失败（HEAD）{url}: {e}")))?;
+    let (resp, _) = http::send_with_direct_retry(url, &client, &direct, |client| {
+        let req = client.head(url);
+        match auth.clone() {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        }
+    })
+    .await
+    .map_err(|(first, second)| {
+        MainReason::resource_detail(format!(
+            "检查目标包失败（HEAD）{url}: {}",
+            http::retry_failed_note(&first, &second)
+        ))
+    })?;
     let status = resp.status();
     if status.is_success() {
         return Ok(());
     }
 
-    // 一些静态服务器/对象存储不接受 HEAD（405/501），或有边缘策略返回 403；
-    // 用最小 Range GET 再确认一次，避免把“不支持 HEAD”误判成“包不存在”。
-    if matches!(status.as_u16(), 403 | 405 | 501) {
-        let mut get = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
-        if let Some(token) = github_token_for(url) {
-            get = get.bearer_auth(token);
+    // 一些静态服务器/对象存储/代理对 HEAD 支持不完整：405/501，或按方法/UA 区别限流（403/429/503）。
+    // 用一个最小 Range GET 再确认一次，避免把“HEAD 被拒”误判成“包不存在”。
+    // （实测：githubproxy 等镜像通过 wget/GET 正常，HEAD 在某些边缘节点会失败。）
+    let (resp, _) = http::send_with_direct_retry(url, &client, &direct, |client| {
+        let req = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
+        match auth.clone() {
+            Some(token) => req.bearer_auth(token),
+            None => req,
         }
-        let resp = get.send().await.map_err(|e| {
-            MainReason::resource_detail(format!("检查目标包失败（GET Range）{url}: {e}"))
-        })?;
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        return Err(http_status_error(url, status, "GET Range"));
+    })
+    .await
+    .map_err(|(first, second)| {
+        MainReason::resource_detail(format!(
+            "检查目标包失败（GET Range）{url}: {}",
+            http::retry_failed_note(&first, &second)
+        ))
+    })?;
+    let get_status = resp.status();
+    if get_status.is_success() {
+        return Ok(());
     }
 
-    Err(http_status_error(url, status, "HEAD"))
+    Err(http_status_error(url, status, get_status))
 }
 
-fn http_status_error(url: &str, status: reqwest::StatusCode, method: &str) -> MainError {
-    let hint = match status.as_u16() {
+fn http_status_error(
+    url: &str,
+    head_status: reqwest::StatusCode,
+    get_status: reqwest::StatusCode,
+) -> MainError {
+    // 以更具体的 404 优先，避免 HEAD 命中、GET 反向（或反之）时把“不存在”说成其它错误。
+    let hint_status = if head_status == reqwest::StatusCode::NOT_FOUND
+        || get_status == reqwest::StatusCode::NOT_FOUND
+    {
+        reqwest::StatusCode::NOT_FOUND
+    } else {
+        get_status
+    };
+    let hint = match hint_status.as_u16() {
         401 | 403 => "（可能需要鉴权；GitHub 可设置 GITHUB_TOKEN）",
         404 => "（包不存在或无权访问）",
         _ => "",
     };
     MainReason::resource_detail(format!(
-        "目标包不存在或不可访问：{url}\n  {method} → HTTP {status}{hint}"
+        "目标包不存在或不可访问：{url}\n  HEAD → HTTP {head_status} / GET Range → HTTP {get_status}{hint}"
     ))
 }
 
@@ -1604,6 +1627,18 @@ mod tests {
             .with_status(206)
             .create_async()
             .await;
+        // 镜像/边缘节点可能对 HEAD 返回 503（限流/未支持），GET 却正常。
+        let throttled = server
+            .mock("HEAD", "/throttled.tar.gz")
+            .with_status(503)
+            .create_async()
+            .await;
+        let throttled_range = server
+            .mock("GET", "/throttled.tar.gz")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
+            .create_async()
+            .await;
 
         verify_target_exists(Path::new("."), &format!("{}/pkg.tar.gz", server.url()))
             .await
@@ -1615,11 +1650,19 @@ mod tests {
         verify_target_exists(Path::new("."), &format!("{}/no-head.tar.gz", server.url()))
             .await
             .unwrap();
+        verify_target_exists(
+            Path::new("."),
+            &format!("{}/throttled.tar.gz", server.url()),
+        )
+        .await
+        .unwrap();
 
         ok.assert_async().await;
         missing.assert_async().await;
         no_head.assert_async().await;
         range.assert_async().await;
+        throttled.assert_async().await;
+        throttled_range.assert_async().await;
     }
 
     #[tokio::test]

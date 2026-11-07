@@ -262,6 +262,9 @@ pub enum PrjCmd {
                      普通 HTTP 源（COS/S3/OSS/nginx）没有清单时，`patch`/`minor`/`major` 会按版本规则\n\
                      生成候选地址并探测是否存在；`latest` 需要 `versions.json`/`versions.txt`，\n\
                      或用精确版本 / `--to <完整地址>`。\n\
+                     GitHub 镜像前缀（如 `https://githubproxy.cc/https://github.com/...`）按 GitHub 仓库处理：\n\
+                     `latest` 仍走 `api.github.com`；API 不可达时 `patch`/`minor`/`major` 直接探测镜像上的地址，\n\
+                     `latest` 会提示改用 `patch` / 精确版本 / `--to`。\n\
                      成功后把解析出的具体版本回写 `ops-prj.yml`（`--no-save` 关闭）。\n\
                      只覆盖包内内容并保留现场态（`sys-prj.yml: protect`）；备份/回滚走 `prj backup`/`restore`。\
                      与 `prj sync` 的区别：本命令是**事务**（含备份 / 重渲 / 拉镜像 / 切换 / 探活，可回滚）；\

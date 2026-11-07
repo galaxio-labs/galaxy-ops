@@ -72,6 +72,12 @@ pub async fn fetch_and_prepare(
     options: &DownloadOptions,
 ) -> MainResult<PathBuf> {
     let address = convert_addr(addr)?;
+    // 配了代理环境变量时先做一次轻量探测：代理不通而直连可用 → 后续 accessor 下载改走直连。
+    // （reqwest 会读 HTTP(S)_PROXY / ALL_PROXY，wget 不使用 ALL_PROXY，常见“wget 能下、gops 不能”。）
+    if let Address::Http(http) = &address {
+        crate::infra::http::probe_proxy_health(http.url(), std::time::Duration::from_secs(30))
+            .await;
+    }
     let work_path = package_work_dir();
     // 落一行日志：客户报文里最常缺的就是“它到底往哪个目录写”
     debug!("package work dir: {}", work_path.display());

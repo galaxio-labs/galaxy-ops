@@ -5,6 +5,26 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.8-alpha] - 2026-11-07
+
+### 修复
+
+- **`prj upgrade` / `sync` / `import` 支持 GitHub 镜像前缀地址**（如
+  `https://githubproxy.cc/https://github.com/<owner>/<repo>/...`）。带 `{version}` 模板的镜像地址
+  以前会被拼成 `https:/github.com/...` 去请求 `versions.json`，于是 `latest`/`patch`/`minor`/`major`
+  一律报「解析 versions.json 失败」。现在镜像地址按 GitHub 仓库处理：`latest` 走 `api.github.com`，
+  API 不可达时 `patch`/`minor`/`major` 直接探测镜像上的制品地址，`latest` 会提示改用
+  `patch` / 精确版本 / `--to`。
+- **`wget` 能下、`gops` 却报 `error sending request for url (...)`**：gops 现在先用系统代理请求，
+  传输层失败会自动直连重试一次，并把该主机加进 `NO_PROXY` 让后续下载也跳过代理；错误信息会带上完整的
+  DNS / 代理 / TLS / 超时原因链。HEAD 被镜像或边缘节点拒绝（403/405/429/503 等）时改用
+  `GET Range` 复核，不再误判成「包不存在」。
+
+### 工程
+
+- HTTP 客户端统一到 `infra::http`：`prj upgrade` 的目标校验、版本清单、GitHub Releases、
+  候选版本探测共用同一套代理回退与错误渲染；reqwest 启用 `socks` feature（`ALL_PROXY=socks5://...`）。
+
 ## [2.10.7-alpha] - 2026-11-01
 
 ### 修复

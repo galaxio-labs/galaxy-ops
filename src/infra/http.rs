@@ -107,7 +107,8 @@ pub fn retry_failed_note(first: &reqwest::Error, second: &reqwest::Error) -> Str
         note.push_str(
             "\n  提示：请求超时且未检测到代理环境变量。若 `wget` 能下载，请确认它是否用了\
              ~/.wgetrc / /etc/wgetrc 里的代理（gops 只读 HTTP(S)_PROXY / ALL_PROXY 环境变量）；\
-             可以 `export HTTPS_PROXY=<代理>` 后重试。",
+             可以 `export HTTPS_PROXY=<代理>` 后重试。\n  \
+             临时可用：先 `wget <url>` 把包下到本地，再 `gops prj upgrade --to <本地包>`。",
         );
     }
     note
@@ -205,6 +206,217 @@ fn bypass_proxy_for_host(url: &str, first: &reqwest::Error) {
     );
 }
 
+/// 系统 `curl`/`wget` 探测结果。
+#[derive(Debug)]
+pub enum SystemProbe {
+    /// 机器上没有 `curl` 也没有 `wget`。
+    Missing,
+    /// 拿到了最终 HTTP 状态码。
+    Status(u16),
+    /// 工具存在，但请求失败（超时/连接错误/退出码异常）。
+    Failed(String),
+}
+
+/// 系统 `curl`/`wget` 下载结果。
+#[derive(Debug)]
+pub enum SystemDownload {
+    Missing,
+    Done,
+    Failed(String),
+}
+
+/// 用系统 `curl`（其次 `wget`）探测 URL 的最终 HTTP 状态码。
+///
+/// 只作为 gops 自带 HTTP 客户端的**兜底**：部分受限网络里，Rust TLS 栈的
+/// 握手/请求会被中间设备或 WAF 卡住（表现为整体超时），而系统 `wget`/`curl` 正常。
+pub async fn system_probe(url: &str, timeout: Duration) -> SystemProbe {
+    let max_time = timeout.as_secs().max(1).to_string();
+    let curl = tokio::process::Command::new("curl")
+        .args([
+            "-sS",
+            "-L",
+            "-o",
+            "/dev/null",
+            "-r",
+            "0-0",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            &max_time,
+            url,
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await;
+    match curl {
+        Ok(out) if out.status.success() => {
+            let code = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u16>()
+                .unwrap_or(0);
+            if code == 0 {
+                SystemProbe::Failed("curl 没有返回状态码".to_string())
+            } else {
+                SystemProbe::Status(code)
+            }
+        }
+        Ok(out) => SystemProbe::Failed(stderr_tail(&out.stderr)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            system_probe_wget(url, &max_time).await
+        }
+        Err(err) => SystemProbe::Failed(format!("执行 curl 失败：{err}")),
+    }
+}
+
+async fn system_probe_wget(url: &str, max_time: &str) -> SystemProbe {
+    let timeout_arg = format!("--timeout={max_time}");
+    let out = tokio::process::Command::new("wget")
+        .args([
+            "-q",
+            "-O",
+            "/dev/null",
+            "--server-response",
+            "--tries=1",
+            "--max-redirect=10",
+            &timeout_arg,
+            "--header=Range: bytes=0-0",
+            url,
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await;
+    match out {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if let Some(status) = last_http_status(&stderr) {
+                return SystemProbe::Status(status);
+            }
+            if out.status.success() {
+                SystemProbe::Status(200)
+            } else {
+                SystemProbe::Failed(stderr_tail(&out.stderr))
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => SystemProbe::Missing,
+        Err(err) => SystemProbe::Failed(format!("执行 wget 失败：{err}")),
+    }
+}
+
+/// 从 wget `--server-response` 的输出里取最后一个 `HTTP/x.y <code>`。
+fn last_http_status(stderr: &str) -> Option<u16> {
+    stderr.lines().rev().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("HTTP/")?;
+        let (_version, code) = rest.split_once(' ')?;
+        code.split_whitespace().next()?.parse::<u16>().ok()
+    })
+}
+
+/// 用系统 `curl`（其次 `wget`）把 `url` 下到 `dest`（先写 `.part` 再 rename）。
+///
+/// 只在 `orion-accessor` 下载失败后调用；成功/失败都会打印一条警告，
+/// 便于现场知道这次走了系统工具。
+pub async fn system_download(
+    url: &str,
+    dest: &std::path::Path,
+    timeout: Duration,
+    auth: Option<(&str, &str)>,
+) -> SystemDownload {
+    let part = dest.with_extension("part");
+    let _ = std::fs::remove_file(&part);
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let connect = timeout.as_secs().max(1).to_string();
+
+    let mut curl = tokio::process::Command::new("curl");
+    curl.args([
+        "-fSL",
+        "--retry",
+        "2",
+        "--connect-timeout",
+        &connect,
+        // 大包可能下很久，但不能无限挂起；900s 作为整体上限。
+        "--max-time",
+        "900",
+        "-o",
+    ])
+    .arg(&part)
+    .arg(url)
+    .kill_on_drop(true);
+    if let Some((user, password)) = auth {
+        curl.arg("-u").arg(format!("{user}:{password}"));
+    }
+
+    match curl.output().await {
+        Ok(out) if out.status.success() => finish_system_download(&part, dest),
+        Ok(out) => SystemDownload::Failed(stderr_tail(&out.stderr)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let timeout_arg = format!("--timeout={connect}");
+            let mut wget = tokio::process::Command::new("wget");
+            wget.args(["-q", "--tries=2", &timeout_arg, "-O"])
+                .arg(&part)
+                .arg(url)
+                .kill_on_drop(true);
+            if let Some((user, password)) = auth {
+                wget.arg(format!("--user={user}"))
+                    .arg(format!("--password={password}"));
+            }
+            match wget.output().await {
+                Ok(out) if out.status.success() => finish_system_download(&part, dest),
+                Ok(out) => SystemDownload::Failed(stderr_tail(&out.stderr)),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => SystemDownload::Missing,
+                Err(err) => SystemDownload::Failed(format!("执行 wget 失败：{err}")),
+            }
+        }
+        Err(err) => SystemDownload::Failed(format!("执行 curl 失败：{err}")),
+    }
+}
+
+fn finish_system_download(part: &std::path::Path, dest: &std::path::Path) -> SystemDownload {
+    match std::fs::rename(part, dest) {
+        Ok(()) => SystemDownload::Done,
+        Err(err) => {
+            let _ = std::fs::remove_file(part);
+            SystemDownload::Failed(format!(
+                "重命名 {} -> {} 失败：{err}",
+                part.display(),
+                dest.display()
+            ))
+        }
+    }
+}
+
+/// 取 URL 的最后一段作为文件名（与 accessor 的缓存命名一致）。
+pub fn url_file_name(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|mut segments| segments.next_back().map(str::to_string))
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "file.bin".to_string())
+}
+
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join(" | ");
+    if tail.is_empty() {
+        "（无输出）".to_string()
+    } else {
+        tail
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +477,59 @@ mod tests {
         assert_eq!(resp.status(), 200);
         assert!(first.is_some(), "should report the proxy error");
         mock.assert_async().await;
+    }
+
+    #[test]
+    fn last_http_status_parses_wget_server_response() {
+        let stderr = "  HTTP/1.1 302 Found\n  Location: /x\n  HTTP/1.1 206 Partial Content\n";
+        assert_eq!(last_http_status(stderr), Some(206));
+        assert_eq!(last_http_status("no headers"), None);
+    }
+
+    #[tokio::test]
+    async fn system_probe_uses_system_tools() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/pkg.tar.gz")
+            .with_status(200)
+            .create_async()
+            .await;
+        match system_probe(
+            &format!("{}/pkg.tar.gz", server.url()),
+            Duration::from_secs(10),
+        )
+        .await
+        {
+            SystemProbe::Status(code) => assert!(code == 200 || code == 206, "status={code}"),
+            SystemProbe::Missing => {} // 环境里没有 curl/wget 时跳过
+            SystemProbe::Failed(err) => panic!("unexpected system probe failure: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn system_download_writes_file() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/pkg.tar.gz")
+            .with_status(200)
+            .with_body("hello")
+            .create_async()
+            .await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp.path().join("pkg.tar.gz");
+        match system_download(
+            &format!("{}/pkg.tar.gz", server.url()),
+            &dest,
+            Duration::from_secs(10),
+            None,
+        )
+        .await
+        {
+            SystemDownload::Done => {
+                assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello")
+            }
+            SystemDownload::Missing => {}
+            SystemDownload::Failed(err) => panic!("unexpected system download failure: {err}"),
+        }
     }
 }

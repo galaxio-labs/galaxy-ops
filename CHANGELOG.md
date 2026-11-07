@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.10-alpha] - 2026-11-07
+
+### 修复
+
+- **gops 的 HTTP 客户端连不上、但 `wget`/`curl` 能连的环境**：`prj import` / `sync` / `upgrade`
+  在自带客户端**传输层失败**（超时/连接错误）后，会自动改用系统 `curl`（其次 `wget`）包存在性
+  校验与下载兜底，并打印一条 ⚠ 说明。用于 Rust TLS 栈被中间设备/WAF 卡住、而系统工具正常的
+  场景（典型症状：同一 URL `wget` 秒下，`gops` 反复 `operation timed out`）。
+
 ## [2.10.9-alpha] - 2026-11-07
 
 ### 修复

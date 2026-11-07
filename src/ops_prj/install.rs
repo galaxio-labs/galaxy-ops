@@ -95,11 +95,45 @@ pub async fn fetch_and_prepare(
             project_root.join(raw)
         }
     } else {
-        let up_unit = accessor
+        match accessor
             .download_to_local(&address, &work_path, options)
             .await
-            .map_err(crate::error::MainReason::from_addr_error)?;
-        up_unit.position().clone()
+        {
+            Ok(up_unit) => up_unit.position().clone(),
+            Err(err) => {
+                // 自带 HTTP/TLS 栈在某些受限网络里会被卡住（整体超时），而系统
+                // `curl`/`wget` 正常；这里用后者做一次兜底下载。
+                let original = crate::error::MainReason::from_addr_error(err);
+                let Address::Http(http) = &address else {
+                    return Err(original);
+                };
+                let dest = work_path.join(crate::infra::http::url_file_name(http.url()));
+                eprintln!(
+                    "⚠ gops 自带 HTTP 客户端下载失败，改用系统 curl/wget 下载：{}",
+                    http.url()
+                );
+                let auth = match (http.username(), http.password()) {
+                    (Some(user), Some(password)) => Some((user.as_str(), password.as_str())),
+                    _ => None,
+                };
+                match crate::infra::http::system_download(
+                    http.url(),
+                    &dest,
+                    std::time::Duration::from_secs(30),
+                    auth,
+                )
+                .await
+                {
+                    crate::infra::http::SystemDownload::Done => dest,
+                    crate::infra::http::SystemDownload::Missing => return Err(original),
+                    crate::infra::http::SystemDownload::Failed(sys) => {
+                        return Err(MainReason::resource_detail(format!(
+                            "下载系统包失败：{original}\n  系统 curl/wget 兜底也失败：{sys}"
+                        )));
+                    }
+                }
+            }
+        }
     };
     let installer = SystemPackageInstaller::new(project_paths).with_pkg_path(pkg_path);
     let package = build_pkg(addr)?;

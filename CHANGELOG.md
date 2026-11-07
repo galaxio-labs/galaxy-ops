@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.9-alpha] - 2026-11-07
+
+### 修复
+
+- **目标包检查不再依赖 HEAD，也不受 HTTP/2 / IPv6 影响**：`prj upgrade` 的包存在性校验与
+  候选版本探测统一改成带 `Range: bytes=0-0` 的 GET（与 `wget`/`curl` 一致，只读首字节），
+  并锁定 HTTP/1.1；直连回退只走 IPv4。修复「`wget` 能下，但 `gops` 对同一个地址报
+  `error sending request ... → operation timed out`」。
+- **超时错误给出可操作的下一步**：两次尝试都超时且没有代理环境变量时，会提示检查
+  `~/.wgetrc` / `/etc/wgetrc` 里的代理（gops 只读 `HTTP(S)_PROXY` / `ALL_PROXY`），
+  并给出 `export HTTPS_PROXY=...` 的用法。
+
 ## [2.10.8-alpha] - 2026-11-07
 
 ### 修复

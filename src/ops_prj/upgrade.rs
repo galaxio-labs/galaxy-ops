@@ -990,28 +990,8 @@ async fn verify_http_target(url: &str) -> MainResult<()> {
     let direct = http::direct_client(timeout)?;
     let auth = github_token_for(url);
 
-    let (resp, _) = http::send_with_direct_retry(url, &client, &direct, |client| {
-        let req = client.head(url);
-        match auth.clone() {
-            Some(token) => req.bearer_auth(token),
-            None => req,
-        }
-    })
-    .await
-    .map_err(|(first, second)| {
-        MainReason::resource_detail(format!(
-            "检查目标包失败（HEAD）{url}: {}",
-            http::retry_failed_note(&first, &second)
-        ))
-    })?;
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(());
-    }
-
-    // 一些静态服务器/对象存储/代理对 HEAD 支持不完整：405/501，或按方法/UA 区别限流（403/429/503）。
-    // 用一个最小 Range GET 再确认一次，避免把“HEAD 被拒”误判成“包不存在”。
-    // （实测：githubproxy 等镜像通过 wget/GET 正常，HEAD 在某些边缘节点会失败。）
+    // 主检查用带 `Range` 的 GET（与 wget/curl 一致）：只读首字节，不拉全包；
+    // 部分镜像/边缘节点对 HEAD 会挂起或拒绝（HEAD 超时连状态码都拿不到）。
     let (resp, _) = http::send_with_direct_retry(url, &client, &direct, |client| {
         let req = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
         match auth.clone() {
@@ -1026,34 +1006,46 @@ async fn verify_http_target(url: &str) -> MainResult<()> {
             http::retry_failed_note(&first, &second)
         ))
     })?;
-    let get_status = resp.status();
-    if get_status.is_success() {
+    let status = resp.status();
+    if status.is_success() {
         return Ok(());
     }
 
-    Err(http_status_error(url, status, get_status))
+    // 少数服务器禁用 GET（405/501），或用不带 Range 的 HEAD 才能确认存在；
+    // 其它状态码（401/403/404/5xx）就是结论本身，再发 HEAD 只会多一次请求。
+    if matches!(status.as_u16(), 405 | 501) {
+        let (resp, _) = http::send_with_direct_retry(url, &client, &direct, |client| {
+            let req = client.head(url);
+            match auth.clone() {
+                Some(token) => req.bearer_auth(token),
+                None => req,
+            }
+        })
+        .await
+        .map_err(|(first, second)| {
+            MainReason::resource_detail(format!(
+                "检查目标包失败（HEAD）{url}: {}",
+                http::retry_failed_note(&first, &second)
+            ))
+        })?;
+        let head_status = resp.status();
+        if head_status.is_success() {
+            return Ok(());
+        }
+        return Err(http_status_error(url, head_status));
+    }
+
+    Err(http_status_error(url, status))
 }
 
-fn http_status_error(
-    url: &str,
-    head_status: reqwest::StatusCode,
-    get_status: reqwest::StatusCode,
-) -> MainError {
-    // 以更具体的 404 优先，避免 HEAD 命中、GET 反向（或反之）时把“不存在”说成其它错误。
-    let hint_status = if head_status == reqwest::StatusCode::NOT_FOUND
-        || get_status == reqwest::StatusCode::NOT_FOUND
-    {
-        reqwest::StatusCode::NOT_FOUND
-    } else {
-        get_status
-    };
-    let hint = match hint_status.as_u16() {
+fn http_status_error(url: &str, status: reqwest::StatusCode) -> MainError {
+    let hint = match status.as_u16() {
         401 | 403 => "（可能需要鉴权；GitHub 可设置 GITHUB_TOKEN）",
         404 => "（包不存在或无权访问）",
         _ => "",
     };
     MainReason::resource_detail(format!(
-        "目标包不存在或不可访问：{url}\n  HEAD → HTTP {head_status} / GET Range → HTTP {get_status}{hint}"
+        "目标包不存在或不可访问：{url}\n  HTTP {status}{hint}"
     ))
 }
 
@@ -1604,39 +1596,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_target_exists_checks_http_status_and_head_fallback() {
+    async fn verify_target_exists_uses_ranged_get_and_head_fallback() {
         let mut server = mockito::Server::new_async().await;
         let ok = server
-            .mock("HEAD", "/pkg.tar.gz")
-            .with_status(200)
+            .mock("GET", "/pkg.tar.gz")
+            .match_header("range", "bytes=0-0")
+            .with_status(206)
             .create_async()
             .await;
         let missing = server
-            .mock("HEAD", "/missing.tar.gz")
+            .mock("GET", "/missing.tar.gz")
             .with_status(404)
             .create_async()
             .await;
-        let no_head = server
-            .mock("HEAD", "/no-head.tar.gz")
+        // 少数服务器禁用 GET，只有 HEAD 能确认存在。
+        let no_get = server
+            .mock("GET", "/no-get.tar.gz")
             .with_status(405)
             .create_async()
             .await;
-        let range = server
-            .mock("GET", "/no-head.tar.gz")
-            .match_header("range", "bytes=0-0")
-            .with_status(206)
-            .create_async()
-            .await;
-        // 镜像/边缘节点可能对 HEAD 返回 503（限流/未支持），GET 却正常。
-        let throttled = server
-            .mock("HEAD", "/throttled.tar.gz")
-            .with_status(503)
-            .create_async()
-            .await;
-        let throttled_range = server
-            .mock("GET", "/throttled.tar.gz")
-            .match_header("range", "bytes=0-0")
-            .with_status(206)
+        let head = server
+            .mock("HEAD", "/no-get.tar.gz")
+            .with_status(200)
             .create_async()
             .await;
 
@@ -1647,22 +1628,14 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("HTTP 404"), "{err}");
-        verify_target_exists(Path::new("."), &format!("{}/no-head.tar.gz", server.url()))
+        verify_target_exists(Path::new("."), &format!("{}/no-get.tar.gz", server.url()))
             .await
             .unwrap();
-        verify_target_exists(
-            Path::new("."),
-            &format!("{}/throttled.tar.gz", server.url()),
-        )
-        .await
-        .unwrap();
 
         ok.assert_async().await;
         missing.assert_async().await;
-        no_head.assert_async().await;
-        range.assert_async().await;
-        throttled.assert_async().await;
-        throttled_range.assert_async().await;
+        no_get.assert_async().await;
+        head.assert_async().await;
     }
 
     #[tokio::test]
@@ -1751,7 +1724,7 @@ mod tests {
             .await;
         let package = server
             .mock(
-                "HEAD",
+                "GET",
                 "/wist-center-stack/v0.1.10-alpha/wist-center-stack-v0.1.10-alpha.tar.gz",
             )
             .with_status(200)
@@ -1844,7 +1817,7 @@ mod tests {
             .await;
         let package = server
             .mock(
-                "HEAD",
+                "GET",
                 "/wist-center-stack/v0.2.0-alpha/wist-center-stack-v0.2.0-alpha.tar.gz",
             )
             .with_status(200)
@@ -1896,7 +1869,7 @@ mod tests {
             .await;
         let package = server
             .mock(
-                "HEAD",
+                "GET",
                 "/wist-center-stack/v0.1.10/wist-center-stack-v0.1.10.tar.gz",
             )
             .with_status(200)

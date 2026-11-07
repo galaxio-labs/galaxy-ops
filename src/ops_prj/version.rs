@@ -413,8 +413,11 @@ async fn http_object_exists(
     url: &str,
 ) -> MainResult<bool> {
     let auth = github_token_for(url);
+
+    // 用带 `Range` 的 GET 探测（与 wget/curl 一致）：只读首字节；
+    // 部分镜像/边缘节点对 HEAD 会挂起，连状态码都拿不到。
     let (resp, _) = crate::infra::http::send_with_direct_retry(url, client, direct, |client| {
-        let req = client.head(url);
+        let req = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
         match auth.clone() {
             Some(token) => req.bearer_auth(token),
             None => req,
@@ -423,7 +426,7 @@ async fn http_object_exists(
     .await
     .map_err(|(first, second)| {
         MainReason::resource_detail(format!(
-            "探测目标失败（HEAD）{url}: {}",
+            "探测目标失败（GET Range）{url}: {}",
             crate::infra::http::retry_failed_note(&first, &second)
         ))
     })?;
@@ -435,10 +438,10 @@ async fn http_object_exists(
         return Ok(false);
     }
 
-    // 部分对象存储/静态服务器不接受 HEAD；用最小 Range GET 再确认。
-    if matches!(status.as_u16(), 403 | 405 | 501) {
+    // 少数服务器禁用 GET（405/501），退一步用 HEAD 确认。
+    if matches!(status.as_u16(), 405 | 501) {
         let (resp, _) = crate::infra::http::send_with_direct_retry(url, client, direct, |client| {
-            let req = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
+            let req = client.head(url);
             match auth.clone() {
                 Some(token) => req.bearer_auth(token),
                 None => req,
@@ -447,7 +450,7 @@ async fn http_object_exists(
         .await
         .map_err(|(first, second)| {
             MainReason::resource_detail(format!(
-                "探测目标失败（GET Range）{url}: {}",
+                "探测目标失败（HEAD）{url}: {}",
                 crate::infra::http::retry_failed_note(&first, &second)
             ))
         })?;
@@ -459,12 +462,12 @@ async fn http_object_exists(
             return Ok(false);
         }
         return Err(MainReason::resource_detail(format!(
-            "探测目标失败：{url}\n  GET Range → HTTP {status}"
+            "探测目标失败：{url}\n  HEAD → HTTP {status}"
         )));
     }
 
     Err(MainReason::resource_detail(format!(
-        "探测目标失败：{url}\n  HEAD → HTTP {status}"
+        "探测目标失败：{url}\n  GET Range → HTTP {status}"
     )))
 }
 
@@ -1364,7 +1367,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let missing = server
             .mock(
-                "HEAD",
+                "GET",
                 "/wist-center-stack/v0.1.10-alpha/wist-center-stack-v0.1.10-alpha.tar.gz",
             )
             .with_status(404)
@@ -1372,7 +1375,7 @@ mod tests {
             .await;
         let found = server
             .mock(
-                "HEAD",
+                "GET",
                 "/wist-center-stack/v0.1.11-alpha/wist-center-stack-v0.1.11-alpha.tar.gz",
             )
             .with_status(200)
@@ -1400,12 +1403,12 @@ mod tests {
     async fn probe_versions_minor_and_major() {
         let mut server = mockito::Server::new_async().await;
         let minor = server
-            .mock("HEAD", "/pkg/v0.2.0-alpha/pkg-v0.2.0-alpha.tar.gz")
+            .mock("GET", "/pkg/v0.2.0-alpha/pkg-v0.2.0-alpha.tar.gz")
             .with_status(200)
             .create_async()
             .await;
         let major = server
-            .mock("HEAD", "/pkg/v1.0.0-alpha/pkg-v1.0.0-alpha.tar.gz")
+            .mock("GET", "/pkg/v1.0.0-alpha/pkg-v1.0.0-alpha.tar.gz")
             .with_status(200)
             .create_async()
             .await;
@@ -1443,13 +1446,13 @@ mod tests {
         for patch in 0..=5 {
             let path = format!("/pkg/v1.0.{patch}-alpha/pkg-v1.0.{patch}-alpha.tar.gz");
             server
-                .mock("HEAD", path.as_str())
+                .mock("GET", path.as_str())
                 .with_status(404)
                 .create_async()
                 .await;
         }
         let found = server
-            .mock("HEAD", "/pkg/v1.1.0-alpha/pkg-v1.1.0-alpha.tar.gz")
+            .mock("GET", "/pkg/v1.1.0-alpha/pkg-v1.1.0-alpha.tar.gz")
             .with_status(200)
             .create_async()
             .await;
@@ -1474,13 +1477,13 @@ mod tests {
     async fn probe_versions_prefers_smallest_version_in_batch() {
         let mut server = mockito::Server::new_async().await;
         let first = server
-            .mock("HEAD", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
+            .mock("GET", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()
             .await;
         let second = server
-            .mock("HEAD", "/pkg/v0.1.11-alpha/pkg-v0.1.11-alpha.tar.gz")
+            .mock("GET", "/pkg/v0.1.11-alpha/pkg-v0.1.11-alpha.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()
@@ -1507,14 +1510,14 @@ mod tests {
     async fn probe_versions_stops_after_first_batch_with_hit() {
         let mut server = mockito::Server::new_async().await;
         let found = server
-            .mock("HEAD", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
+            .mock("GET", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()
             .await;
         // 第二批的第一个候选：第一批已命中时不应再被请求。
         let second_batch = server
-            .mock("HEAD", "/pkg/v0.1.18-alpha/pkg-v0.1.18-alpha.tar.gz")
+            .mock("GET", "/pkg/v0.1.18-alpha/pkg-v0.1.18-alpha.tar.gz")
             .with_status(200)
             .expect(0)
             .create_async()
@@ -1540,23 +1543,16 @@ mod tests {
     #[tokio::test]
     async fn probe_versions_ignores_failed_candidate_when_hit_exists() {
         let mut server = mockito::Server::new_async().await;
-        // 0.1.10 对 HEAD / GET Range 都返回 403，0.1.11 正常存在；
+        // 0.1.10 对探测请求返回 403，0.1.11 正常存在；
         // 同一批里有命中时，个别候选的权限错误不应拖垮升级。
-        let denied_head = server
-            .mock("HEAD", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
-            .with_status(403)
-            .expect(1)
-            .create_async()
-            .await;
-        let denied_get = server
+        let denied = server
             .mock("GET", "/pkg/v0.1.10-alpha/pkg-v0.1.10-alpha.tar.gz")
-            .match_header("range", "bytes=0-0")
             .with_status(403)
             .expect(1)
             .create_async()
             .await;
         let found = server
-            .mock("HEAD", "/pkg/v0.1.11-alpha/pkg-v0.1.11-alpha.tar.gz")
+            .mock("GET", "/pkg/v0.1.11-alpha/pkg-v0.1.11-alpha.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()
@@ -1575,8 +1571,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(entries[0].version.to_string(), "0.1.11-alpha");
-        denied_head.assert_async().await;
-        denied_get.assert_async().await;
+        denied.assert_async().await;
         found.assert_async().await;
     }
 
@@ -1600,7 +1595,7 @@ mod tests {
         for patch in 10..=29 {
             let path = format!("/pkg/v0.1.{patch}-alpha/pkg-v0.1.{patch}-alpha.tar.gz");
             server
-                .mock("HEAD", path.as_str())
+                .mock("GET", path.as_str())
                 .with_status(404)
                 .create_async()
                 .await;
@@ -1630,13 +1625,13 @@ mod tests {
     async fn probe_versions_renders_channel_suffix() {
         let mut server = mockito::Server::new_async().await;
         let stable = server
-            .mock("HEAD", "/pkg/v0.1.10/pkg-v0.1.10.tar.gz")
+            .mock("GET", "/pkg/v0.1.10/pkg-v0.1.10.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()
             .await;
         let beta = server
-            .mock("HEAD", "/pkg/v1.0.0-beta/pkg-v1.0.0-beta.tar.gz")
+            .mock("GET", "/pkg/v1.0.0-beta/pkg-v1.0.0-beta.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()
@@ -1669,13 +1664,13 @@ mod tests {
     async fn probe_versions_uses_current_major_minor() {
         let mut server = mockito::Server::new_async().await;
         let patch = server
-            .mock("HEAD", "/pkg/v2.7.5-alpha/pkg-v2.7.5-alpha.tar.gz")
+            .mock("GET", "/pkg/v2.7.5-alpha/pkg-v2.7.5-alpha.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()
             .await;
         let minor = server
-            .mock("HEAD", "/pkg/v2.8.0-alpha/pkg-v2.8.0-alpha.tar.gz")
+            .mock("GET", "/pkg/v2.8.0-alpha/pkg-v2.8.0-alpha.tar.gz")
             .with_status(200)
             .expect(1)
             .create_async()

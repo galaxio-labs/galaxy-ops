@@ -99,8 +99,12 @@ GitHub 镜像前缀（`https://githubproxy.cc/https://github.com/<owner>/<repo>/
 **网络 / 代理**：目标地址存在但请求发不出去时，gops 先用系统代理（`HTTP(S)_PROXY` /
 `ALL_PROXY`）请求，**传输层**失败再用直连重试一次；直连成功时只把这台主机加进 `NO_PROXY`，
 让后续下载（含 `orion-accessor` 内部的客户端）也对它跳过代理，不影响其它确实需要代理的目标。
+探测类请求（包存在性、候选版本）统一用带 `Range: bytes=0-0` 的 **GET**（不依赖 HEAD），
+并锁定 **HTTP/1.1**、直连回退只走 **IPv4** —— 对齐 `wget` 在受限网络里的行为，
+避开「HEAD 被挂起 / HTTP/2 卡住 / IPv6 黑洞」造成的假超时。
 `wget` 不使用 `ALL_PROXY`，所以「`wget` 能下、`gops` 报 `error sending request for url (...)`」
-通常就是这里；错误信息会带完整 `source` 链（DNS / 代理 / TLS / 超时），不再是只有顶层一句。
+通常就是这里；错误信息会带完整 `source` 链（DNS / 代理 / TLS / 超时），
+超时时还会提示检查 `~/.wgetrc` / `/etc/wgetrc` 里的代理。
 
 通道 `stable|alpha|beta` 对齐 `gops self`，`-c/--channel` 缺省按当前部署版本后缀推断。
 解析出的具体版本在**任何副作用之前**确定，并在成功后回写 `ops-prj.yml` 的 `version:`

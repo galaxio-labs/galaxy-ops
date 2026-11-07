@@ -41,11 +41,18 @@ pub fn direct_client(timeout: Duration) -> MainResult<reqwest::Client> {
 }
 
 fn build(timeout: Duration, direct: bool) -> MainResult<reqwest::Client> {
+    // 这里的请求都是「探测 / 元数据」级的小请求，刻意向 wget 的行为对齐：
+    // - 锁 HTTP/1.1：部分镜像/中间设备对 HTTP/2 会卡住（握手完但不回响应）；
+    // - 直连回退只走 IPv4：坏掉的 IPv6 路由会把连接拖到整体超时。
+    // 这样 HEAD 被挂起、H2 不兼容、IPv6 黑洞这三类网络问题都不会再误伤 gops。
     let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(timeout);
+        .timeout(timeout)
+        .http1_only();
     if direct {
-        builder = builder.no_proxy();
+        builder = builder
+            .no_proxy()
+            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     }
     builder
         .build()
@@ -90,12 +97,20 @@ pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 
 /// 两次尝试都失败时的补充说明（第一次的原因 + 直连重试的原因）。
 pub fn retry_failed_note(first: &reqwest::Error, second: &reqwest::Error) -> String {
-    format!(
-        "{}\n  已用直连重试，仍失败：{}{}",
+    let mut note = format!(
+        "{}\n  已用直连重试（HTTP/1.1 + IPv4），仍失败：{}{}",
         error_chain(first),
         error_chain(second),
         proxy_env_note()
-    )
+    );
+    if (first.is_timeout() || second.is_timeout()) && !has_env_proxy() {
+        note.push_str(
+            "\n  提示：请求超时且未检测到代理环境变量。若 `wget` 能下载，请确认它是否用了\
+             ~/.wgetrc / /etc/wgetrc 里的代理（gops 只读 HTTP(S)_PROXY / ALL_PROXY 环境变量）；\
+             可以 `export HTTPS_PROXY=<代理>` 后重试。",
+        );
+    }
+    note
 }
 
 /// 当前设置了的代理环境变量（只列名字与 scheme，避免泄漏凭据）。

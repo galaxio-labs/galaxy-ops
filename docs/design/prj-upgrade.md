@@ -102,8 +102,6 @@ GitHub 镜像前缀（`https://githubproxy.cc/https://github.com/<owner>/<repo>/
 探测类请求（包存在性、候选版本）统一用带 `Range: bytes=0-0` 的 **GET**（不依赖 HEAD），
 并锁定 **HTTP/1.1**、直连回退只走 **IPv4** —— 对齐 `wget` 在受限网络里的行为，
 避开「HEAD 被挂起 / HTTP/2 卡住 / IPv6 黑洞」造成的假超时。
-如果自带客户端仍在**传输层**失败，而机器上有 `curl`/`wget`，gops 会用它们做一次
-包存在性校验与下载兜底（会打印 ⚠，不影响产物校验）。
 `wget` 不使用 `ALL_PROXY`，所以「`wget` 能下、`gops` 报 `error sending request for url (...)`」
 通常就是这里；错误信息会带完整 `source` 链（DNS / 代理 / TLS / 超时），
 超时时还会提示检查 `~/.wgetrc` / `/etc/wgetrc` 里的代理。

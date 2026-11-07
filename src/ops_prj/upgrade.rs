@@ -985,52 +985,52 @@ async fn verify_target_exists(project_root: &Path, addr: &str) -> MainResult<()>
 }
 
 async fn verify_http_target(url: &str) -> MainResult<()> {
-    let timeout = Duration::from_secs(20);
+    // 镜像/边缘节点跨洋回源可能远超 20s（wget 命中的是缓存，gops 可能命中回源）；
+    // 连接阶段仍用较短的 connect_timeout 快速失败，避免坏地址拖很久。
+    let timeout = Duration::from_secs(60);
     let client = http::client(timeout)?;
     let direct = http::direct_client(timeout)?;
     let auth = github_token_for(url);
 
     // 主检查用带 `Range` 的 GET（与 wget/curl 一致）：只读首字节，不拉全包；
-    // 部分镜像/边缘节点对 HEAD 会挂起或拒绝。
-    let status = match send_probe(&client, &direct, url, &auth, ProbeMethod::GetRange).await {
-        Ok(status) => status,
-        Err(note) => {
-            // gops 自带的 Rust HTTP/TLS 栈在某些受限网络里会被卡住（整体超时），
-            // 而系统 curl/wget 正常；这里用后者做一次兜底校验。
-            return match http::system_probe(url, timeout).await {
-                http::SystemProbe::Status(code) => {
-                    let status = reqwest::StatusCode::from_u16(code)
-                        .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
-                    if status.is_success() {
-                        eprintln!(
-                            "⚠ gops 自带 HTTP 客户端访问失败，已改用系统 curl/wget 校验通过：{url}"
-                        );
-                        Ok(())
-                    } else {
-                        Err(http_status_error(url, status))
-                    }
-                }
-                http::SystemProbe::Missing => Err(MainReason::resource_detail(format!(
-                    "检查目标包失败（GET Range）{url}: {note}"
-                ))),
-                http::SystemProbe::Failed(sys) => Err(MainReason::resource_detail(format!(
-                    "检查目标包失败（GET Range）{url}: {note}\n  系统 curl/wget 兜底也失败：{sys}"
-                ))),
-            };
+    // 部分镜像/边缘节点对 HEAD 会挂起或拒绝（HEAD 超时连状态码都拿不到）。
+    let (resp, _) = http::send_with_direct_retry(url, &client, &direct, |client| {
+        let req = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
+        match auth.clone() {
+            Some(token) => req.bearer_auth(token),
+            None => req,
         }
-    };
+    })
+    .await
+    .map_err(|(first, second)| {
+        MainReason::resource_detail(format!(
+            "检查目标包失败（GET Range）{url}: {}",
+            http::retry_failed_note(&first, &second)
+        ))
+    })?;
+    let status = resp.status();
     if status.is_success() {
         return Ok(());
     }
 
-    // 少数服务器禁用 GET（405/501），退一步用 HEAD 确认；
+    // 少数服务器禁用 GET（405/501），或用不带 Range 的 HEAD 才能确认存在；
     // 其它状态码（401/403/404/5xx）就是结论本身，再发 HEAD 只会多一次请求。
     if matches!(status.as_u16(), 405 | 501) {
-        let head_status = send_probe(&client, &direct, url, &auth, ProbeMethod::Head)
-            .await
-            .map_err(|note| {
-                MainReason::resource_detail(format!("检查目标包失败（HEAD）{url}: {note}"))
-            })?;
+        let (resp, _) = http::send_with_direct_retry(url, &client, &direct, |client| {
+            let req = client.head(url);
+            match auth.clone() {
+                Some(token) => req.bearer_auth(token),
+                None => req,
+            }
+        })
+        .await
+        .map_err(|(first, second)| {
+            MainReason::resource_detail(format!(
+                "检查目标包失败（HEAD）{url}: {}",
+                http::retry_failed_note(&first, &second)
+            ))
+        })?;
+        let head_status = resp.status();
         if head_status.is_success() {
             return Ok(());
         }
@@ -1038,34 +1038,6 @@ async fn verify_http_target(url: &str) -> MainResult<()> {
     }
 
     Err(http_status_error(url, status))
-}
-
-#[derive(Clone, Copy)]
-enum ProbeMethod {
-    GetRange,
-    Head,
-}
-
-async fn send_probe(
-    client: &reqwest::Client,
-    direct: &reqwest::Client,
-    url: &str,
-    auth: &Option<String>,
-    method: ProbeMethod,
-) -> Result<reqwest::StatusCode, String> {
-    let (resp, _) = http::send_with_direct_retry(url, client, direct, |client| {
-        let req = match method {
-            ProbeMethod::GetRange => client.get(url).header(reqwest::header::RANGE, "bytes=0-0"),
-            ProbeMethod::Head => client.head(url),
-        };
-        match auth.clone() {
-            Some(token) => req.bearer_auth(token),
-            None => req,
-        }
-    })
-    .await
-    .map_err(|(first, second)| http::retry_failed_note(&first, &second))?;
-    Ok(resp.status())
 }
 
 fn http_status_error(url: &str, status: reqwest::StatusCode) -> MainError {

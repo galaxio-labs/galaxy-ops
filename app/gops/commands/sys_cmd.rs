@@ -150,6 +150,14 @@ pub struct SysPermsArgs {
     )]
     pub apply: bool,
 
+    #[arg(
+        long,
+        conflicts_with = "apply",
+        help = "只做 compose 派生、只报**配置错误**（不 stat / 不判漂移，因此 macOS 也能跑）；\
+                有错时 exit≠0。用于 CI：把“同一挂载源两种身份”这类错误在合并前拦住"
+    )]
+    pub config_only: bool,
+
     #[arg(long, help = "以 JSON 输出（便于 CI / 上层编排）")]
     pub json: bool,
 }
@@ -758,6 +766,33 @@ impl SysCommandHandler {
     pub async fn handle_perms(args: SysPermsArgs) -> MainResult<()> {
         galaxy_ops::infra::configure_dfx_logging(&args);
         let current_dir = std::env::current_dir().expect("无法获取当前目录");
+
+        // `--config-only`：**配置事实，与平台无关**。
+        // 放平台门禁之前：正因为 macOS 上 `--check` 整段跳过，这类错误才会拖到
+        // Linux 部署（localize ⑥ / 升级回滚）才暴露。
+        if args.config_only {
+            let check = galaxy_ops::system::perms::config_check(&current_dir)?;
+            // 派生期的告警必须打出来：CI 上镜像永远没拉，**身份解析不出的服务会被跳过**，
+            // 不说就是“静默少查了一半”。
+            for warning in &check.warnings {
+                println!("[WARN] {warning}");
+            }
+            if check.errors.is_empty() {
+                println!(
+                    "[OK] bind 挂载身份契约：无配置错误（已校验 {} 个挂载）",
+                    check.mounts
+                );
+                return Ok(());
+            }
+            for err in &check.errors {
+                println!("[FAIL] {err}");
+            }
+            println!(
+                "结论: {} 项配置错误（看 `gops sys perms --check` 明细）",
+                check.errors.len()
+            );
+            std::process::exit(1);
+        }
 
         // 只在 Linux 生效：macOS / OrbStack 的 bind 挂载不会遇到“不改变属主”的 Linux 行为，
         // 而且本地测试机不应该因为跑 `sys perms` 去改宿主属主。
@@ -1633,6 +1668,19 @@ exit 0
             "--check 与 --apply 互斥"
         );
         assert!(SysCmd::try_parse_from(["gops", "perms", "--check"]).is_ok());
+
+        // `--config-only`：CI 用的“只验证配置”模式；与 --apply 互斥（它不改盘）。
+        match SysCmd::try_parse_from(["gops", "perms", "--config-only"]).unwrap() {
+            SysCmd::Perms(a) => {
+                assert!(a.config_only);
+                assert!(!a.apply);
+            }
+            _ => panic!("expected perms"),
+        }
+        assert!(
+            SysCmd::try_parse_from(["gops", "perms", "--config-only", "--apply"]).is_err(),
+            "--config-only 与 --apply 互斥"
+        );
     }
 
     #[test]

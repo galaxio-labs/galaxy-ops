@@ -428,6 +428,120 @@ pub fn run_with_conf(system_root: &Path, do_apply: bool) -> MainResult<PermsRepo
     )
 }
 
+/// 密钥文件应属于哪个**容器 gid**（`gops sec fix` 用它对齐属组）。
+///
+/// 与 `sys perms` **同源**：同一个 `docker compose config` 派生，取挂着
+/// `secrets.file` 的那个 bind source 所属服务的 `user:`；root 服务跳过
+/// （root 不受宿主模式限制，给它对齐属组只会收紧模式）。
+///
+/// 派生不出来（不是 docker-compose 系统、本机没有 docker、rootless 需要
+/// `perms.container_gid` 显式映射、或 compose 本身有配置错误）时返回 `None`：
+/// 属组仍然由 `gops sys perms` 负责报，`gops sec fix` 不能因为拿不到 gid 就拒绝改 mode。
+///
+/// 唯一的 `Err` 是**配置本身矛盾**：同一份密钥被不同非 root gid 的服务挂载
+/// （属组只能有一个，必须先去统一 `user:`）。
+pub fn secret_container_gid(system_root: &Path) -> MainResult<Option<u32>> {
+    // `SysConf` 是整份项目清单（比 `secrets:` 段严格得多）：读不动就当我本机派生不出，
+    // 不能让 `gops sec fix` 因为别的段有问题而连 mode 都不改。
+    let Ok(conf) = load_conf(system_root) else {
+        return Ok(None);
+    };
+    let Some((path, mode)) = resolve_secret(system_root, conf.as_ref())? else {
+        return Ok(None);
+    };
+    let perms = conf.as_ref().and_then(|c| c.perms());
+    let secret = SecretTarget { path: &path, mode };
+    let Ok(derived) = derive(system_root, perms, Some(secret)) else {
+        return Ok(None);
+    };
+    gid_from_derived(&derived, secret)
+}
+
+/// 从派生结果里取密钥的容器 gid。
+///
+/// **有配置错误就返回 `None`**：身份本身还没定下来（典型：同一挂载源被不同身份的服务
+/// 同时挂载），先让 `gops sys perms` 把配置问题报出来，不把一个错的属组“应用”出去。
+/// 这与 `perms --apply` 的取舍一致（有配置错误时它也不动盘）。
+fn gid_from_derived(derived: &Derived, secret: SecretTarget<'_>) -> MainResult<Option<u32>> {
+    if !derived.errors.is_empty() {
+        return Ok(None);
+    }
+    secret_gid_from_mounts(&derived.mounts, secret.path)
+}
+
+/// 从派生出的挂载里挑出「挂着密钥的那个容器身份」。
+fn secret_gid_from_mounts(mounts: &[BindMount], secret: &Path) -> MainResult<Option<u32>> {
+    let mut gids = BTreeSet::new();
+    for mount in mounts {
+        if mount.container.uid != 0 && secret.starts_with(&mount.source) {
+            gids.insert(mount.container.gid);
+        }
+    }
+    match gids.len() {
+        0 => Ok(None),
+        1 => Ok(gids.into_iter().next()),
+        _ => Err(MainReason::logic_detail(format!(
+            "密钥文件 {} 被不同容器身份的服务以不同 gid 挂载（{}）：属组只能有一个；\
+             请先统一 compose 里的 `user:` 或 `sys-prj.yml: perms.services.<服务>`",
+            secret.display(),
+            gids.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" / ")
+        ))),
+    }
+}
+
+/// `gops sys perms --check --config-only` 的结果。
+#[derive(Debug, Clone, Default)]
+pub struct ConfigCheck {
+    /// 配置错误（非空即判定失败）。
+    pub errors: Vec<String>,
+    /// 派生期的告警（典型：镜像未拉取 → 服务身份无法确定 → 它的挂载**没被校验**）。
+    /// 不影响退出码，但必须打出来：CI 上镜像永远没拉，不说就是“静默少查了一半”。
+    pub warnings: Vec<String>,
+    /// 参与校验的挂载数量（让人知道覆盖面）。
+    pub mounts: usize,
+}
+
+/// 只做**派生**、只返回**配置错误**（同一挂载源两种身份、`0600` 配非 root 容器、
+/// rootless 未声明宿主映射…）。
+///
+/// `gops sys perms --check --config-only` 用它：这些错误是**配置**事实，与宿主无关，
+/// 所以不应该被“只在 Linux 生效”的平台门禁跳过 —— 否则在开发（macOS）时就看不见，
+/// 等到 Linux 部署才以 localize 阶段失败 / 升级回滚的形式暴露。
+///
+/// 与 `secret_container_gid` 的分工：它回答“能不能改对”，本函数回答“配置对不对”。
+pub fn config_check(system_root: &Path) -> MainResult<ConfigCheck> {
+    // 非 docker-compose 系统：本检查不适用（返回空 = 不阻断）。
+    if crate::system::compose::compose_invocation(system_root)
+        .0
+        .is_none()
+    {
+        return Ok(ConfigCheck::default());
+    }
+    let conf = load_conf(system_root)?;
+    let secret = resolve_secret(system_root, conf.as_ref())?;
+    let target = secret.as_ref().map(|(path, mode)| SecretTarget {
+        path: path.as_path(),
+        mode: *mode,
+    });
+    let perms = conf.as_ref().and_then(|c| c.perms());
+    let derived = derive(system_root, perms, target)?;
+    Ok(ConfigCheck {
+        errors: derived.errors,
+        warnings: derived.warnings,
+        mounts: derived.mounts.len(),
+    })
+}
+
+/// 当前进程能否把文件 `chgrp` 到 `gid`：root 恒真，其余要求已在该组里
+/// （内核按 **gid 数字**比对进程凭据，与 `/etc/group` 有无同名组无关）。
+pub(crate) fn can_chgrp(gid: u32) -> bool {
+    let euid = unsafe { libc::geteuid() };
+    euid == 0 || effective_groups().contains(&gid)
+}
+
 /// 解析 `sys-prj.yml: secrets.file` 的宿主路径与期望模式（`0600` / `0640`）。
 ///
 /// 只做**路径校验**（复用 `system::sec` 的规则）：相对系统根、不含 `.`/`..`、
@@ -3154,5 +3268,180 @@ mod tests {
             root,
             &[PathBuf::from("/other")]
         ));
+    }
+
+    /// 回归（2026-11-08 升级回滚）：`0.10.12` 的 compose 里新增了一个 `user: "0:0"` 的
+    /// 卷初始化服务，并且它排在所有业务服务**之前**。任何「取第一条 `user:`」的实现都会
+    /// 把容器 gid 算成 0，于是 0640/:999 的密钥被误判成不一致，升级整栈回滚。
+    /// 密钥的属组只能取自**挂着它的非 root 服务**。
+    #[test]
+    fn test_secret_gid_ignores_root_init_service_order() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".wist")).unwrap();
+        std::fs::create_dir_all(root.join("data-plane-run/data")).unwrap();
+        let secret_path = root.join(".wist/sec-value.yml");
+        std::fs::write(&secret_path, "admin_token: x\n").unwrap();
+        let json = format!(
+            r#"{{
+              "services": {{
+                "wparse-volume-init": {{
+                  "image": "wp:1",
+                  "user": "0:0",
+                  "volumes": [
+                    {{"type":"bind","source":"{}","target":"/data"}}
+                  ]
+                }},
+                "gateway": {{
+                  "image": "gw:1",
+                  "user": "999:999",
+                  "volumes": [
+                    {{"type":"bind","source":"{}","target":"/secrets","read_only":true}}
+                  ]
+                }}
+              }}
+            }}"#,
+            root.join("data-plane-run/data").display(),
+            root.join(".wist").display()
+        );
+        let secret = SecretTarget {
+            path: &secret_path,
+            mode: 0o640,
+        };
+        let derived = derive_from_json_with_secret(root, &json, None, Some(secret)).unwrap();
+        assert!(derived.errors.is_empty(), "{:?}", derived.errors);
+        assert_eq!(
+            gid_from_derived(&derived, secret).unwrap(),
+            Some(999),
+            "root 一次性初始化服务不能影响密钥属组"
+        );
+    }
+
+    /// 派生结果里**有配置错误**（这里是同一挂载源被两个不同非 root 身份挂载）时，
+    /// 不猜属组（`None`）—— 让 `gops sys perms` 去报配置问题。
+    #[test]
+    fn test_secret_gid_from_derived_is_none_on_config_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let shared = root.join(".wist");
+        std::fs::create_dir_all(&shared).unwrap();
+        let secret_path = shared.join("sec-value.yml");
+        let json = format!(
+            r#"{{"services":{{
+              "a":{{"user":"999:999","volumes":[{{"type":"bind","source":"{}","target":"/s1","read_only":true}}]}},
+              "b":{{"user":"1000:1000","volumes":[{{"type":"bind","source":"{}","target":"/s2","read_only":true}}]}}
+            }}}}"#,
+            shared.display(),
+            shared.display()
+        );
+        let secret = SecretTarget {
+            path: &secret_path,
+            mode: 0o640,
+        };
+        let derived = derive_from_json_with_secret(root, &json, None, Some(secret)).unwrap();
+        assert!(!derived.errors.is_empty(), "同一路径两种身份必须判配置错误");
+        assert_eq!(
+            gid_from_derived(&derived, secret).unwrap(),
+            None,
+            "配置错误时不猜属组"
+        );
+    }
+
+    #[test]
+    fn test_secret_gid_none_when_only_root_mounts() {
+        let mounts = vec![mount(
+            Path::new("/site/.wist"),
+            true,
+            ContainerId { uid: 0, gid: 0 },
+        )];
+        assert_eq!(
+            secret_gid_from_mounts(&mounts, Path::new("/site/.wist/sec-value.yml")).unwrap(),
+            None,
+            "root 服务不需要属组对齐"
+        );
+    }
+
+    #[test]
+    fn test_secret_gid_rejects_conflicting_identities() {
+        let mounts = vec![
+            mount(
+                Path::new("/site/.wist"),
+                true,
+                ContainerId { uid: 999, gid: 999 },
+            ),
+            mount(
+                Path::new("/site/.wist"),
+                true,
+                ContainerId {
+                    uid: 1000,
+                    gid: 1000,
+                },
+            ),
+        ];
+        let err = secret_gid_from_mounts(&mounts, Path::new("/site/.wist/sec-value.yml"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("属组只能有一个"), "err={err}");
+    }
+
+    /// 非 docker-compose 系统：`config_check` 不适用（返回空 = 不阻断）。
+    #[test]
+    fn test_config_check_is_empty_without_compose() {
+        let dir = tempdir().unwrap();
+        let check = config_check(dir.path()).unwrap();
+        assert!(check.errors.is_empty(), "{:?}", check.errors);
+        assert_eq!(check.mounts, 0);
+    }
+
+    /// 密钥文件被**直接挂载**（source 就是这个文件，而不是它的父目录）也要认出来。
+    #[test]
+    fn test_secret_gid_matches_direct_file_mount() {
+        let secret = Path::new("/site/.wist/sec-value.yml");
+        let mounts = vec![mount(secret, true, ContainerId { uid: 999, gid: 999 })];
+        assert_eq!(secret_gid_from_mounts(&mounts, secret).unwrap(), Some(999));
+    }
+
+    /// 与本密钥无关的挂载（根/其它 gid/其它目录）不能左右结论。
+    #[test]
+    fn test_secret_gid_ignores_unrelated_mounts() {
+        let mounts = vec![
+            mount(
+                Path::new("/site/.wist"),
+                true,
+                ContainerId { uid: 999, gid: 999 },
+            ),
+            mount(
+                Path::new("/site/data-plane-run/data"),
+                false,
+                ContainerId {
+                    uid: 1000,
+                    gid: 1000,
+                },
+            ),
+        ];
+        assert_eq!(
+            secret_gid_from_mounts(&mounts, Path::new("/site/.wist/sec-value.yml")).unwrap(),
+            Some(999),
+            "其它 1000 的挂载与密钥无关"
+        );
+    }
+
+    /// 路径前缀**按路径段**判，不能把 `.wist-backup` 当成挂着 `.wist/sec-value.yml`。
+    #[test]
+    fn test_secret_gid_ignores_sibling_path_prefix() {
+        let mounts = vec![mount(
+            Path::new("/site/.wist-backup"),
+            true,
+            ContainerId {
+                uid: 1000,
+                gid: 1000,
+            },
+        )];
+        assert_eq!(
+            secret_gid_from_mounts(&mounts, Path::new("/site/.wist/sec-value.yml")).unwrap(),
+            None,
+            "`.wist-backup` 不是 `.wist` 的祖先"
+        );
     }
 }

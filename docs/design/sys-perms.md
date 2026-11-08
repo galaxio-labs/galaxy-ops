@@ -126,6 +126,10 @@ perms:
 
 > 密钥共享策略在 `secrets:` 节：`secrets.mode: "0640"`（默认 `0600`）；
 > 属主始终是部署账号，容器按属组读。该字段需要 gops ≥ 2.9.0。
+>
+> `gops sec fix` 用自己的派生**同一个口径**对齐属组（仅 Linux）：`0640` 且能从 compose
+> 派生到容器 gid 时，它把属组收敛到那个 gid；`--dry-run` 会提前标出“当前账号不在该组、
+> apply 会失败”（非 root 只能 chgrp 到自己所在的组）。
 
 ## 安全边界
 
@@ -135,7 +139,11 @@ perms:
 - 同一路径被**不同容器身份**挂载时属于配置冲突：保留第一个身份继续检查，但整次
   `--check` / `--apply` 判**失败**（单一属组无法同时满足两个容器），不静默放过；
 - 不碰 named volume、不尝试进入容器层；
-- 平台只支持 Linux（macOS / OrbStack 打印 `[SKIP]` 并 exit 0）；
+- **宿主对齐**只支持 Linux（macOS / OrbStack 打印 `[SKIP]` 并 exit 0）；
+- 但**配置校验**与平台无关：`--check --config-only` 只做 compose 派生（不 stat、不 chmod），
+  报“同一挂载源多种身份 / `0600` 配非 root 容器”这类配置错误，macOS 也能跑。
+  干净 checkout 上完整 `--check` 必然因“挂载源不存在 / 模式未对齐”失败，所以 CI 门槛
+  用 `--config-only`（网关栈里是 `dev/check-compose-perms.sh`）；
 - `--apply` 是显式动作；自动执行只发生在 `restore` 完成后与 `upgrade` 的 `up` 前。
 
 ## 已知不能覆盖

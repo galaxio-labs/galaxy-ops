@@ -59,7 +59,11 @@ pub enum GInsCmd {
         long_about = "密钥文件的只读视图、“带密钥执行”与权限修复。\n\
                      路径由 `sys-prj.yml: secrets.file` 声明（未声明时回退 `.galaxy/sec_value.yml`），\n\
                      加载前会做路径限定、权限与值类型校验；\n\
-                     `gops sec fix` 只按 `secrets.mode` 收敛文件权限（不改属主）。"
+                     `gops sec fix` 按 `secrets.mode` 收敛文件权限（不改属主），
+\
+                     `0640` 策略下还会把属组对齐到挂载它的容器 gid（仅 Linux；
+\
+                     与 `gops sys perms` 同一个派生）。"
     )]
     Sec(SecCmd),
 }

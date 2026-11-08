@@ -15,9 +15,11 @@
 //!    嵌套结构会变成字面量 `obj...`——都拒绝，要求文件里加引号；
 //! 5. **不泄露明文**：错误与 `Debug` 输出都不带值；解析错误只保留位置信息。
 //!
-//! `fix_for_system`（`gops sec fix`）是本模块**唯一会改盘**的入口：只 `chmod` 到
+//! `fix_for_system`（`gops sec fix`）是本模块**唯一会改盘**的入口：把密钥文件收敛到
 //! `secrets.mode` 策略值（只收缩写位 / other 位；`0640` 会为只读文件补属组读位），
-//! **不改属主、不解链接**。
+//! 并在 `0640` 策略下把**属组**对齐到挂载它的容器 gid（推导与 `gops sys perms` 同源，
+//! 见 `system::perms::secret_container_gid`）。**不改属主、不解链接**——属主必须始终是
+//! 部署账号，容器靠属组读。
 use super::prelude::*;
 use crate::error::MainReason;
 use crate::system::conf::{ExposeConf, ExposeRule, SecFileFormat, SecretsConf, Subscriber};
@@ -562,9 +564,15 @@ pub struct FixOutcome {
     /// Unix 上修正前后的实际权限；非 Unix 为 `None`。
     pub before: Option<u32>,
     pub after: Option<u32>,
-    /// Unix 上的属组 gid（`0640` 策略需等于容器 gid）；非 Unix 为 `None`。
+    /// Unix 上修正后的属组 gid；非 Unix 为 `None`。
     pub gid: Option<u32>,
-    /// 是否改动（`--dry-run` 时表示“将会改动”）。
+    /// 从 compose 派生出的**容器 gid**（`0640` 策略下属组应等于它）；
+    /// `None` = 不需要对齐（无 `secrets.file` / 只挂在 root 服务上 / 本机派生不出）。
+    pub target_gid: Option<u32>,
+    /// 属组需对齐、但当前进程**不在**那个组里（`apply` 会在这一步失败）。
+    /// `--dry-run` 也会置位：预览时就能看到“拿下去也会失败”。
+    pub group_blocked: bool,
+    /// 是否改动（mode **或** 属组；`--dry-run` 时表示“将会改动”）。
     pub changed: bool,
 }
 
@@ -577,7 +585,18 @@ pub fn fix_for_system(sys_root: &Path, dry_run: bool) -> MainResult<FixOutcome> 
         Some(conf) => {
             let path = declared_file_path(sys_root, &conf)?;
             let policy = conf.file_mode().map_err(MainReason::logic_detail)?;
-            fix_file_mode(&path, policy, true, dry_run)
+            // 属组只在 `0640`（组共享）策略下有意义：`0600` 配非 root 容器属于配置错误，
+            // 由 `gops sys perms` 直接报，不在这里“帮它”改成组可读。
+            //
+            // 且只在 **Linux** 上做：macOS 桌面版（Docker Desktop / OrbStack）不映射 uid/gid，
+            // compose 里的 `user:` 不是宿主身份，chgrp 过去只会把本机开发环境弄坏。
+            // 这与 `gops sys perms`（“仅 Linux 生效”）同一个口径。
+            let target_gid = if policy == 0o640 && cfg!(target_os = "linux") {
+                crate::system::perms::secret_container_gid(sys_root)?
+            } else {
+                None
+            };
+            fix_file_mode(&path, policy, true, target_gid, dry_run)
         }
         None => {
             let candidates = galaxy_fallback_candidates(sys_root);
@@ -590,10 +609,13 @@ pub fn fix_for_system(sys_root: &Path, dry_run: bool) -> MainResult<FixOutcome> 
                     before: None,
                     after: None,
                     gid: None,
+                    target_gid: None,
+                    group_blocked: false,
                     changed: false,
                 });
             };
-            fix_file_mode(&path, 0o600, false, dry_run)
+            // `.galaxy` 回退不是系统根声明，没有 compose 契约可对，属组不动。
+            fix_file_mode(&path, 0o600, false, None, dry_run)
         }
     }
 }
@@ -615,6 +637,7 @@ fn fix_file_mode(
     path: &Path,
     policy: u32,
     declared: bool,
+    target_gid: Option<u32>,
     dry_run: bool,
 ) -> MainResult<FixOutcome> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -673,10 +696,52 @@ fn fix_file_mode(
         )));
     }
     let after = target_mode_for(before, policy);
-    let changed = before != after;
-    if changed && !dry_run {
+
+    // 属组：只有 `0640`（组共享）策略才对齐，且只在派生出了**确定**的容器 gid 时动。
+    // 策略在这里**再兜一次**：调用方已经挡过，但不变式留在本地 —— 否则将来多一个调用方
+    // 就会把 `0600`（只属主可读）的密钥 chgrp 出去。
+    //
+    // 先 chgrp 再 chmod：chgrp 会被内核按凭据拒掉（EPERM），放在前面能保证失败时 mode
+    // 仍是原值，不会出现“权限改了、属组没改、容器仍读不到”的半成品。
+    let current_gid = meta.gid();
+    let target_gid = target_gid.filter(|_| policy == 0o640);
+    let pending = target_gid.filter(|gid| *gid != current_gid);
+    let mut group_blocked = false;
+    if let Some(gid) = pending {
+        if !crate::system::perms::can_chgrp(gid) {
+            // `--dry-run` 只报计划：拿不到组不应该连预览都做不了。把“拿下去也会失败”
+            // 标在结果里（`group_blocked`），真正的拦截留给 apply。
+            if !dry_run {
+                return Err(MainReason::logic_detail(format!(
+                    "密钥文件 {} 的属组要改成容器 gid {gid}，但当前进程（euid {euid}）不在该组里：\
+                     非 root 只能 chgrp 到自己所在的组，这是宿主预置、gops 不提权。请管理员执行：\n  \
+                     sudo groupadd -g {gid} <组名>      # 该 gid 尚无对应组时才需要\n  \
+                     sudo usermod -aG {gid} <部署账号>   # 之后重新登录；systemd 服务需重启单元\n\
+                     再重跑 `gops sec fix`",
+                    path.display()
+                )));
+            }
+            group_blocked = true;
+        } else if !dry_run {
+            std::os::unix::fs::chown(path, None, Some(gid)).map_err(|err| {
+                MainReason::logic_detail(format!(
+                    "把 {} 的属组改成 {gid} 失败：{err}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    let changed = before != after || pending.is_some();
+    if before != after && !dry_run {
         fs::set_permissions(path, fs::Permissions::from_mode(after)).source_resource()?;
     }
+    // `gid` 是**操作生效后**的属组：`--dry-run` 什么都没动，就仍然是现值。
+    let gid_after = if dry_run {
+        current_gid
+    } else {
+        pending.unwrap_or(current_gid)
+    };
     Ok(FixOutcome {
         path: path.to_path_buf(),
         found: true,
@@ -684,7 +749,9 @@ fn fix_file_mode(
         policy,
         before: Some(before),
         after: Some(after),
-        gid: Some(meta.gid()),
+        gid: Some(gid_after),
+        target_gid,
+        group_blocked,
         changed,
     })
 }
@@ -694,6 +761,7 @@ fn fix_file_mode(
     path: &Path,
     policy: u32,
     declared: bool,
+    _target_gid: Option<u32>,
     _dry_run: bool,
 ) -> MainResult<FixOutcome> {
     Ok(FixOutcome {
@@ -704,6 +772,8 @@ fn fix_file_mode(
         before: None,
         after: None,
         gid: None,
+        target_gid: _target_gid,
+        group_blocked: false,
         changed: false,
     })
 }
@@ -1330,6 +1400,12 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn file_gid(path: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        fs::symlink_metadata(path).unwrap().gid()
+    }
+
+    #[cfg(unix)]
     fn set_mode(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
@@ -1406,6 +1482,73 @@ mod tests {
         assert_eq!(outcome.policy, 0o640);
         assert_eq!(outcome.after, Some(0o640));
         assert_eq!(file_mode(&path), 0o640);
+        // 临时工程里没有 compose：派生不出容器 gid，就不去动属组。
+        assert!(outcome.target_gid.is_none(), "无 compose 时不应有目标 gid");
+    }
+
+    /// `0600`（只属主可读）**永不动属组**：即便调用方误传了 target gid，
+    /// 也不能把一个只属主可读的密钥悄悄改成组可读。
+    #[cfg(unix)]
+    #[test]
+    fn fix_never_chgrps_for_0600_policy() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o600);
+        sys_prj_with_secrets(root.path(), "  file: .wist/sec-value.yml\n");
+
+        let gid = file_gid(&path);
+        let outcome = fix_file_mode(&path, 0o600, true, Some(424_242), false).unwrap();
+        assert!(!outcome.changed);
+        assert!(outcome.target_gid.is_none(), "0600 不应有属组目标");
+        assert!(!outcome.group_blocked);
+        assert_eq!(outcome.gid, Some(gid), "属组必须原封不动");
+        assert_eq!(file_gid(&path), gid);
+    }
+
+    /// 属组已经对齐（target == 现值）时不应该去检查“是否在组里”：无需 chgrp。
+    #[cfg(unix)]
+    #[test]
+    fn fix_accepts_already_aligned_gid() {
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o640);
+        sys_prj_with_secrets(
+            root.path(),
+            "  file: .wist/sec-value.yml\n  mode: \"0640\"\n",
+        );
+
+        let gid = file_gid(&path);
+        let outcome = fix_file_mode(&path, 0o640, true, Some(gid), false).unwrap();
+        assert!(!outcome.changed);
+        assert_eq!(outcome.target_gid, Some(gid));
+        assert_eq!(outcome.gid, Some(gid));
+        assert!(!outcome.group_blocked, "已对齐就不该报“不在组里”");
+    }
+
+    /// `--dry-run` 只报计划：即便当前进程不在目标组里，也不应该直接失败
+    /// （否则连“看清计划再决定要不要 `usermod`”都做不到）。真正的拦截在 apply。
+    #[cfg(unix)]
+    #[test]
+    fn fix_dry_run_reports_unfixable_group_without_error() {
+        // root 恒可 chgrp，走不到“不在组里”这条分支。
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o640);
+        sys_prj_with_secrets(
+            root.path(),
+            "  file: .wist/sec-value.yml\n  mode: \"0640\"\n",
+        );
+
+        let gid = file_gid(&path);
+        let outcome = fix_file_mode(&path, 0o640, true, Some(424_242), true).unwrap();
+        assert!(outcome.changed, "dry-run 仍要算出“将会改动”");
+        assert_eq!(outcome.target_gid, Some(424_242));
+        assert_eq!(outcome.gid, Some(gid), "dry-run 属组保持不变");
+        assert!(outcome.group_blocked, "不在组里必须标出来");
+        assert_eq!(file_gid(&path), gid, "dry-run 不能改盘");
     }
 
     #[cfg(unix)]
@@ -1458,6 +1601,29 @@ mod tests {
         let err = fix_for_system(root.path(), false).unwrap_err().to_string();
         assert!(err.contains("没有任何读权限"), "err={err}");
         assert_eq!(file_mode(&path), 0o000, "拒绝时不能改盘");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_refuses_chgrp_outside_groups() {
+        // root 恒可 chgrp（can_chgrp 直接放行），这条路径只对非 root 有意义。
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = temp_root();
+        let path = write_secret(root.path(), ".wist/sec-value.yml", "k: \"v\"\n");
+        set_mode(&path, 0o640);
+        sys_prj_with_secrets(
+            root.path(),
+            "  file: .wist/sec-value.yml\n  mode: \"0640\"\n",
+        );
+
+        // 424242 几乎不可能属于测试账号：必须先拒，而且不能先把 mode 改了。
+        let err = fix_file_mode(&path, 0o640, true, Some(424_242), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("usermod"), "要给可执行的处置：{err}");
+        assert_eq!(file_mode(&path), 0o640, "拒绝时不能改盘");
     }
 
     #[cfg(not(unix))]

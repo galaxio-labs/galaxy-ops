@@ -5,7 +5,8 @@
 //!   （值里带 `$(...)` 就会执行），而且会让密钥长期留在交互 shell 的环境里；
 //! - `get` **默认掩码**，`--show` 才输出明文；
 //! - `run` 用 `exec` + 进程环境注入，不经过 argv（`ps` 不可见），是唯一推荐入口；
-//! - `fix` 是唯一的写入面：只 `chmod` 到 `secrets.mode`（只收缩；不改属主），不碰内容。
+//! - `fix` 是唯一的写入面：把 mode 收敛到 `secrets.mode`（只收缩），并在 `0640`（组共享）
+//!   策略下把**属组**对齐到挂载它的容器 gid；不改属主，不碰内容。
 
 use clap::{Args, Parser};
 use galaxy_ops::error::{MainReason, MainResult};
@@ -107,8 +108,12 @@ pub enum SecCmd {
         about = "把密钥文件权限修正到 secrets.mode（Fix Secret File Permissions）",
         long_about = "按 `sys-prj.yml: secrets.mode`（缺省 `0600`；与容器共享时 `0640`）把密钥文件的\n\
                      权限收敛到策略值：**只收缩写位与 other 位**（原本只读的保持只读；\n\
-                     `0640` 会为只读文件补属组读位），只改 mode、不改属主，\n\
+                     `0640` 会为只读文件补属组读位）。`0640` 策略下还会把**属组**对齐到\n\
+                     挂载它的容器 gid（与 `gops sys perms` 同一个派生）。属主始终不变；\n\
                      也不解链接 / 硬链接（遇到即报错）。\n\
+                     容器 gid 派生不出来（非 docker-compose 系统 / 本机无 docker）时只改 mode；
+                     属组对齐**只在 Linux 上做**（桌面版不映射 uid/gid），差异由
+                     `gops sys perms --check` 负责报。
                      路径解析与 `gops sec list` 完全一致（`secrets.file` → 回退 `.galaxy/sec_value.yml`）。\n\
                      幂等：已符合策略时不写盘。\n\
                      Usage: gops sec fix [--dry-run]"
@@ -231,17 +236,23 @@ impl SecCommandHandler {
             return Ok(());
         };
 
-        // `0640` 的“能读”靠属组：本工具不改属组，就把现值摆出来让人自己核对。
-        if let (0o640, Some(gid)) = (outcome.policy, outcome.gid) {
-            println!("  属组   {gid}（0640 需等于容器 gid；本工具不改属组）");
+        // `0640` 的“能读”靠属组：目标 gid 由 compose 派生（与 `gops sys perms` 同源）。
+        for line in group_lines(
+            cfg!(target_os = "linux"),
+            outcome.policy,
+            outcome.target_gid,
+            outcome.gid,
+            outcome.group_blocked,
+        ) {
+            println!("{line}");
         }
 
-        if !outcome.changed {
-            println!("  当前   {before:04o} —— 已符合策略，无需改动");
-        } else if args.dry_run {
-            println!("  当前   {before:04o} → 将改为 {after:04o}（dry-run，未改动）");
-        } else {
-            println!("  当前   {before:04o} → {after:04o}（已修复）");
+        // mode 与属组是两件事：只调了属组时，不能打“0640 → 0640（已修复）”。
+        println!(
+            "{}",
+            mode_line(before, after, outcome.changed, args.dry_run)
+        );
+        if outcome.changed && !args.dry_run {
             // 权限修好不等同于“能用”：内容问题（非字符串值、非法键名）不在 fix 范围内，
             // 但不应让人拿着一个“已修复”去撞下一个报错。
             if let Err(err) = sec::load_for_system(&cwd) {
@@ -296,6 +307,66 @@ impl SecCommandHandler {
             MainReason::logic_detail(format!("无法获取当前目录（回到系统根再试）：{err}"))
         })?;
         sec::load_for_system(&cwd)
+    }
+}
+
+/// “当前”那行的文案（纯函数，便于单测）。
+///
+/// mode 与属组是两件事：`changed` 也可能只来自属组对齐，这时不能打「0640 → 0640（已修复）」。
+fn mode_line(before: u32, after: u32, changed: bool, dry_run: bool) -> String {
+    if !changed {
+        return format!("  当前   {before:04o} —— 已符合策略，无需改动");
+    }
+    match (before != after, dry_run) {
+        (true, true) => format!("  当前   {before:04o} → 将改为 {after:04o}（dry-run，未改动）"),
+        (true, false) => format!("  当前   {before:04o} → {after:04o}（已修复）"),
+        (false, true) => {
+            format!("  当前   {before:04o} —— 权限已符合策略（dry-run，属组未改动）")
+        }
+        (false, false) => format!("  当前   {before:04o} —— 权限已符合策略（已对齐属组）"),
+    }
+}
+
+/// 属组那几行的文案（纯函数，便于单测；非 Linux 返回空 —— 桌面版不映射 uid/gid，
+/// 打印出来只会诱导人去 chgrp）。
+///
+/// `target == gid` = 已对齐；不相等只可能是 `--dry-run`（apply 成功时 gid 已是 target）。
+fn group_lines(
+    linux: bool,
+    policy: u32,
+    target: Option<u32>,
+    gid: Option<u32>,
+    blocked: bool,
+) -> Vec<String> {
+    if !linux || policy != 0o640 {
+        return Vec::new();
+    }
+    match (target, gid) {
+        (Some(target), Some(gid)) if target == gid => {
+            vec![format!("  属组   {gid}（容器 gid，已对齐）")]
+        }
+        (Some(target), Some(gid)) => {
+            let mut lines = vec![format!(
+                "  属组   {gid} → {target}（容器 gid，dry-run 未改动）"
+            )];
+            if blocked {
+                lines.push(format!(
+                    "         [WARN] 当前账号不在 gid {target} 的组里：直接 apply 会失败\
+                     （`sudo usermod -aG {target} <部署账号>` 后重新登录再重试）"
+                ));
+            }
+            lines
+        }
+        (Some(target), None) => vec![format!("  属组   → {target}（容器 gid）")],
+        // 派生不出容器 gid：属组**没被校验** —— 别让它看起来像“一切正常”。
+        (None, Some(gid)) => vec![
+            format!("  属组   {gid} —— [WARN] 未能派生容器 gid：属组未校验"),
+            "         跑 `gops sys perms --check` 看明细（收敛属组用 `gops sys perms --apply`）"
+                .to_string(),
+        ],
+        (None, None) => vec![
+            "  属组   [WARN] 未能派生容器 gid：属组未校验（`gops sys perms --check`）".to_string(),
+        ],
     }
 }
 
@@ -366,6 +437,50 @@ mod tests {
             SecCmd::try_parse_from(["sec", "fix", "--dry-run"]).unwrap(),
             SecCmd::Fix(a) if a.dry_run
         ));
+    }
+
+    #[test]
+    fn group_lines_warns_when_gid_not_derived() {
+        // 非 Linux：整段不打印（桌面版不映射 uid/gid）
+        assert!(group_lines(false, 0o640, Some(999), Some(999), false).is_empty());
+        // 0600：不涉及属组
+        assert!(group_lines(true, 0o600, Some(999), Some(100), false).is_empty());
+
+        // 已对齐
+        let aligned = group_lines(true, 0o640, Some(999), Some(999), false);
+        assert_eq!(aligned.len(), 1);
+        assert!(aligned[0].contains("已对齐"), "{aligned:?}");
+
+        // 未对齐 + dry-run + 不在组里：要明说“apply 会失败”
+        let blocked = group_lines(true, 0o640, Some(999), Some(100), true);
+        assert_eq!(blocked.len(), 2, "{blocked:?}");
+        assert!(blocked[1].contains("usermod"), "{blocked:?}");
+        assert!(blocked[1].contains("[WARN]"), "{blocked:?}");
+
+        // 派生不出 gid：必须是一条 WARN，而不是“看着正常”
+        let unknown = group_lines(true, 0o640, None, Some(100), false);
+        assert_eq!(unknown.len(), 2, "{unknown:?}");
+        assert!(unknown[0].contains("[WARN]"), "{unknown:?}");
+        assert!(unknown[0].contains("属组未校验"), "{unknown:?}");
+        assert!(unknown[1].contains("sys perms --check"), "{unknown:?}");
+    }
+
+    /// 只调属组时不能打“0640 → 0640（已修复）”（审查时发现的文案 bug）。
+    #[test]
+    fn mode_line_distinguishes_mode_from_group_changes() {
+        let only_group = mode_line(0o640, 0o640, true, false);
+        assert!(only_group.contains("已对齐属组"), "{only_group}");
+        assert!(!only_group.contains("已修复"), "{only_group}");
+
+        let only_group_dry = mode_line(0o640, 0o640, true, true);
+        assert!(only_group_dry.contains("dry-run"), "{only_group_dry}");
+        assert!(!only_group_dry.contains("已修复"), "{only_group_dry}");
+
+        let mode_changed = mode_line(0o600, 0o640, true, false);
+        assert!(mode_changed.contains("0600 → 0640"), "{mode_changed}");
+        assert!(mode_line(0o600, 0o640, true, true).contains("将改为 0640"));
+
+        assert!(mode_line(0o640, 0o640, false, false).contains("无需改动"));
     }
 
     #[test]

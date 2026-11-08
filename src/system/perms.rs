@@ -471,6 +471,10 @@ fn gid_from_derived(derived: &Derived, secret: SecretTarget<'_>) -> MainResult<O
 
 /// 从派生出的挂载里挑出「挂着密钥的那个容器身份」。
 fn secret_gid_from_mounts(mounts: &[BindMount], secret: &Path) -> MainResult<Option<u32>> {
+    // 挂载源已被 `canonical_or_parent` 规范化（软链、以及 macOS 的 `/var` → `/private/var`），
+    // 密钥路径必须走**同一个口径**再比前缀，否则在软链目录 / 临时目录下永远匹配不上，
+    // 表现为「派生不出容器 gid」——在 macOS runner 上是必然，在 Linux 上遇到软链部署同样会中。
+    let secret = canonical_or_parent(secret);
     let mut gids = BTreeSet::new();
     for mount in mounts {
         if mount.container.uid != 0 && secret.starts_with(&mount.source) {
@@ -3424,6 +3428,32 @@ mod tests {
             secret_gid_from_mounts(&mounts, Path::new("/site/.wist/sec-value.yml")).unwrap(),
             Some(999),
             "其它 1000 的挂载与密钥无关"
+        );
+    }
+
+    /// 挂载源是**规范化**过的，密钥路径也必须规范化后再比：同一份目录经由软链声明时
+    /// （`/var` → `/private/var`、部署目录是软链），前缀比不中就会误判“派生不出容器 gid”。
+    #[test]
+    fn test_secret_gid_matches_through_symlinked_root() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join(".wist")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        let canonical_secret = std::fs::canonicalize(real.join(".wist/sec-value.yml"))
+            .unwrap_or_else(|_| real.join(".wist/sec-value.yml"));
+        let mounts = vec![mount(
+            &std::fs::canonicalize(real.join(".wist")).unwrap(),
+            true,
+            ContainerId { uid: 999, gid: 999 },
+        )];
+        // 声明侧走软链路径，派生侧是真实路径：必须仍然匹配。
+        assert_eq!(
+            secret_gid_from_mounts(&mounts, &alias.join(".wist/sec-value.yml")).unwrap(),
+            Some(999),
+            "软链路径必须与规范化后的挂载源按同一口径比较（canonical={}）",
+            canonical_secret.display()
         );
     }
 

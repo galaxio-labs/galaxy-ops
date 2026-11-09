@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.10.13-alpha] - 2026-11-09
+
+### 修复
+
+- **`gops sys perms --apply` 从此真正幂等**：缺失的挂载源会由 `create_dir_all` 连带建出
+  **祖先目录**，它们停在 umask 默认的 `2775`，而 `--apply` 只 chmod 叶子 ——
+  结果是「`--apply` 报全部对齐，下一次 `--check` 又冒出 pending」，现场会误以为权限还在漂。
+  现在连带新建的祖先按同一口径收敛（`chown deploy_uid:container.gid` + 目录 mode），
+  已存在的父目录仍然不碰。
+  - 典型现场：`identity/gateway/{private,public}` 停在 `2775`，门禁 ⑥ 反复报待修。
+
 ## [2.10.12-alpha] - 2026-11-09
 
 ### 新增

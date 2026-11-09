@@ -23,7 +23,7 @@ use super::install::fetch_and_prepare;
 use super::prelude::*;
 use super::project::OpsProject;
 use super::run_log;
-use super::update::{apply_overlay, copy_entry};
+use super::update::{PruneMode, apply_overlay, copy_entry};
 use super::version::{self, VersionSpec, infer_channel};
 use crate::accessor::accessor_for_default;
 use crate::const_vars::SYS_PRJ_CONF_FILE_V2;
@@ -1243,7 +1243,8 @@ impl UpgradeRuntime for ProjectRuntime {
         )
         .await?;
         let target_dir = self.sys_dir(sys);
-        let _ = apply_overlay(sys, &sys_src, &target_dir)?;
+        // 升级事务有备份/回滚语境：覆盖的同时清理上一版包内、这一版包外的残渣。
+        let _ = apply_overlay(sys, &sys_src, &target_dir, PruneMode::RemoveStale)?;
         Ok(())
     }
 

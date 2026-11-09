@@ -173,6 +173,7 @@ gops run diagnose                # 诊断
 gops prj new --name customer-a                              # 创建运维工程
 gops prj import --path /path/to/web-stack-0.1.0.tar.gz      # 导入已打包的系统
 gops prj sync                                               # 同步内容到 addr 指向的版本；缺失系统按包导入（非破坏）
+gops prj sync --prune                                       # 同上，并清掉上一版包内、这一版已移除且未本地改动的残渣
 gops prj upgrade latest -c alpha --on-failure rollback-all  # 一次可回滚的发布升级（按通道取最新）
 gops prj upgrade web-stack patch --on-failure halt          # 只升 web-stack 到下一个 patch
 gops prj upgrade web-stack 0.10.0-alpha --on-failure rollback-all  # 精确版本
@@ -207,7 +208,7 @@ https://.../wist-center-stack/versions.json   # 或 versions.txt
 
 | 诉求 | 命令 |
 | --- | --- |
-| 给已交付系统换版本 / 补齐被删的系统，只覆盖包内内容、不动现场态、可安全重入 | `gops prj sync`（旧名 `update` 仍可用） |
+| 给已交付系统换版本 / 补齐被删的系统，只覆盖包内内容、不动现场态、可安全重入 | `gops prj sync`（旧名 `update` 仍可用；加 `--prune` 才会删旧版残渣） |
 | 要一次**可回滚的发布升级**：含备份、重渲值、拉镜像、切换、探活（仅 `docker-compose`） | `gops prj upgrade` |
 
 > `sync` 与 `upgrade` 的边界：`sync` 是**非事务**的**内容同步**（无备份、无健康检查、无回滚，也不同步运行时）；`upgrade` 是**事务**（有备份与回滚，含运行时切换与探活）。

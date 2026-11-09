@@ -5,17 +5,23 @@
 //! 而 `prj import`（以及已移除的 `prj reimport`）都是"删了重装" —— 于是"给已交付的系统
 //! 换个版本"没有安全出路，只能靠人手工搬文件。
 //!
-//! 这个模块存在的全部理由：**不删任何东西**。
+//! 这个模块存在的全部理由：**不删现场态**。
 //!   · `sys-prj.yml: protect:` 命中的路径：不覆盖、不删（身份材料、运行态、客户值…）
 //!   · 包外且**未声明**的存量：也不删（保守）
 //!   · 包内文件：用新版覆盖
+//!   · **上一版包内有、这一版包外**：仅当旧 `deliver.lock` 能证明它未被本地改动时才删
+//!     （见 `apply_overlay` 第 5 步）；`prj sync` 默认不清理（需 `--prune`），
+//!     `prj upgrade` 因有备份/回滚语境而固定清理。旧锁是 v1（无文件清单）则本轮不删，
+//!     由新版锁建立基线。
 //!
 //! 白名单**就是交付包本身**（包里有什么就覆盖什么）—— 选取逻辑复用 `gops sys package`
-//! 那一套（git 入库文件 − `pkg_exclude:`），不在这里重写 git/glob 判定。
+//! 那一套（git 入库文件 − `pkg_exclude:` + `pkg_include:`），不在这里重写 git/glob 判定。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::ops_prj::prelude::*;
+use crate::system::lock::{DeliverLock, LockedFile};
 use crate::system::pack::{compile_path_patterns, path_matches};
 
 use crate::const_vars::SYS_PRJ_CONF_FILE_V2;
@@ -42,6 +48,22 @@ pub struct SysContentUpdate {
     pub skipped_protect: usize,
     /// 包外且未声明的顶层条目（**不删**，只列给人看）
     pub undeclared: Vec<String>,
+    /// 上一版包内有、这一版包内没有，且**内容未被本地改动** → 已删除的旧文件数
+    pub removed: usize,
+    /// 上一版包内、这一版包外，但**本地改过** → 保留（列给人看）
+    pub kept_modified: Vec<String>,
+}
+
+/// 覆盖完成后是否清理「上一版包内、这一版包外」的残渣。
+///
+/// `prj sync` 默认 `Keep`（保持“非破坏性更新”的原有契约）；需要清理时显式 `--prune`。
+/// `prj upgrade` 是升级事务（有备份/回滚语境），固定 `RemoveStale`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PruneMode {
+    /// 只覆盖，不删任何东西（`prj sync` 默认）。
+    Keep,
+    /// 删除旧清单里、新包外、且**未被本地改动**且不在 `protect` 的文件。
+    RemoveStale,
 }
 
 /// 覆盖计划：由「包内文件清单 + protect 模式」算出的纯函数结果（可单测）。
@@ -75,6 +97,7 @@ impl OpsProject {
         &self,
         accessor: Accessor,
         options: &DownloadOptions,
+        prune: PruneMode,
     ) -> MainResult<Vec<SysContentUpdate>> {
         let mut reports = Vec::new();
 
@@ -92,7 +115,7 @@ impl OpsProject {
                 continue;
             }
             let report = self
-                .overlay_one_system(&name, &target, &addr, accessor.clone(), options)
+                .overlay_one_system(&name, &target, &addr, accessor.clone(), options, prune)
                 .await?;
             reports.push(report);
         }
@@ -106,10 +129,11 @@ impl OpsProject {
         addr: &str,
         accessor: Accessor,
         options: &DownloadOptions,
+        prune: PruneMode,
     ) -> MainResult<SysContentUpdate> {
         // 取包并解开（与 import 同一条路；取不到就在这里失败，**动都没动过目标**）
         let sys_src = fetch_and_prepare(self.paths().clone(), addr, accessor, options).await?;
-        apply_overlay(name, &sys_src, target)
+        apply_overlay(name, &sys_src, target, prune)
     }
 }
 
@@ -120,6 +144,7 @@ pub(crate) fn apply_overlay(
     name: &str,
     sys_src: &Path,
     target: &Path,
+    prune: PruneMode,
 ) -> MainResult<SysContentUpdate> {
     // 2) 护栏：包里的系统名必须与目标目录一致，免得把别的系统倒进来
     let pkg_name = SysModelSpec::load_from(&sys_src.join("sys"))?
@@ -141,6 +166,10 @@ pub(crate) fn apply_overlay(
         }
     }
     let patterns = compile_path_patterns(&protect, "protect")?;
+
+    // 旧版包内清单：用于清理「上一版包内有、这一版包外」的残渣。
+    // 必须在覆盖 `deliver.lock` **之前**读：覆盖后就只剩新版清单了。
+    let old_files = read_old_manifest(target);
 
     // 4) 覆盖（逐文件；父目录按需创建；权限沿用源文件）
     let files = walk_files(sys_src)?;
@@ -166,12 +195,151 @@ pub(crate) fn apply_overlay(
         }
     }
 
-    // 5) 包外且未声明的**顶层条目**：只列出来（不删）—— 让人看见 configs/、data-plane-run/
+    // 5) 清理「上一版包内、这一版包外」的残渣（仅 `PruneMode::RemoveStale`）。
+    //
+    // 安全边界（少一条就可能删到现场态）：
+    //   · 只认旧清单里的相对路径，拒绝绝对路径 / `..` / `.`（防被篡改的锁删到系统根外）；
+    //   · 顶层 `values` 是客户值链接，不碰；`values` 内部可能在链接另一头；
+    //   · 祖先目录是符号链接的不碰（否则 `target/link/x` 会写到链接目标）；
+    //   · 非普通文件/符号链接（目录、FIFO、socket…）不碰；
+    //   · protect 命中的、本地改过的都保留。
+    // 旧锁是 v1（无清单）时 `old_files` 为空 → 本轮不清理。
+    if prune == PruneMode::RemoveStale {
+        let new_files = new_package_files(sys_src, &files);
+        let mut removed = 0usize;
+        let mut kept_modified = Vec::new();
+        for old in &old_files {
+            let Some(rel) = safe_manifest_rel(old.path()) else {
+                continue;
+            };
+            if is_top_level_values(&rel) || rel == Path::new(crate::system::lock::DELIVER_LOCK_FILE)
+            {
+                continue;
+            }
+            if new_files.contains(&rel) || path_matches(&rel, &patterns) {
+                continue;
+            }
+            let abs = target.join(&rel);
+            let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+                continue;
+            };
+            // 目录不能被 `remove_file` 删；FIFO/socket/设备节点也不在我们的管理范围。
+            // 直接跳过（而不是让 `old.matches()` 报错拖垮整次更新）。
+            if !(meta.is_file() || meta.file_type().is_symlink())
+                || has_symlink_ancestor(target, &rel)
+            {
+                continue;
+            }
+            if old.matches(&abs) {
+                std::fs::remove_file(&abs).source_resource().with(&abs)?;
+                removed += 1;
+                prune_empty_dirs(target, rel.parent());
+            } else {
+                kept_modified.push(rel.to_string_lossy().to_string());
+            }
+        }
+        report.removed = removed;
+        report.kept_modified = kept_modified;
+    }
+
+    // 6) 包外且未声明的**顶层条目**：只列出来（不删）—— 让人看见 configs/、data-plane-run/
     //    这类"这次没被碰"的东西，正是它们构成了"为什么不能盲删"的理由。
+    //    放在清理**之后**统计：刚被清掉的旧文件不应再被报成"未改动"。
     report.undeclared = undeclared_top_entries(target, sys_src, &patterns, &protect)?;
 
     print_report(&report);
     Ok(report)
+}
+
+/// 新包**实际提供**的文件集合：解开目录里真实存在的文件 ∪ 新包 `deliver.lock.files`。
+///
+/// 必须是并集而不是二选一：清单是打包时算的，包到了现场仍可能被解包工具/人工补文件；
+/// 旧清单里的同名文件若**新版包也提供**（哪怕清单漏记），一律不能删。
+/// 多收只会让清理更保守，不会误删。目录不是文件，`walk_files` 已排除顶层 `values`。
+fn new_package_files(sys_src: &Path, walked: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let mut out: BTreeSet<PathBuf> = walked.iter().cloned().collect();
+    if let Ok(lock) = DeliverLock::load(sys_src) {
+        out.extend(
+            lock.files()
+                .iter()
+                .filter_map(|file| safe_manifest_rel(file.path())),
+        );
+    }
+    out
+}
+
+/// 锁里的路径只接受「纯相对、无 `.` / `..` / 根」的形状。
+fn safe_manifest_rel(raw: &str) -> Option<PathBuf> {
+    let rel = Path::new(raw);
+    if rel.is_absolute() {
+        return None;
+    }
+    if !rel
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(rel.to_path_buf())
+}
+
+fn is_top_level_values(rel: &Path) -> bool {
+    rel.components().next().map(|c| c.as_os_str() == "values") == Some(true)
+}
+
+/// `rel` 的**祖先**（不含最后一级）里是否有符号链接。最后一级允许是链接 —— 要删的就是它本身。
+fn has_symlink_ancestor(root: &Path, rel: &Path) -> bool {
+    let Some(parent) = rel.parent() else {
+        return false;
+    };
+    let mut cur = root.to_path_buf();
+    for comp in parent.components() {
+        let std::path::Component::Normal(seg) = comp else {
+            return true;
+        };
+        cur.push(seg);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            // 祖先不存在 / 读不了：不碰（保守）
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+/// 读目标里上一版包内清单（`deliver.lock`）。
+///
+/// 无锁 / v1 无清单 → 空（这一轮不清理，由新版锁建立基线）；
+/// 有锁但读不出来（YAML 损坏、权限）→ 空 + 告警：不能假装“没有清单”而静默跳过。
+fn read_old_manifest(target: &Path) -> Vec<LockedFile> {
+    let path = DeliverLock::path(target);
+    if !path.exists() {
+        return Vec::new();
+    }
+    match DeliverLock::load(target) {
+        Ok(lock) => lock.files().to_vec(),
+        Err(e) => {
+            eprintln!(
+                "  告警：{} 读取失败，本轮不清理上一版残渣（{e}）",
+                path.display()
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// 删文件后自下而上清空目录（只删**空**目录；遇到非空立即停，不越过系统根）。
+fn prune_empty_dirs(root: &Path, mut dir: Option<&Path>) {
+    while let Some(rel) = dir {
+        if rel.as_os_str().is_empty() {
+            break;
+        }
+        if std::fs::remove_dir(root.join(rel)).is_err() {
+            break;
+        }
+        dir = rel.parent().filter(|p| !p.as_os_str().is_empty());
+    }
 }
 
 /// 读一份 `sys-prj.yml` 的 **`protect`** 声明（升级不覆盖/不删的路径）；文件不存在时为空。
@@ -208,8 +376,9 @@ pub(crate) fn undeclared_top_entries(
         if raw_protect.iter().any(|p| declared_under(p, &shown)) {
             continue;
         }
-        // `values` 是导入时建立的客户值符号链接，不是"未声明存量"
-        if shown != "values" {
+        // `values` 是导入时建立的客户值链接、`deliver.lock` 是交付清单自身：
+        // 都不是“未声明存量”。
+        if shown != "values" && shown != crate::system::lock::DELIVER_LOCK_FILE {
             out.push(shown);
         }
     }
@@ -229,6 +398,18 @@ fn print_report(report: &SysContentUpdate) {
         "更新 {}：新增 {} / 覆盖 {} / 已是最新 {} / 因 protect 跳过 {}",
         report.name, report.added, report.replaced, report.unchanged, report.skipped_protect
     );
+    if report.removed > 0 {
+        println!(
+            "  清理上一版残渣（包内已移除且未本地改动）：{} 个文件",
+            report.removed
+        );
+    }
+    if !report.kept_modified.is_empty() {
+        println!(
+            "  上一版包内、新版已移除，但**本地改过** → 保留：{}",
+            report.kept_modified.join("、")
+        );
+    }
     if !report.undeclared.is_empty() {
         println!(
             "  包外且未声明（**未改动**，如现场生成物）：{}",
@@ -403,7 +584,7 @@ mod tests {
         std::fs::write(target.join("configs/default.toml"), "site-value").unwrap();
         std::fs::write(target.join("junk.txt"), "junk").unwrap();
 
-        let report = apply_overlay("web-stack", &sys_src, &target).unwrap();
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::Keep).unwrap();
 
         // 包内覆盖
         assert_eq!(
@@ -439,7 +620,7 @@ mod tests {
         let target = tmp.path().join("site");
         std::fs::create_dir_all(&target).unwrap();
 
-        let err = apply_overlay("web-stack", &sys_src, &target).unwrap_err();
+        let err = apply_overlay("web-stack", &sys_src, &target, PruneMode::Keep).unwrap_err();
         assert!(
             err.detail()
                 .as_deref()
@@ -575,6 +756,36 @@ mod tests {
         spec.save_local_minimal(root, "sys").unwrap();
     }
 
+    /// 造一个「能过 `DeliverLock::build`」的完整系统目录（`save_local_minimal` 不够）。
+    fn make_full_pkg(root: &Path, name: &str) {
+        use crate::system::spec::{SysDefine, SysModelSpec};
+        let spec = SysModelSpec::make_new(SysDefine::new_without_model(name)).unwrap();
+        spec.save_local(root, "sys").unwrap();
+    }
+
+    /// 把当前目标树的文件清单写进 `deliver.lock`（模拟「上一版包」建立基线）。
+    fn write_manifest_lock(target: &Path) {
+        let files = walk_files(target).unwrap();
+        let lock = crate::system::lock::DeliverLock::build_with_files(target, &files).unwrap();
+        lock.save(target).unwrap();
+    }
+
+    /// 直接写一份含**指定清单**的 v2 锁（构造被篡改/异常锁的场景，绕过实际文件）。
+    fn write_lock_with_manifest(target: &Path, entries: &[(&str, String)]) {
+        let mut yaml = String::from(
+            "lockfile_version: 2\nname: web-stack\nversion: 1.0.0\nkind: gxl\n\
+             generated_at: '2026-01-01T00:00:00Z'\nmodules: []\nhashes: {}\nfiles:\n",
+        );
+        for (path, sha) in entries {
+            yaml.push_str(&format!("  - path: {path:?}\n    sha256: {sha:?}\n"));
+        }
+        std::fs::write(target.join("deliver.lock"), yaml).unwrap();
+    }
+
+    fn sha_of(path: &Path) -> String {
+        crate::system::lock::hash_entry(path).unwrap()
+    }
+
     #[test]
     fn test_load_protect_missing_is_empty_and_present_parses() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -636,7 +847,7 @@ mod tests {
         std::fs::write(target.join("same.txt"), "S").unwrap();
         std::fs::write(target.join("diff.txt"), "OLD").unwrap();
 
-        let report = apply_overlay("web-stack", &sys_src, &target).unwrap();
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::Keep).unwrap();
         assert_eq!(report.replaced, 1, "diff.txt 内容不同 → 覆盖");
         assert_eq!(report.unchanged, 1, "same.txt 内容相同 → 不动");
         assert!(report.added >= 2, "sys/ 下的文件是新增：{}", report.added);
@@ -673,7 +884,7 @@ mod tests {
         .unwrap();
         std::fs::write(target.join("configs/pkg.toml"), "site-configs").unwrap();
 
-        let report = apply_overlay("web-stack", &sys_src, &target).unwrap();
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::Keep).unwrap();
         assert_eq!(report.skipped_protect, 2, "包侧 configs + 目标侧 site_only");
         // 两侧现场值都保住
         assert_eq!(
@@ -693,7 +904,7 @@ mod tests {
         let target = tmp.path().join("site");
         std::fs::create_dir_all(&target).unwrap();
 
-        apply_overlay("web-stack", &sys_src, &target).unwrap();
+        apply_overlay("web-stack", &sys_src, &target, PruneMode::Keep).unwrap();
         let meta = std::fs::symlink_metadata(target.join("link")).unwrap();
         assert!(meta.file_type().is_symlink(), "包内符号链接应按链接复制");
         assert_eq!(
@@ -719,7 +930,10 @@ mod tests {
         let prj = OpsProject::load(&root).unwrap();
         let accessor = crate::accessor::accessor_for_test();
         let opts = DownloadOptions::from((0usize, ValueDict::default()));
-        let err = prj.update_sys_content(accessor, &opts).await.unwrap_err();
+        let err = prj
+            .update_sys_content(accessor, &opts, PruneMode::Keep)
+            .await
+            .unwrap_err();
         // 证明“缺失系统”走了取包这条路（包不存在 → 报错），而非旧行为“静默跳过”
         assert!(
             err.to_string().to_lowercase().contains("nonexistent") || err.detail().is_some(),
@@ -727,5 +941,229 @@ mod tests {
         );
         // 未落地系统目录
         assert!(!root.join("web-stack").exists());
+    }
+
+    #[test]
+    fn test_apply_overlay_removes_unmodified_file_dropped_by_new_version() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // 旧版包（= 当前现场）：app.txt + removed.txt，并写下一版清单
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        std::fs::write(target.join("app.txt"), "old").unwrap();
+        std::fs::write(target.join("removed.txt"), "gone").unwrap();
+        write_manifest_lock(&target);
+
+        // 新版包：没有 removed.txt，app.txt 更新
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+        std::fs::write(sys_src.join("app.txt"), "new").unwrap();
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(
+            report.removed, 1,
+            "removed.txt 应被清掉（旧包内、新包外、未改动）"
+        );
+        assert!(!target.join("removed.txt").exists());
+        assert!(
+            report.undeclared.is_empty(),
+            "清掉的残渣与交付锁都不应再被列为未声明: {:?}",
+            report.undeclared
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("app.txt")).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn test_apply_overlay_keeps_modified_and_protected_stale_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        std::fs::create_dir_all(target.join("configs")).unwrap();
+        std::fs::write(target.join("configs/keep.toml"), "site-value").unwrap();
+        std::fs::write(target.join("local.txt"), "v1").unwrap();
+        std::fs::write(target.join("gone.txt"), "gone").unwrap();
+        write_manifest_lock(&target);
+        // 清单建立后本地改了 local.txt：不能被当成「旧包残渣」删掉
+        std::fs::write(target.join("local.txt"), "hand-edited").unwrap();
+
+        // 新版包：三个文件都不再提供；configs 声明为 protect
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+        std::fs::write(
+            sys_src.join("sys-prj.yml"),
+            "test_envs:\n  dep_root: ''\n  deps: []\nprotect:\n  - configs\n",
+        )
+        .unwrap();
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 1, "只应清掉未改动的 gone.txt");
+        assert!(!target.join("gone.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(target.join("local.txt")).unwrap(),
+            "hand-edited",
+            "本地改过的文件必须保留"
+        );
+        assert_eq!(
+            report.kept_modified,
+            vec!["local.txt".to_string()],
+            "保留原因要报出来"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("configs/keep.toml")).unwrap(),
+            "site-value",
+            "protect 命中的旧文件不删"
+        );
+    }
+
+    #[test]
+    fn test_apply_overlay_v1_lock_without_manifest_does_not_prune() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        std::fs::write(target.join("old.txt"), "keep").unwrap();
+        // v1 锁：没有 files 清单 → 无法证明 old.txt 是旧包内容
+        std::fs::write(
+            target.join("deliver.lock"),
+            "lockfile_version: 1\nname: web-stack\nversion: 1.0.0\nkind: gxl\n\
+             generated_at: '2026-01-01T00:00:00Z'\nmodules: []\nhashes: {}\n",
+        )
+        .unwrap();
+
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 0, "无清单的 v1 锁不得清理任何文件");
+        assert!(target.join("old.txt").exists());
+    }
+
+    #[test]
+    fn test_apply_overlay_corrupt_lock_does_not_prune() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        std::fs::write(target.join("old.txt"), "keep").unwrap();
+        std::fs::write(target.join("deliver.lock"), "lockfile_version: [broken").unwrap();
+
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 0, "锁读不出来时不能凭空猜清单去删");
+        assert!(target.join("old.txt").exists());
+    }
+
+    #[test]
+    fn test_apply_overlay_prune_rejects_traversal_and_absolute_manifest_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        // 系统根外的“靶子”：穿越/绝对路径若没被拒绝就会被删掉
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let sha = sha_of(&outside);
+        let abs = outside.to_string_lossy().to_string();
+        write_lock_with_manifest(
+            &target,
+            &[("../outside.txt", sha.clone()), (abs.as_str(), sha)],
+        );
+
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 0);
+        assert!(outside.exists(), "不得删到系统根之外");
+    }
+
+    #[test]
+    fn test_apply_overlay_prune_skips_symlinked_ancestor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        // 现场把 data 指到系统根外（数据盘挂载/软链都有先例）
+        let outside_dir = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let victim = outside_dir.join("victim.txt");
+        std::fs::write(&victim, "pkg-copy").unwrap();
+        std::os::unix::fs::symlink(&outside_dir, target.join("data")).unwrap();
+        write_lock_with_manifest(&target, &[("data/victim.txt", sha_of(&victim))]);
+
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 0);
+        assert!(victim.exists(), "祖先为符号链接时不得顺着链接删");
+    }
+
+    #[test]
+    fn test_apply_overlay_prune_skips_non_file_stale_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        // 旧清单里的文件位置在现场变成了目录：不能 remove_file，跳过即可
+        std::fs::create_dir_all(target.join("became-dir")).unwrap();
+        std::fs::write(target.join("became-dir/inner.txt"), "x").unwrap();
+        write_lock_with_manifest(&target, &[("became-dir", "sha256:00".to_string())]);
+
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 0, "非普通文件不参与清理，更不能让更新报错");
+        assert!(target.join("became-dir/inner.txt").exists());
+    }
+
+    #[test]
+    fn test_apply_overlay_prune_removes_empty_dirs_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        std::fs::create_dir_all(target.join("extra/deep")).unwrap();
+        std::fs::write(target.join("extra/deep/gone.txt"), "gone").unwrap();
+        std::fs::create_dir_all(target.join("mixed/sub")).unwrap();
+        std::fs::write(target.join("mixed/sub/also-gone.txt"), "gone").unwrap();
+        write_manifest_lock(&target);
+        // 清单建立后现场新增的文件：不属于旧包，但会让父目录非空 → 清目录必须停在它上面
+        std::fs::write(target.join("mixed/keep.txt"), "site-local").unwrap();
+
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 2);
+        assert!(!target.join("extra").exists(), "空目录链应自下而上回收");
+        assert!(!target.join("mixed/sub").exists());
+        assert!(
+            target.join("mixed/keep.txt").exists(),
+            "父目录非空时必须停下，且本地文件不得被删"
+        );
+        assert!(target.join("mixed").exists());
+    }
+
+    #[test]
+    fn test_apply_overlay_prune_keeps_file_new_package_ships_but_manifest_missed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("site");
+        make_full_pkg(&target, "web-stack");
+        std::fs::write(target.join("late.txt"), "same").unwrap();
+        write_manifest_lock(&target); // 旧清单含 late.txt
+
+        // 新包：先写清单（不含 late.txt），再补上内容与之相同的 late.txt
+        // （模拟打包后补文件 / 清单与包内容短暂不一致）
+        let sys_src = tmp.path().join("pkg");
+        make_full_pkg(&sys_src, "web-stack");
+        write_manifest_lock(&sys_src);
+        std::fs::write(sys_src.join("late.txt"), "same").unwrap();
+
+        let report = apply_overlay("web-stack", &sys_src, &target, PruneMode::RemoveStale).unwrap();
+        assert_eq!(report.removed, 0);
+        assert!(
+            target.join("late.txt").exists(),
+            "新版包实际提供的文件，即使清单漏记也不得当成残渣删除"
+        );
     }
 }

@@ -292,9 +292,12 @@ stop → run start(全部) → health(全部) → 报「已回滚（整工程）
 ## 7. 未定问题
 
 - ✅ **`--on-failure` 的默认值**：已定为 `rollback-all`（§3.3）；`halt` 作为显式覆盖。
-- **`deliver.lock` 是否记「上一版包内文件清单」**（未决）：决定 `prj upgrade` 能否清掉「上一版包内、
-  这一版包外」的旧版本残渣。**本方案不依赖它**：先只覆盖、不删残渣；与
-  [prj-backup-restore.md](./prj-backup-restore.md) §8 是同一个未定问题。
+- ✅ **`deliver.lock` 记「包内文件清单」**（已定，2026-11-09）：v2 锁的 `files` 记包内每个
+  文件/符号链接的 `path + sha256`（不含 `deliver.lock` 自身）。`prj upgrade` 在覆盖后清理
+  「上一版包内有、这一版包外」的残渣：**只删当前内容仍与旧清单一致**的文件；
+  `protect:` 命中的、本地改过的都保留（后者列在 `kept_modified` 里）。`prj sync` 默认
+  仍是「只覆盖、不删」，需要清理时显式加 `--prune`。v1 锁没有清单 →
+  那一轮不清理（由新版锁建立基线）。这样不必为了升级安全而永不删残渣。
 - **`version` 字段的形态**（排期项）：`{version}` url 模板，还是通道清单（对齐 `galaxio-labs/get`）。
 - **回滚失败的兜底**：`prj restore` 自身失败时的退出码与话术（要指出备份归档路径 + 当前中间态）。
 

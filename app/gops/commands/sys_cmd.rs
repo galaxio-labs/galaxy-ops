@@ -13,7 +13,7 @@ use galaxy_ops::project::load_value_file;
 use galaxy_ops::report;
 use galaxy_ops::system::lock::DeliverLock;
 use galaxy_ops::system::operator::SysOperator;
-use galaxy_ops::system::pack::pack_system;
+use galaxy_ops::system::pack::{pack_system_with_files, select_package_files};
 use galaxy_ops::system::{SysKind, SysValuePaths};
 use galaxy_ops::types::{LocalizeOptions, RefUpdateable};
 use orion_infra::path::ensure_path;
@@ -385,8 +385,18 @@ impl SysCommandHandler {
             .await
             .err_conv()?;
 
-        // 生成交付锁：记录系统版本、模块引用与值指纹（随交付包分发，可复现、可回滚）
-        let lock = DeliverLock::build(&current_dir).err_conv()?;
+        // 生成交付锁：记录系统版本、模块引用、值指纹与**包内文件清单**（随交付包分发，
+        // 可复现、可回滚；也是下一次 `prj sync` 清理旧版本残渣的依据）。
+        // 清单必须与打包使用**同一份**文件选择，先选一遍再写锁、再打包。
+        let use_git = !args.full;
+        let files = select_package_files(
+            &current_dir,
+            use_git,
+            operator.conf().pkg_include(),
+            operator.conf().pkg_exclude(),
+        )
+        .err_conv()?;
+        let lock = DeliverLock::build_with_files(&current_dir, &files).err_conv()?;
         lock.save(&current_dir).err_conv()?;
         println!(
             "交付锁已生成: {}",
@@ -407,13 +417,8 @@ impl SysCommandHandler {
         // 3. 打包：默认只含 git 入库文件（不含制品）；`--full` 打整目录（含制品，用于隔离网络）。
         //    两种模式都排除 `sys-prj.yml` 的 `pkg_exclude:` 节（旧名 `ignore`）；
         //    `pkg_include:` 额外补入（主要默认模式，补未被 git 跟踪的生成物；exclude 优先）。
-        pack_system(
-            &current_dir,
-            &out_path,
-            !args.full,
-            operator.conf().pkg_include(),
-            operator.conf().pkg_exclude(),
-        )?;
+        //    用第 1 步选好的同一份清单打包，不再重算一遍。
+        pack_system_with_files(&current_dir, &out_path, &files)?;
         println!("系统已打包: {}", out_path.display());
         Ok(())
     }

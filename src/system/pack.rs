@@ -28,6 +28,23 @@ pub fn pack_system(
     pkg_include: &[String],
     pkg_exclude: &[String],
 ) -> MainResult<()> {
+    let files = select_package_files(root, use_git, pkg_include, pkg_exclude)?;
+    write_archive(root, out, &files)
+}
+
+/// 选出「本次交付包会包含的文件」（相对路径，已排序去重；`deliver.lock` 如存在一并收）。
+///
+/// `pack_system` 与 `gops sys package` 生成 `deliver.lock` 的包内清单**共用**这一份选取逻辑：
+/// 两处各算一遍，git/include/exclude 判定一旦分叉，清单就会与实际包内容对不上（升级时误删/漏删）。
+///
+/// 参数语义与 [`pack_system`] 完全一致：`pkg_include` 只在默认（git）模式下补入，
+/// `pkg_exclude` 在两种模式下**优先于** `pkg_include`。
+pub fn select_package_files(
+    root: &Path,
+    use_git: bool,
+    pkg_include: &[String],
+    pkg_exclude: &[String],
+) -> MainResult<Vec<PathBuf>> {
     let include = compile_path_patterns(pkg_include, "pkg_include")?;
     let exclude = compile_path_patterns(pkg_exclude, "pkg_exclude")?;
 
@@ -61,8 +78,23 @@ pub fn pack_system(
 
     files.sort();
     files.dedup();
-    write_archive(root, out, &files)?;
-    Ok(())
+    Ok(files)
+}
+
+/// 用一份**已选好**的文件清单打包。
+///
+/// 与 [`select_package_files`] 配套使用：`gops sys package` 先选清单 → 用同一份清单写
+/// `deliver.lock.files` → 再用本函数打包，避免「清单」与「实际打包」各算一遍而漂移。
+pub fn pack_system_with_files(root: &Path, out: &Path, files: &[PathBuf]) -> MainResult<()> {
+    let mut files = files.to_vec();
+    // 先选清单、后生成 `deliver.lock` 时，锁文件可能还不在清单里：这里补上。
+    let lock_rel = PathBuf::from(DELIVER_LOCK_FILE);
+    if root.join(&lock_rel).is_file() && !files.iter().any(|f| f == &lock_rel) {
+        files.push(lock_rel);
+    }
+    files.sort();
+    files.dedup();
+    write_archive(root, out, &files)
 }
 
 /// 编译 ignore glob（去空白、去前导 `./`、去首尾 `/`；忽略空串）。
@@ -570,6 +602,61 @@ mod tests {
         assert!(
             !names.iter().any(|n| n == "drop.bin"),
             "exclude 应优先于 include: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_select_package_files_applies_include_exclude_and_adds_lock() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("artifacts")).unwrap();
+        std::fs::write(root.join("artifacts/big.bin"), "x").unwrap();
+        std::fs::write(root.join("deliver.lock"), "lock").unwrap();
+        std::fs::write(root.join("keep.txt"), "k").unwrap();
+        std::fs::write(root.join(".env"), "K=V\n").unwrap();
+
+        let exclude = vec!["artifacts".to_string(), ".env".to_string()];
+        let files = select_package_files(root, false, &[], &exclude).unwrap();
+        assert!(files.contains(&PathBuf::from("keep.txt")));
+        assert!(
+            files.contains(&PathBuf::from("deliver.lock")),
+            "exclude 不得排除交付清单（否则升级清理会失去基线）"
+        );
+        assert!(!files.iter().any(|f| f.starts_with("artifacts")));
+        assert!(!files.contains(&PathBuf::from(".env")));
+
+        // 选取结果 == 实际打进包的文件集合（同一份口径）
+        let out = dir.path().join("out.tar.gz");
+        pack_system_with_files(root, &out, &files).unwrap();
+        let mut names = tar_names(&out);
+        let mut selected: Vec<String> = files
+            .iter()
+            .map(|f| f.to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        selected.sort();
+        assert_eq!(selected, names);
+    }
+
+    #[test]
+    fn test_pack_with_files_adds_lock_created_after_selection() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+
+        // 先选清单（此时还没有 deliver.lock）
+        let files = select_package_files(root, false, &[], &[]).unwrap();
+        assert!(!files.contains(&PathBuf::from("deliver.lock")));
+        // 再用同一份清单写锁（模拟 `sys package` 的顺序）→ 再打包
+        std::fs::write(root.join("deliver.lock"), "lock").unwrap();
+
+        let out = dir.path().join("out.tar.gz");
+        pack_system_with_files(root, &out, &files).unwrap();
+        let names = tar_names(&out);
+        assert!(names.iter().any(|n| n == "a.txt"));
+        assert!(
+            names.iter().any(|n| n == "deliver.lock"),
+            "选清单后才生成的交付锁必须自动入包: {names:?}"
         );
     }
 }

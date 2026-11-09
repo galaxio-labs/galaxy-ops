@@ -63,6 +63,11 @@ pub struct PrjSyncArgs {
     pub debug_log: DebugLogArgs,
     #[clap(flatten)]
     pub force: ForceArgs,
+    #[arg(
+        long = "prune",
+        help = "清理上一版包内有、这一版包外且未本地改动的残渣（默认关闭；升级事务 `prj upgrade` 默认开启）"
+    )]
+    pub prune: bool,
 }
 
 #[derive(Debug, Args, Getters)]
@@ -675,7 +680,13 @@ impl PrjCommandHandler {
         let accessor = galaxy_ops::accessor::accessor_for_default();
 
         // 先做内容同步（缺失系统按包导入；已在系统非破坏覆盖，protect 不动），再更新项目 conf。
-        prj.update_sys_content(accessor.clone(), &options)
+        // `--prune` 才清理「上一版包内、这一版包外」的残渣；默认保持“只覆盖、不删”的契约。
+        let prune = if args.prune {
+            galaxy_ops::ops_prj::update::PruneMode::RemoveStale
+        } else {
+            galaxy_ops::ops_prj::update::PruneMode::Keep
+        };
+        prj.update_sys_content(accessor.clone(), &options, prune)
             .await
             .err_conv()?;
         prj.update_local(accessor, &current_dir, &options)

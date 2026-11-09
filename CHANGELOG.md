@@ -2,8 +2,23 @@
 
 所有重要的项目变更都将记录在此文件中。
 
-格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/),
+格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+
+## [2.11.0-alpha] - 2026-11-09
+
+### 新功能
+
+- **交付锁记录包内文件清单（`deliver.lock` v2）**：`gops sys package` 为包内每个文件/符号链接记录
+  `path + sha256`（不含 `deliver.lock` 自身）。清单与实际打包共用同一份文件选择
+  （`select_package_files`，含 `pkg_include` / `pkg_exclude`），不会出现“清单和包内容各算一遍”的漂移。
+
+### 修复
+
+- **可清理旧版本残渣**：`prj upgrade`（事务，带备份/回滚）覆盖后自动删除「上一版包内有、这一版包外」
+  的文件；`prj sync` 保持原有「只覆盖、不删」契约，需要时显式加 `--prune`。
+  两者都只删**当前内容仍与旧清单一致**（未被本地改动）且不在 `protect:` 里的文件；
+  本地改过的保留并在报告里列出（`kept_modified`）。v1 锁没有清单，首轮不清理，由新版锁建立基线。
 
 ## [2.10.13-alpha] - 2026-11-09
 

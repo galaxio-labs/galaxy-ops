@@ -6,7 +6,7 @@ use galaxy_ops::{
     const_vars::{OPS_PRJ_ROOT, SYS_OPERATORS_ROOT, VALUE_DIR},
     error::MainResult,
     module::depend::{Dependency, DependencySet},
-    ops_prj::project::OpsProject,
+    ops_prj::{project::OpsProject, update::PruneMode},
     system::{SysValuePaths, operator::SysOperator, spec::SysModelSpec},
     types::{InsUpdateable, LocalizeOptions, RefUpdateable},
 };
@@ -133,7 +133,11 @@ async fn test_full_flow() -> MainResult<()> {
     let imported_sys = ops_proj.root_local().join("example_sys_x");
     std::fs::remove_dir_all(&imported_sys).source_resource()?;
     let reports = ops_proj
-        .update_sys_content(accessor_for_test(), &DownloadOptions::for_test())
+        .update_sys_content(
+            accessor_for_test(),
+            &DownloadOptions::for_test(),
+            PruneMode::Keep,
+        )
         .await?;
     assert!(
         reports

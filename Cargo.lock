@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "galaxy-ops"
-version = "2.10.13"
+version = "2.11.0"
 dependencies = [
  "anyhow",
  "async-trait",

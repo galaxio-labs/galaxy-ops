@@ -161,8 +161,10 @@ backup:
 - **运行期保留（retention/GC）不属于本方案**：`discard` 已取消，那 11 GB/天 的采集日志由系统侧自己轮转，
   或另立一条带阈值的保留声明（见 §9.1）。
 - `prj doctor` → `prj diagnose` 的别名策略：保留隐藏别名，还是直接断（进 breaking 表）。
-- **`deliver.lock` 要不要记“包内文件清单”**：`prj sync` 想顺带删掉“上一版包内、这一版包外”的文件
-  （不删会留旧版本残渣），但需要知道上一版的文件清单；现在 `deliver.lock` 只记 `merged_vars.yml` / `values/` 的摘要。
+- ✅ **`deliver.lock` 记“包内文件清单”**（已定，2026-11-09）：v2 锁记 `files`（`path + sha256`，
+  不含 `deliver.lock` 自身）。`prj upgrade`（事务）与 `prj sync --prune` 据此清理旧版本残渣：
+  仅删**未本地改动**、且不在 `protect:` 里的文件；本地改过的保留并报告（`kept_modified`）。
+  `prj sync` 默认仍为「只覆盖、不删」；v1 锁无清单 → 首轮不清理。
 - `values/` 是否显式写进 `protect`（现为隐式特例）。
 
 ## 9. 附：由本方案暴露、但独立处理的两个现场问题

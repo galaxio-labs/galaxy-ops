@@ -1457,8 +1457,34 @@ fn apply_item_for(item: &ItemReport, mount: &BindMount, deploy_uid: u32) -> Resu
                 path.display()
             ));
         }
+        // `create_dir_all` 会把缺失的**祖先**也建出来，用的是 umask 默认（0775，且会继承父目录的
+        // setgid）。只 chmod 叶子的话，`--apply` 会报“全部对齐”，下一次 `--check` 又冒出待修项
+        //（2026-11-09 Linux 实测：`identity/gateway/{private,public}` 停在 2775）。
+        // 只收敛**本次新建**的祖先：已存在的父目录仍然不碰（perms 的既有边界）。
+        let mut created: Vec<PathBuf> = Vec::new();
+        let mut cursor = path.parent();
+        while let Some(dir) = cursor {
+            if dir.exists() {
+                break;
+            }
+            created.push(dir.to_path_buf());
+            cursor = dir.parent();
+        }
         std::fs::create_dir_all(path)
             .map_err(|e| format!("创建挂载源 {} 失败：{e}", path.display()))?;
+        let dir_mode = expected_mode(mount.read_only, true);
+        for dir in created.iter().rev() {
+            // 属主/属组与叶子同一个口径；chown 失败不单独报（随后的 chmod 会暴露真正的权限问题）。
+            let _ = std::os::unix::fs::chown(dir, Some(deploy_uid), Some(mount.container.gid));
+            std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(dir_mode))
+                .map_err(|e| {
+                format!(
+                    "chmod 父目录 {} 到 {} 失败：{e}",
+                    dir.display(),
+                    format_mode(dir_mode)
+                )
+            })?;
+        }
     }
     let mode = item.expected_mode;
 
@@ -3199,6 +3225,47 @@ mod tests {
         assert!(source.is_dir());
         let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o2770);
+
+        // 连带新建的**祖先**也要按同一口径收敛，否则 “apply 说对齐了、check 又说 pending”。
+        let parent = source.parent().expect("parent");
+        let parent_mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(parent_mode, 0o2770, "父目录 {} 未收敛", parent.display());
+        // 幂等：再扫一遍不应再有 pending。
+        let again = scan_mount(&m, deploy).unwrap();
+        assert!(
+            again.iter().all(|i| i.status == ItemStatus::Aligned),
+            "{again:?}"
+        );
+    }
+
+    /// 缺失的挂载源是**文件**（如 `admin-tls.key.pem`）时，`create_dir_all` 会把它建成
+    /// 同名目录（与 docker 行为一致），**并连带建出祖先链**。祖先链必须一起收敛，
+    /// 否则 apply 后 check 仍有 pending（2026-11-09 在 Linux 上实测到的就是这个）。
+    #[test]
+    fn test_apply_creating_missing_file_source_aligns_parent_chain() {
+        let dir = tempdir().unwrap();
+        let source = dir
+            .path()
+            .join("identity/gateway/private/admin-tls.key.pem");
+        let m = mount(&source, true, current_id());
+        let deploy = deploy_identity().0;
+
+        let items = scan_mount(&m, deploy).unwrap();
+        assert_eq!(items[0].status, ItemStatus::Pending);
+        apply_item(&items[0], &m, deploy).unwrap();
+
+        for p in [
+            source.parent().expect("private"),
+            source.parent().unwrap().parent().expect("gateway"),
+        ] {
+            let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, 0o2750, "{} 未收敛", p.display());
+        }
+        let again = scan_mount(&m, deploy).unwrap();
+        assert!(
+            again.iter().all(|i| i.status == ItemStatus::Aligned),
+            "{again:?}"
+        );
     }
 
     #[test]
